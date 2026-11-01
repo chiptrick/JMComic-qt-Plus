@@ -443,6 +443,28 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 **C0 剩余两项**（照原判据）：① curl-impersonate Android 自编跑通真实请求；③ `libsr_qnn.so` 直接链接。
 两项全过 → 进入 C1（壳+导航+设置+本地阅读器，8 周）。
 
+### 更新 21（2026-11-01，判定实验出结果）：**C0-③ 通过 —— `libsr_qnn.so` 被 Qt C++ 主程序直链并在 Android 17 上加载成功**
+
+实现（`android/c0_skeleton/`）：IMPORTED 共享库方式引入 `libs/<abi>/libsr_qnn.so`（与 Python repack
+同一批 0x4000 产物，`SRQ_LIBS_DIR` 可覆盖）+ `QT_ANDROID_EXTRA_LIBS` 兜底打包 + 启动时
+`dlopen("libsr_qnn.so", RTLD_NOLOAD)` 验证常驻，结果同时打 logcat（tag `C0Skeleton`）和显示在 UI 上。
+
+实测（同台 Pixel_9a / SDK 37 / 16KB，x86_64 包 67.4MB）：
+
+| 项 | 结果 |
+|---|---|
+| lib 门禁 | **13 对齐 / 0 未对齐**（新增 libsr_qnn、libonnxruntime 均 0x4000） |
+| 安装/启动 | Success / `Status: ok` / pid 存活 / 对齐错误 **0 条** |
+| 直链验证 | logcat `sr_qnn direct-link OK, handle=0x…`；UI 显示 `libsr_qnn.so loaded: YES` |
+
+**结论：C0-③ 记 GO。** `libsr_qnn.so`（NEEDED 仅 `libonnxruntime.so` + 系统库；QNN 后端是运行期
+dlopen 的）与 Qt 库无符号/ABI 冲突，C1 的"壳直接调超分"链路成立。C0 仅剩 **C0-①（curl-impersonate）**：
+调研发现 curl_cffi 的 Android wheel 里可能自带编译好的 libcurl-impersonate（arm64 的
+`libc++_shared-d523468d.so` 即出自该 wheel），若对齐合规且导出 C API，可从"自编数天"缩为"验证半天"——
+路径决策待定（A 复用 wheel / B 自编 / C 分叉）。
+
+构建脚本补充坑：host Qt 的 moc 在 `libexec/`（不在 `bin/`）；`gradle.properties` 由 make_apk 首次生成，
+补丁须在"第一次构建后、第二次构建前"打（build_wsl.sh 已改为两遍构建收敛）。
 
 ### 更新 19（2026-11-01，订正更新 18）：**Qt 6.12 Android kit 官方存在，已取得并验证**
 

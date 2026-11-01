@@ -38,7 +38,7 @@ export PATH="$GRADLE/bin:$PATH"
 export LD_LIBRARY_PATH="$HOME/jmcomic-build/venv311/lib/python3.11/site-packages/PySide6/Qt/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=/opt/java-ca.jks -Djavax.net.ssl.trustStorePassword=changeit"
 
-for f in "$QT_ANDROID/bin/qt-cmake" "$QT_HOST/bin/moc" "$SDK/platforms/android-36" "$NDK/ndk-build"; do
+for f in "$QT_ANDROID/bin/qt-cmake" "$QT_HOST/libexec/moc" "$SDK/platforms/android-36" "$NDK/ndk-build"; do
   [ -e "$f" ] || { echo "[fail] 缺前置: $f（见脚本头注释）"; exit 1; }
 done
 
@@ -56,11 +56,16 @@ rm -rf "$BUILD"
   -DCMAKE_BUILD_TYPE=Debug \
   -DQT_HOST_PATH="$QT_HOST"
 
+# gradle.properties / wrapper 由 make_apk 步骤按配置首次生成（已存在则不改）。
+# 所以：先完整构建一次（若 Qt 默认 compileSdk=34 被 androidx 拒收会失败，但配置文件已生成），
+# 再打补丁、再构建一次 → 确定性收敛。
+cmake --build "$BUILD" || true
+
 # Qt 默认 compileSdk=android-34，被 androidx.core:1.17.0 拒收（要求 >=36）
-sed -i 's/androidCompileSdkVersion=.*/androidCompileSdkVersion=android-36/' "$BUILD/android-build/gradle.properties"
+sed -i 's/androidCompileSdkVersion=.*/androidCompileSdkVersion=android-36/' "$BUILD/android-build/gradle.properties" 2>/dev/null || true
 # wrapper 默认源经代理 TLS 失败 → 腾讯镜像
 sed -i 's|distributionUrl=.*|distributionUrl=https\\://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip|' \
-  "$BUILD/android-build/gradle/wrapper/gradle-wrapper.properties"
+  "$BUILD/android-build/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null || true
 
 cmake --build "$BUILD"
 
