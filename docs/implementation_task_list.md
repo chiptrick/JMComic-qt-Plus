@@ -399,6 +399,28 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 - 字段：lib 门禁 未对齐=0；bundle 门禁 0 或 N/A；avd_verify 的 进程存活 非空、16KB 库加载=0 条；
 - 判负：任一门禁在 C++ 空壳上不过 → C0 记 No-Go(16KB 项)，重新决策"等上游 / 自编 shiboken"。
 
+### 更新 18（2026-11-01，环境探路）：C0-②′ 的第一道坎是 **Qt 6.12 Android 开发 kit 的来源**，已排除两条路
+
+为了给 C0-②′ 备环境，实测了两条获取路径，**都不通**（这本来就是 C0 要回答的"工具链问题"，提前踩掉了）：
+
+1. **Qt 官方在线仓库（download.qt.io）**：`online/qtsdkrepository/linux_x64/android/` 的 release kit **最高只到 6.7.3**
+   （目录只有 qt6_663*、qt6_7_0~7_3、qt6_dev*；无 qt6_68+/qt6_612*；`android/qt6_6120` 实测 404）。
+   `desktop/qt6_612/`（附加库仓库）与 `desktop/qt6_6120/qt6_6120/` 组件清单里 **android 组件为 0 个**。
+   即：**aqt / 在线安装器装不到 Qt 6.12 for Android**（aqt 报 "Failed to locate XML data" 的根因是目录缺失，不是镜像不同步——官方源同样没有）。
+2. **PySide6 Android wheel**（`~/jmcomic-build/wheelhouse/x86_64/pyside6-6.12.0-…-android_x86_64.whl`，87MB）：
+   只含**运行时**——`lib/`（156 个 Qt .so，已验证 16384 对齐）、libexec、plugins、qml、translations；
+   **没有** include/、lib/cmake/、mkspecs、android/ gradle 模板、bin/ host 工具 → **不能**用于 C++ 交叉编译。
+
+**留给 C0-②′ 的三条候选渠道（开工第一件事就是定这条）**：
+- ① 查 Qt 6.8+ 仓库结构调整后的真实位置（Qt 官方在线安装器在 6.8+ 确实仍提供 Android 组件，
+  位置变了；查 aqtinstall 的 issue / Qt 安装器 Updates.xml 索引即可定位）；
+- ② 若 ① 确认开源渠道不再发 Android 预编译 kit → 用 **Qt 6.7.3 kit 先做初判**，
+  但必须**先实测 6.7.3 的 Qt .so 对齐**（旧 NDK 出品，可能是 0x1000）——若不合规，实验失真，只能作"流程演练"；
+- ③ 极端兜底：从源码交叉编译 Qt android（量级大，仅在 ①② 都失败时立项）。
+
+**对工期的影响**：C0-②′ 的 2~4 天估算里，"kit 获取"可能占掉 1 天。这是 C0 该有的摩擦，不改变 Go/No-Go 判据。
+
+
 ---
 
 ## 1. 勘察与方案假设的差异清单（先对齐事实）
