@@ -177,3 +177,7 @@ android/logs/
 # 本机路径配置（模板 local.env.example 入库，实际配置不入库）
 android/tools/local.env
 android/.p4a-src/
+
+# 基准留档：APK 本体不入库（只会误被 git add -A 拖进 805MB），
+# 长期保留的是 docs/bench_raw/**/README.md 里的 sha256 与来源。
+docs/bench_raw/**/*.apk
