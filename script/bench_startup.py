@@ -156,6 +156,9 @@ def Main():
     if args.runs < 1:
         parser.error("--runs 必须 >= 1")
     bc.RequireRss()
+    # 父进程自己也要落到 offscreen：`env.qt_platform` 读的是 os.environ，
+    # 只给子进程传（bc.QtEnv）会让结果里这条空着 —— 空着就没人能复现平台条件。
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     problem = Preflight(args)
     if problem:
         sys.stderr.write("[error] {}\n".format(problem))

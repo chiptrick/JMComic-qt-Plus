@@ -206,10 +206,12 @@ def VersionFromWheel(path):
 
 
 def CollectQt(root, qtWheel=""):
-    """优先级：JM_QT_VERSION > 显式给的 wheel > android/wheels 里的 wheel > import PySide6
+    """优先级：JM_QT_VERSION > 显式给的 wheel > android/wheels 里的 wheel
 
-    wheel 优先于 import：构建机 venv 里装的 PySide6 是**宿主**版本（旧链路是 6.11.2），
-    与实际打进 APK 的 wheel 不是一回事，用 import 会写出误导性的版本。
+    **刻意不 fallback 到 `import PySide6.__version__`**：构建机 venv 里装的是**宿主**
+    PySide6（旧链路 6.11.2），跟真正打进 APK 的 wheel（6.12.0）不是一回事；拿它填
+    qt_version 会写出一个"看起来有值、其实是别人版本"的假数据 —— 这类错误不报错，
+    只在事后复盘时把人带偏。读不到就写 null，让消费方知道"这项没验证过"。
     """
     value = (os.environ.get("JM_QT_VERSION") or "").strip()
     if value:
@@ -222,11 +224,7 @@ def CollectQt(root, qtWheel=""):
         found = VersionFromWheel(path)
         if found:
             return found
-    try:
-        import PySide6
-        return getattr(PySide6, "__version__", None)
-    except Exception:
-        return None
+    return None
 
 
 def CollectP4a(root):

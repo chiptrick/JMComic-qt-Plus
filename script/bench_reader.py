@@ -89,29 +89,92 @@ def SetLabelReal(label, index):
     label.setText(str(index + 1))
 
 
+def IsAlive(obj):
+    """ Qt 对象是否还活着
+
+    QGraphicsScene 接管 `addItem()` 传入对象的所有权，`scene.clear()` 会把它们
+    delete 掉；此后再碰这些包装对象（哪怕只是 `item.widget()`）就会 RuntimeError
+    "already deleted"。`shiboken6.isValid` 是判"包装对象是否还有效"的正规手段，
+    没有 shiboken 时退回"碰一下看看抛不抛"。
+    """
+    try:
+        from shiboken6 import isValid
+        return bool(isValid(obj))
+    except Exception:
+        try:
+            obj.objectName()
+            return True
+        except Exception:
+            return False
+
+
 class ProxyPool(object):
-    """ 复刻 QtReadImgPoolManager：池里没有才新建，用完放回 """
+    """ 复刻 QtReadImgPoolManager：池里没有才新建，用完放回
+
+    ⚠ 生命周期铁律：**绝不能把已销毁的对象留在池里**。
+    QA 复现的 `--warm-pool` 崩溃（`already deleted: QGraphicsProxyWidget(0x…)`）
+    就是 `scene.clear()` 先销毁对象、池里还留着引用造成的。所以：
+      * 上一轮的 item 用 `scene.removeItem()` 逐个摘下（不销毁），而不是 `scene.clear()`；
+      * `Get()` / `Recycle()` 都用 `IsAlive()` 过滤，脏引用一律丢弃并计数。
+    """
 
     def __init__(self, factory):
         self._factory = factory
         self.items = []
+        self.dropped = 0        # 被丢弃的失效对象数（>0 说明哪里的生命周期被破坏了）
 
     def Get(self):
-        if not self.items:
-            return self._factory()
-        return self.items.pop()
+        while self.items:
+            item = self.items.pop()
+            if IsAlive(item):
+                return item
+            self.dropped += 1
+        return self._factory()
+
+    def TakeAll(self):
+        """ 取走池里所有可用对象（用于把池彻底清干净） """
+        alive, dead = [], 0
+        for item in self.items:
+            if IsAlive(item):
+                alive.append(item)
+            else:
+                dead += 1
+        self.dropped += dead
+        self.items = []
+        return alive
 
     def Recycle(self, items):
+        """ 放回池；失效对象直接丢弃（留在池里下一轮必崩，见类注释） """
         for item in items:
-            item.setPos(0, 0)
-        self.items.extend(items)
+            if not IsAlive(item):
+                self.dropped += 1
+                continue
+            try:
+                item.setPos(0, 0)
+            except Exception:
+                self.dropped += 1
+                continue
+            self.items.append(item)
 
 
-def BuildScene(view, scene, pagePixmap, pages, radius, factory, pool, mode, raw):
-    """ 按 mode 建 N 页，返回 (建场毫秒, 建场+事件毫秒) """
+def BuildScene(view, scene, pagePixmap, pages, radius, factory, pool, mode, raw,
+               previous=(), recycle=False):
+    """ 按 mode 建 N 页，返回 (建场毫秒, 建场+事件毫秒, 本轮 items)
+
+    上一轮 items 的处理方式决定了 `--warm-pool` 能不能用：
+      * 逐个 `scene.removeItem()`（**不销毁**）→ 池可以安全复用；
+      * `recycle=True` 时才放回池，`False`（冷池口径）直接丢引用让它们被 GC。
+    用 `scene.clear()` 会销毁对象，池里就只剩悬空引用 —— 这正是 QA 报的崩溃根因。
+    """
     from PySide6.QtWidgets import QApplication
 
-    scene.clear()
+    for item in previous:
+        try:
+            scene.removeItem(item)      # 只摘下来，不 delete
+        except Exception:
+            pass
+    if recycle and pool is not None:
+        pool.Recycle(previous)
     view.viewport().update()
     QApplication.processEvents()
 
@@ -202,25 +265,27 @@ def Main():
 
     # 预热一次（不计入样本）：第一次建场景要触发布局/字体/Qt 插件的一次性初始化，
     # 混进样本会让 p50 被"第一次"带偏（实测首次 24ms、之后 6~8ms）。
-    _, _, warmItems = BuildScene(view, scene, pagePixmap, args.pages, radius,
-                                 ReadQGraphicsProxyWidget, pool, args.mode, raw)
-    if not args.warm_pool:
-        pool = ProxyPool(ReadQGraphicsProxyWidget)      # 冷池：模拟"第一次开章"
-    else:
-        pool.Recycle(warmItems)
+    # 预热用的 item 不回收（冷池口径），但**必须交回 previous** —— BuildScene 会
+    # 先把它们从场景里摘下来，否则它们会一直留在场景里、和后面新建的页重叠。
+    _, _, previous = BuildScene(view, scene, pagePixmap, args.pages, radius,
+                                ReadQGraphicsProxyWidget, pool, args.mode, raw)
     rssBase = bc.SelfRssMb()
 
     builds, buildsWithEvents = [], []
     for index in range(args.runs):
-        buildMs, withEventsMs, items = BuildScene(view, scene, pagePixmap, args.pages, radius,
-                                                  ReadQGraphicsProxyWidget, pool, args.mode, raw)
+        # --warm-pool：把上一轮的 item 摘下来 → 回收进池 → 下一轮直接复用（模拟连续翻章）；
+        # 默认冷池：摘下来就丢引用（模拟"第一次开章"，池是空的）
+        buildMs, withEventsMs, previous = BuildScene(
+            view, scene, pagePixmap, args.pages, radius,
+            ReadQGraphicsProxyWidget, pool, args.mode, raw,
+            previous=previous, recycle=bool(args.warm_pool))
         builds.append(buildMs)
         buildsWithEvents.append(withEventsMs)
         sys.stderr.write("  run {}/{}: 建 {} 页 {:.1f} ms (含事件 {:.1f} ms)\n".format(
             index + 1, args.runs, args.pages, buildMs, withEventsMs))
-        if args.warm_pool:
-            pool.Recycle(items)
 
+    # 池里如果有对象是因为生命周期被破坏才失效的，这里会 >0 —— 有值就说明哪儿写错了
+    dropped = pool.dropped
     rssAfter = bc.SelfRssMb()
     result = {
         "metric": "reader_build",
@@ -228,6 +293,7 @@ def Main():
         "pages": args.pages,
         "runs": args.runs,
         "warm_pool": bool(args.warm_pool),
+        "pool_dropped_invalid": dropped,
         "viewport": {"w": args.width, "h": args.height},
         "page": {"w": PAGE_W, "h": PAGE_H},
         "reader_build_ms": bc.Stats(builds),

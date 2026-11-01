@@ -312,10 +312,10 @@ if [ "${BUILDOZER_RC}" -ne 0 ]; then
     exit 1
 fi
 
-echo "===== [$(date +%T)] 4.5 校验 APK：Qt 加载清单 vs 包内 .so ====="
-# 0.47 事故复盘：QtLoader 按 libs.xml 的清单逐个 loadLibrary，清单里有而包里没有
-# 的库(QtTest.abi3.so)会让应用"装完即闪退"，且日志里只有一行 E QtLoader，
-# 极容易被误判成环境问题。这里在收集产物前把清单和产物对一遍，不一致就 fail。
+echo "===== [$(date +%T)] 4.4 选定本次产物 ====="
+# 顺序要紧：**先**选包并打印"本次产物"，再进入 4.5 的校验标题。
+# 反过来的话日志会先出现"4.5 校验 APK"，然后才说"本次产物是哪个"，
+# 排查时读起来像"校验了一个还没确定的东西"（QA 反馈的实际困惑）。
 NEW_APK=""
 # 只认"本次构建开始之后"的产物：-printf '%T@ %p' 后按时间倒序，旧包即使更新也不会入选。
 NEW_APK_ALL=$(find "$ANDROID" -maxdepth 4 -name '*.apk' -newer "$BUILD_MARKER" -printf '%T@ %p\n' 2>/dev/null \
@@ -335,7 +335,13 @@ if [ -z "$NEW_APK" ]; then
 fi
 echo "本次产物: $NEW_APK"
 echo "          mtime=$(date -r "$NEW_APK" '+%Y-%m-%d %H:%M:%S')  字节=$(stat -c %s "$NEW_APK")"
+
+echo "===== [$(date +%T)] 4.5 校验 APK：Qt 加载清单 vs 包内 .so ====="
+# 0.47 事故复盘：QtLoader 按 libs.xml 的清单逐个 loadLibrary，清单里有而包里没有
+# 的库(QtTest.abi3.so)会让应用"装完即闪退"，且日志里只有一行 E QtLoader，
+# 极容易被误判成环境问题。这里在收集产物前把清单和产物对一遍，不一致就 fail。
 AAPT_BIN=$(ls "$SDK"/build-tools/*/aapt 2>/dev/null | sort -V | tail -1)
+
 "$VPY" "$ANDROID/tools/check_apk_qt_libs.py" "$NEW_APK" --abi "$JM_ABI" --aapt "$AAPT_BIN" || {
     echo "[FATAL] APK 校验失败：加载清单与包内 .so 不一致，这个包装上去会闪退"
     echo "        排查：aapt dump --values resources 看 array/qt_libs 与 array/load_local_libs"

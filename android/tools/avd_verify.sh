@@ -30,6 +30,9 @@
 # 它会把 N/A 变成 FAIL，供"16KB 专项"那一轮使用。
 #
 # 判定口径（都是"退出码 + 产物 + 日志关键字"三者合判，不看单一信号）：
+#   * 安装失败 → **立即收尾 exit 1**，后面的首帧/存活/PSS 一律不跑。原因：装不上时
+#     这些项测的是设备上**上一次装的那个旧版本**，会产出一份"看起来在测本次产物、
+#     实际在测旧包"的报告 —— 那是 MSI（误导性成功指标），比直接失败更糟。
 #   * 首帧：`am start -W` 的 TotalTime（没有就用 WaitTime，实测值里标出来源）。
 #     注意它是"adb 视角的 Activity 启动耗时"，不等于渲染首帧，也不等于设备端冷启体验。
 #   * 16KB：一票否决。除了 check_16kb_device.sh 的设备页大小/兼容标记，
@@ -123,12 +126,55 @@ add_row() { ROWS+=("$1|$2|$3|$4"); [ "$4" = "FAIL" ] && FAILED=$((FAILED + 1)); 
 echo "-> adb install -r（覆盖安装，保留数据）"
 INSTALL_OUT="$(adbs install -r "${APK}" 2>&1)"
 INSTALL_RC=$?
+INSTALL_OK=1
 if [ ${INSTALL_RC} -ne 0 ] || printf '%s' "${INSTALL_OUT}" | grep -qi "Failure"; then
     echo "${INSTALL_OUT}" | tail -5 | sed 's/^/   /'
     add_row "安装 (adb install -r)" "失败" "Success" "FAIL"
+    INSTALL_OK=0
 else
     echo "${INSTALL_OUT}" | tail -2 | sed 's/^/   /'
     add_row "安装 (adb install -r)" "Success" "Success" "PASS"
+fi
+
+# 安装失败必须**立刻收尾**：后面每一项（首帧/进程存活/PSS/16KB/截图）都会去测
+# 设备上**上一次装的那个旧版本** —— 于是产出一份"看起来在测本次产物、其实在测旧包"
+# 的报告。这比直接失败更糟：它是 MSI（误导性成功指标）。
+# 所以：失败 → 打一张只有"安装 FAIL + 未执行"的表，然后 exit 1。
+if [ "${INSTALL_OK}" != "1" ]; then
+    echo
+    echo "=========================================================="
+    echo " 验收结果（安装失败，后续项一律未执行）"
+    echo "=========================================================="
+    printf '%s\n' "${ROWS[@]}" | python3 -c '
+import sys, unicodedata
+
+def width(text):
+    total = 0
+    for ch in text:
+        total += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return total
+
+def pad(text, target):
+    return text + " " * max(0, target - width(text))
+
+rows = [line.rstrip("\n").split("|") for line in sys.stdin if line.strip()]
+header = ["项目", "实测值", "阈值", "结论"]
+body = [header] + rows
+cols = [max(width(r[i]) if i < len(r) else 0 for r in body) for i in range(4)]
+print(" | ".join(pad(header[i], cols[i]) for i in range(4)))
+print("-+-".join("-" * c for c in cols))
+for row in rows:
+    cells = [(row[i] if i < len(row) else "") for i in range(4)]
+    print(" | ".join(pad(cells[i], cols[i]) for i in range(4)))
+' || echo "  （表格渲染失败）"
+    echo
+    echo " 未执行: 首帧 / 进程存活 / 崩溃日志 / PSS / 16KB 兼容 / 截图"
+    echo " 原因: APK 没装上，这些项只会测到设备上已有的旧版本，结论无意义。"
+    echo " 排查: ①签名/降级冲突 → 先 adb uninstall ${PKG} 再试"
+    echo "       ②空间不足 → adb shell df -h /data"
+    echo "       ③ABI 不符 → aapt dump badging ${APK} | head -1"
+    echo " 结论: FAIL（安装失败）"
+    exit 1
 fi
 
 # ---------------------------------------------------------------- 2. 冷启动 + TotalTime
