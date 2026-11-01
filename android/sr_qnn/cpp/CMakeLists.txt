@@ -45,13 +45,6 @@ target_link_libraries(sr_qnn PRIVATE ${ONNXRUNTIME_LIB} dl)
 
 if(ANDROID)
     target_link_libraries(sr_qnn PRIVATE log android)
-
-    # 16KB 页对齐：NDK r28+ 默认就是 16384，这里显式写死是为了用 r26/r27 时
-    # 也能产出合规库（Android 15 起有 16KB 页设备，不对齐只能靠系统兼容模式跑）。
-    # 校验：python android/tools/check_elf_page_align.py <apk>
-    target_link_options(sr_qnn PRIVATE
-        "-Wl,-z,max-page-size=16384"
-        "-Wl,-z,common-page-size=16384")
 endif()
 
 # 注意：不能加 -fvisibility=hidden，否则 ctypes 找不到 srq_* 符号
@@ -93,3 +86,25 @@ set_target_properties(sr_qnn_proc PROPERTIES
     OUTPUT_NAME "sr_qnn_proc"
     BUILD_RPATH "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
+
+# ---------------------------------------------------------------------------
+# 16KB 页对齐：**所有**产出都会进 APK 的 target 一起加，别只加一个。
+#
+# 为什么集中写成一个循环：0.88 之前这里只给 `sr_qnn` 加了参数，`sr_qnn_proc`
+# 作为第二个 target 被漏掉，结果整包 194 个库全对齐、只剩 libsr_qnn_proc.so 是 4096
+# （p_align=4096 → 16KB 设备上 dlopen 直接失败）。以后再加 target，只要登记进
+# SRQ_APK_TARGETS 就不会再漏 —— 这正是当初踩坑的原因，写死在这消掉。
+#
+# NDK r28+ 默认就是 16384；这里显式写死是为了用 r26/r27 时也能产出合规库。
+# 注意：两个参数都要给 —— 只给 max-page-size 时 lld 仍可能把 common page 按 4096
+# 排布，`PT_LOAD.Alig` 看起来对了但段内偏移会踩到"offset/vaddr 不同余"。
+# 校验：python android/tools/check_elf_page_align.py <apk|libs 目录>
+set(SRQ_APK_TARGETS sr_qnn sr_qnn_proc)
+if(ANDROID)
+    foreach(_target IN LISTS SRQ_APK_TARGETS)
+        target_link_options(${_target} PRIVATE
+            "-Wl,-z,max-page-size=16384"
+            "-Wl,-z,common-page-size=16384")
+    endforeach()
+endif()
+
