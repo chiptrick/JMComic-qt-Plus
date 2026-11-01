@@ -420,6 +420,30 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 
 **对工期的影响**：C0-②′ 的 2~4 天估算里，"kit 获取"可能占掉 1 天。这是 C0 该有的摩擦，不改变 Go/No-Go 判据。
 
+### 更新 20（2026-11-01，判定实验出结果）：**C0-②′ 通过 —— C++ 空壳在 Android 17（16KB）上全绿，Python 轨道做不到的它做到了**
+
+环境补齐后实测（同台 `Pixel_9a` / SDK 37 / PAGE_SIZE=16384，与 0.88 Python 包**同一台设备**）：
+
+| 项 | 0.88 Python 包 | C0 C++ 空壳 |
+|---|---|---|
+| lib 门禁 | 195/0/1 ✅ | **11/0/0 ✅**（且 extractNativeLibs=false，连 ZIP 对齐一并校验） |
+| bundle 门禁 | ❌ shiboken 0x1000（上游） | **N/A（无 Python 运行时）** |
+| Android 17 启动 | `System.exit(-1)`，进程死亡 | **`Status: ok` / pid 存活 / 截图 UI 正常渲染** |
+| 对齐相关日志 | shiboken dlopen 失败 | **0 条** |
+
+**结论：C 轨道绕开 shiboken 上游阻塞成立 —— C0-②′ 记 GO。**（另：6.12 起 Activity 绑定类改名
+`org.qtproject.qt.android.bindings.QtActivity`（不再是 qt5），取证脚本要注意。）
+
+踩坑全记录（已固化进 `android/c0_skeleton/build_wsl.sh` 的注释，工具链四件套齐了：Android kit + host Qt + platform-36 + Gradle 9.8.2）：
+1. kit 在 `all_os/android/` 新布局（aqt 旧版查不到）；host Qt 走清华镜像（官方源代理 3MB/min）；
+2. host 的 androiddeployqt 借 PySide6 桌面轮子的 ICU 73（LD_LIBRARY_PATH）；
+3. JVM CA → `/opt/java-ca.jks`；gradle wrapper distributionUrl → 腾讯镜像；
+4. Qt 默认 compileSdk=android-34 被 androidx.core:1.17.0 拒收 → gradle.properties 改 android-36。
+
+**C0 剩余两项**（照原判据）：① curl-impersonate Android 自编跑通真实请求；③ `libsr_qnn.so` 直接链接。
+两项全过 → 进入 C1（壳+导航+设置+本地阅读器，8 周）。
+
+
 ### 更新 19（2026-11-01，订正更新 18）：**Qt 6.12 Android kit 官方存在，已取得并验证**
 
 用户要求核实后，在官方仓库新布局里找到了 kit（**更新 18 的"两条路都不通"结论作废**）：
