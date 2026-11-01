@@ -127,7 +127,49 @@ class SettingView(QtWidgets.QWidget, Ui_SettingNew):
 
         self.msgLabel.setVisible(False)
 
+        # 设置页最底部的"关于 / 构建信息"：内容来自 APK 里的 assets/build-info.json
+        self.InitBuildInfoBox()
+
         # self.dohButton.clicked.connect(self.OpenDohView)
+
+    def InitBuildInfoBox(self):
+        """ 在设置页最底部加一块只读的构建信息（可复制）
+
+        为什么要在这里放：反馈"装完闪退/超分没走 NPU/16KB 兼容模式"这类问题时，
+        第一句要问的就是"这个包用什么 NDK/JDK/Qt 编的"。以前只能靠人的记忆，
+        现在它跟着包走，用户在设置页就能复制出来。
+        实现上**只往内容布局末尾追加一个 QFrame**，不碰 ui 文件里任何已有控件，
+        所以现有布局不受影响。
+        """
+        try:
+            from config import build_info
+            text = build_info.Summary()
+        except Exception as es:
+            # 读构建信息失败绝不能影响设置页本身（它只是辅助信息）
+            Log.Error(es)
+            return
+        try:
+            frame = QtWidgets.QFrame(self.scrollAreaWidgetContents)
+            frame.setObjectName("aboutFrame")
+            layout = QtWidgets.QVBoxLayout(frame)
+            title = QtWidgets.QLabel("关于 / 构建信息（可复制）", frame)
+            layout.addWidget(title)
+            # QPlainTextEdit 只读 + 可选中复制：手机上长按也能复制，
+            # 比 QLabel 的 TextSelectable 在不同主题/缩放下的表现更稳。
+            textBox = QtWidgets.QPlainTextEdit(frame)
+            textBox.setObjectName("aboutBuildInfo")
+            textBox.setPlainText(text)
+            textBox.setReadOnly(True)
+            textBox.setFrameShape(QtWidgets.QFrame.NoFrame)
+            textBox.setMinimumHeight(88)
+            textBox.setMaximumHeight(180)
+            layout.addWidget(textBox)
+            self.buildInfoText = textBox
+            # 追加到内容布局末尾 = 设置页最底部；setWidgetResizable 会自动撑高滚动区
+            self.verticalLayout_4.addWidget(frame)
+        except Exception as es:
+            Log.Error(es)
+        return
 
     def MoveToLabel(self, label):
         p = label.pos()

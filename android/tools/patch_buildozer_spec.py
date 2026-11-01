@@ -16,6 +16,10 @@
     # 模拟器(x86_64)：
     python android/tools/patch_buildozer_spec.py android/buildozer.spec --abi x86_64 \
         --libs android/libs/x86_64 ...
+
+    # 只把构建工具链信息(build-info.json)放进 assets，别的键一个都不碰：
+    python android/tools/patch_buildozer_spec.py android/buildozer.spec \
+        --assets-only --build-info android/build_logs/build-info.json
 """
 import argparse
 import os
@@ -220,6 +224,60 @@ def MergeExts(current, wanted):
     return ",".join(items)
 
 
+# 构建工具链信息在 APK 内的落点名(Qt 侧按 assets:/ 读，见 src/config/build_info.py)
+BuildInfoAssetDest = "build-info.json"
+
+
+def MergeAssets(current, srcPath, destName):
+    """ 把一条**文件**资产并进 android.add_assets 列表(幂等)
+
+    buildozer 把该键按逗号切成多条 --add-asset，p4a 再按 "src:dest" 解析：
+      * src 是**文件** -> 建好父目录后 shutil.copy 到 src/main/assets/<dest>
+      * src 是**目录** -> shutil.copytree(src, src/main/assets/<dest>)，目标已存在
+        就直接 FileExistsError(见 DeleteKey 的注释)
+    所以这里只允许文件条目：目录一律拒绝，避免把 ~45MB 的 models 再塞一份。
+
+    同 dest 的旧条目先删掉：一个 buildozer.spec 会在两个 ABI 之间复用，
+    不删就会一条一条累积，最后变成"同一个文件被写了 N 次"。
+    """
+    items = [v.strip() for v in (current or "").split(",") if v.strip()]
+    kept = []
+    for item in items:
+        itemDest = item.split(":")[-1].strip()
+        if itemDest == destName:
+            continue
+        kept.append(item)
+    kept.append("{}:{}".format(srcPath, destName))
+    return ",".join(kept)
+
+
+def AddBuildInfoAsset(spec, path):
+    """ 把 build-info.json 作为**单个 json 文件**加进 assets
+
+    p4a 的 assets 只能通过 Qt 的 assets:/ 或 Java AssetManager 读(原生 fopen 打不开)，
+    但这份 json 只需要 Python 侧读，正好用得上；而且它在 APK 里是**独立条目**，
+    unzip 就能看到，不需要解 assets/private.tar —— 事故复盘时这一点最关键。
+    """
+    if not path:
+        return False
+    src = os.path.abspath(path)
+    if not os.path.isfile(src):
+        print("  [warn] 找不到 {}，跳过 build-info 资产(APK 里不会有 assets/{})".format(
+            src, BuildInfoAssetDest))
+        return False
+    if not src.endswith(".json"):
+        print("  [warn] {} 不是 .json，跳过(assets 只接受这一份工具链信息)".format(src))
+        return False
+    # buildozer 按逗号切列表、p4a 按冒号切 src:dest，路径里带这两个字符会被静默切坏
+    if "," in src or ":" in src:
+        print("  [warn] 路径里含 ',' 或 ':'，无法安全写进 add_assets: {}".format(src))
+        return False
+    merged = MergeAssets(spec.GetKey("app", "android.add_assets"), src, BuildInfoAssetDest)
+    spec.SetKey("app", "android.add_assets", merged)
+    print("  build-info 进 assets: {} -> assets/{}".format(src, BuildInfoAssetDest))
+    return True
+
+
 def DropQtModulesFromExtraArgs(spec):
     """把 p4a.extra_args 里 --qt-libs 的黑名单模块删掉
 
@@ -325,11 +383,34 @@ def Main():
                         help="APK 版本号(versionName)，默认用脚本里的 AppVersion；"
                              "格式 MAJOR.MINOR 或 MAJOR.MINOR.PATCH(纯数字段、无前导零，"
                              "如 0.51 / 1.2.3)，不接受预发布/构建元数据后缀")
+    parser.add_argument("--build-info", default="",
+                        help="build-info.json 路径(android/tools/gen_build_info.py 的产物)。"
+                             "给了就把它作为单个文件放进 assets/build-info.json；"
+                             "不给则 android.add_assets 的处理与以前完全一致")
+    parser.add_argument("--assets-only", action="store_true",
+                        help="只处理 build-info 资产，其它键(requirements/version/add_libs…)"
+                             "一个都不碰 —— 给已经跑过 pin_min_sdk.sh 的构建补一步用的")
     args = parser.parse_args()
 
     if not os.path.exists(args.spec):
         print("找不到 {}".format(args.spec))
         return 2
+
+    # --assets-only：build_android.sh 的流程里 spec 已经由 pin_min_sdk.sh 打过补丁
+    # (requirements/add_libs/minSdk 都就位)，这里再跑一遍完整补丁只会互相覆盖。
+    # 所以只额外加"构建工具链信息"这一条文件资产，然后立刻退出。
+    if args.assets_only:
+        if not args.build_info:
+            print("错误: --assets-only 需要配合 --build-info <build-info.json>")
+            return 2
+        print("== 只补 build-info 资产: {}".format(args.spec))
+        spec = SpecFile(args.spec)
+        # 没写进去就别回写文件：空跑一次也改时间戳会让 buildozer 的缓存判断变敏感
+        if AddBuildInfoAsset(spec, args.build_info):
+            spec.Save()
+        print("  android.add_assets = {}".format(
+            spec.GetKey("app", "android.add_assets") or "(未设置)"))
+        return 0
 
     # 版本号格式校验(写进 app.version 之前)：不合法直接退出，不写盘
     ok, version = CheckVersion(args.version or AppVersion)
@@ -423,6 +504,13 @@ def Main():
             print("  模型随 private.tar 分发, source.include_exts={}".format(exts))
         else:
             print("  [warn] {} 里没有 .onnx，跳过模型配置".format(modelsScan))
+
+    # 唯一的 add_assets 例外：build-info.json 只是一个几 KB 的**文件**。
+    # 它必须能在 APK 里被 unzip 直接看到(事故复盘时要拿它反查 NDK/JDK/Qt)，
+    # 塞进 private.tar 就等于没有。models 仍然不走这里(见上面的注释)。
+    # 放在 models 分支之后：那里会整行删掉 add_assets，先加就被一起删了。
+    if args.build_info:
+        AddBuildInfoAsset(spec, args.build_info)
 
     # 预编译着色器(.qsb)必须随包分发：GPU 动画覆盖层(QRhiWidget + Vulkan)运行时按
     # 文件路径加载 component/widget/shaders/animcover.*.qsb，缺了就直接降级成 raster。

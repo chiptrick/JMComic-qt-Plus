@@ -16,7 +16,7 @@ NDK="${JM_NDK:-$(jm_resolve_ndk "$SDK")}"   # 不写死版本：取 $SDK/ndk 下
 VPY="$WORK/venv311/bin/python"
 P4A="$WORK/p4a"
 
-# JDK 版本不写死：tools/resolve_jdk.sh 按 versions.env 的区间挑（默认 17~24）
+# JDK 版本不写死：tools/resolve_jdk.sh 按 versions.env 的 JM_JDK_MIN/MAX 区间挑
 jm_apply_jdk || { echo "[FATAL] 找不到可用的构建 JDK；bash android/tools/resolve_jdk.sh --check 看详情"; exit 1; }
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK" ANDROID_NDK_HOME="$NDK"
 export PATH="$WORK/venv311/bin:$JAVA_HOME/bin:$PATH"
@@ -41,14 +41,30 @@ bash "$JM_REPO/android/tools/wsl_install_qt_plugins.sh" || true
 [ -f "$ANDROID/buildozer.spec" ] || { echo "缺少 buildozer.spec，请先跑 wsl_build_apk.sh 生成"; exit 1; }
 
 echo "===== [$(date +%T)] 2. 原地重打 buildozer.spec 补丁 ====="
+# build-info.json 也要跟着重打一次：它是 assets 里的**单个文件**资产，
+# 重打包时如果不重新生成，包里就会留着上一次构建的时间/版本。
+BUILD_INFO="$ANDROID/build_logs/build-info.json"
+mkdir -p "$(dirname "$BUILD_INFO")"
+"$VPY" "$ANDROID/tools/gen_build_info.py" --output "$BUILD_INFO" --repo "$SRC" \
+    --set "abi=arm64-v8a" --set "build_type=debug" 2>&1 | sed 's/^/    /' || \
+    echo "[warn] build-info 生成失败(构建继续)"
 "$VPY" "$ANDROID/tools/patch_buildozer_spec.py" "$ANDROID/buildozer.spec" \
     --p4a-dir "$P4A" --recipes "$ANDROID/recipes" \
-    --libs "libs/arm64-v8a" --models "$ANDROID/sr_qnn/models" 2>&1 | tail -20
+    --libs "libs/arm64-v8a" --models "$ANDROID/sr_qnn/models" \
+    --build-info "$BUILD_INFO" 2>&1 | tail -20
 echo "--- 关键配置 ---"
 grep -E '^(source\.include_exts|android\.add_libs_arm64_v8a|android\.minapi|android\.api|android\.add_assets)' "$ANDROID/buildozer.spec" | cut -c1-200
-if grep -qE '^android\.add_assets' "$ANDROID/buildozer.spec"; then
-    echo "[FATAL] android.add_assets 仍然存在，p4a 打包会 FileExistsError"
-    exit 1
+# add_assets 允许存在**文件条目**(assets/build-info.json)，但绝不能为空值、
+# 也不能有目录条目：空值会被 buildozer 当成一条 asset，p4a 的 copytree 撞上已存在的
+# assets 目录 -> FileExistsError；目录条目会再塞一份 models(见 DeleteKey 的注释)。
+ASSETS_LINE="$(grep -E '^android\.add_assets' "$ANDROID/buildozer.spec" || true)"
+if [ -n "$ASSETS_LINE" ]; then
+    ASSETS_VAL="$(printf '%s' "$ASSETS_LINE" | cut -d= -f2- | tr -d '[:space:]')"
+    if [ -z "$ASSETS_VAL" ]; then
+        echo "[FATAL] android.add_assets 是空值，p4a 打包会 FileExistsError(整行删掉才对)"
+        exit 1
+    fi
+    echo "add_assets = $ASSETS_VAL（只允许文件条目，当前应只有 build-info.json）"
 fi
 
 echo "===== [$(date +%T)] 2.5 修正 p4a bootstrap 的 PYTHONOPTIMIZE ====="

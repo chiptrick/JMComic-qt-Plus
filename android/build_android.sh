@@ -6,7 +6,8 @@
 #   * JDK 17
 #   * Android SDK(platform-tools + 目标 platform + build-tools；具体版本见
 #     tools/versions.env，build-tools 默认取已装的最高版本)
-#   * JDK 17~25（默认用 25 LTS；不写死：tools/resolve_jdk.sh 自动发现并校验区间）
+#   * JDK（版本区间由 tools/versions.env 的 JM_JDK_MIN/JM_JDK_MAX 决定，不在此写死；
+#     tools/resolve_jdk.sh 自动发现并校验区间）
 #   * Gradle 9.x（JDK 25 要求 >= 9.1；wrapper 在打包前由 tools/gradle_wrapper.py 预置）
 #   * Android NDK r28 及以上(不写死版本：默认自动取 $ANDROID_HOME/ndk 下最高版本，
 #     可用 JM_NDK_VERSION=<版本> 钉住某个版本，或用 ANDROID_NDK_HOME 指定目录)
@@ -35,6 +36,10 @@
 #                                          # (纯数字段、无前导零，如 0.51 / 1.2.3)，
 #                                          # 会写进 buildozer.spec 的 app.version
 #                                          # (=Android versionName)并参与 APK 文件名
+#   JM_SOURCE_REPO=/mnt/c/.../JMComic-qt ./build_android.sh
+#                                          # 构建目录是**同步副本**时($JM_WORK/src)，
+#                                          # 用它指明仓库本体：git_sha 与
+#                                          # docs/build_audit/ 的放行审计都会落到本体的路径上
 #   ./build_android.sh --help                # 完整帮助
 #
 # 构建入口：android/build_android.sh(本脚本)
@@ -76,6 +81,10 @@ ORT_VERSION="${ORT_VERSION:-${JM_ORT_VERSION}}"                      # onnxrunti
 ANDROID_PLATFORM="${ANDROID_PLATFORM:-android-${JM_API_LEVEL}}"      # compileSdk/minSdk 见 versions.env
 BUILD_TYPE="${BUILD_TYPE:-debug}"                                    # debug -> apk, release -> aab
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+# build-info 的 git 信息与 16KB 放行审计要落在**仓库本体**上（docs/build_audit/ 进版本库），
+# 而 WSL 流程通常在同步副本($JM_WORK/src)里构建 —— 那份副本没有 .git，也没人去看。
+# JM_SOURCE_REPO 就是给这种情况用的：不设时等同于脚本所在的树(=ROOT)。
+SRC_REPO="$(jm_norm_path "${JM_SOURCE_REPO:-${ROOT}}")"
 SDK="$(jm_norm_path "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}")"
 # 没显式给 SDK 时按常见位置找（仓库同级的 Android_SDK 是最常见的放法）
 if [[ -z "${SDK}" ]]; then
@@ -155,11 +164,16 @@ JMComic Android 多 ABI 一键构建
   CONTINUE_ON_ERROR=1   某架构失败也继续构建其余架构(默认失败即停)
   ANDROID_NDK_HOME=<dir> / JM_NDK=<dir>   指定 NDK 目录(优先于自动发现)
   JM_NDK_VERSION=<ver>  钉住 NDK 版本，如 30.0.16248370 / 28.2.13676358
-  JM_JDK=<dir> / JM_JDK_VERSION=<ver>     指定构建 JDK(默认自动选 17~25 内最高)
+  JM_JDK=<dir> / JM_JDK_VERSION=<ver>     指定构建 JDK(默认按 versions.env 的 JM_JDK_MIN/MAX 区间选最高)
   JM_API_LEVEL=<api> / JM_MIN_SDK=<api>   compileSdk / minSdk(默认取 versions.env)
   JM_BUILD_TOOLS=auto|<ver>               auto=用已装的最高版本
   JM_GRADLE_MIN=<ver> / JM_GRADLE_VERSION=<ver>   Gradle 下限 / 改写目标版本
   ALLOW_UNALIGNED=1     放行未按 16KB 对齐的包(默认拦下，见 tools/check_elf_page_align.py)
+  ALLOW_UNALIGNED_REASON="..."  放行原因，会写进审计记录(android/build_logs/
+                        unaligned_override.json + docs/build_audit/unaligned_overrides.jsonl)
+                        不填也能构建，但审计里只会记 unspecified
+  JM_SOURCE_REPO=<dir>  仓库本体路径(构建目录是同步副本时用)：build-info 的 git 信息与
+                        16KB 放行审计都会写到这个路径下的仓库里，而不是副本里
 
 支持 ABI: arm64-v8a(真机/QNN NPU)  x86_64(模拟器/CPU EP)
 输出命名: <title>-<version>-<abi>-<buildtype>.apk(一个 APK 只含一种 ABI)
@@ -274,7 +288,8 @@ PYVER="$("${PYTHON_BIN}" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 
 jm_ver_ge "${PYVER}" "${JM_PYTHON_MIN}" || \
     die "Python 版本过低: ${PYVER}(需要 >= ${JM_PYTHON_MIN}；可用 PYTHON_BIN=python3.11 指定)"
 
-# JDK：不盲信 PATH / JAVA_HOME —— 系统默认 java 可能已是 27，而 Gradle 8.14 只能跑在 17~24
+# JDK：不盲信 PATH / JAVA_HOME —— 系统默认 java 可能已超出 Gradle 支持的主版本区间
+#      （上界由 tools/versions.env 的 JM_JDK_MAX 决定，不在这里写死）
 # shellcheck source=tools/resolve_jdk.sh
 . "${HERE}/tools/resolve_jdk.sh"
 jm_resolve_jdk >/dev/null || true
@@ -636,6 +651,40 @@ PY
         log "buildozer.spec version = ${APP_VERSION}"
     fi
 
+    # ------------------------------------------------ 6.5 构建工具链信息落盘
+    # 现在才知道的答案(用了哪个 NDK/JDK/Gradle/Qt)如果不落盘，事后就只能靠人的
+    # 记忆 —— 0.87 的 16KB 事故就是这么查不出原因的。这里生成一份 json 放进
+    # assets/build-info.json(APK 里独立条目，unzip 直接可见)，另外落一份到
+    # build_logs/ 供本机开发环境读取(见 src/config/build_info.py)。
+    # 任何一步失败都不拦构建：它是可观测性设施，不是门禁。
+    Step "[${abi}] 生成 build-info.json(工具链落盘)"
+    BUILD_INFO_JSON="${LOG_DIR}/build-info.json"
+    local -a BI_ARGS=(--output "${BUILD_INFO_JSON}" --repo "${SRC_REPO}" --qt-wheel "${PY_WHEEL}"
+                      --set "abi=${abi}" --set "build_type=${BUILD_TYPE}"
+                      --set "app_version=${APP_VERSION}")
+    [[ -n "${JM_JDK_VER:-}" ]] && BI_ARGS+=(--set "jdk_version=${JM_JDK_VER}")
+    [[ -n "${JM_GRADLE_VERSION:-}" ]] && BI_ARGS+=(--set "gradle_version=${JM_GRADLE_VERSION}")
+    [[ -n "${NDK_VER}" ]] && BI_ARGS+=(--set "ndk_version=${NDK_VER}")
+    if [[ "${ALLOW_UNALIGNED:-0}" == "1" ]]; then
+        BI_ARGS+=(--set "allow_unaligned=1")
+        [[ -n "${ALLOW_UNALIGNED_REASON:-}" ]] && \
+            BI_ARGS+=(--set "unaligned_reason=${ALLOW_UNALIGNED_REASON}")
+    fi
+    "${PYTHON_BIN}" "${HERE}/tools/gen_build_info.py" "${BI_ARGS[@]}" 2>&1 | sed 's/^/    /' \
+        || warn "build-info 生成失败(不影响构建，但 APK 里不会有 assets/build-info.json)"
+    # 只加这一个 json 文件(绝不能把 models 目录带进来，见 patch_buildozer_spec.py)
+    if [[ -s "${BUILD_INFO_JSON}" && -f "${HERE}/buildozer.spec" ]]; then
+        if [[ "${REPACK:-1}" == "1" ]]; then
+            "${PYTHON_BIN}" "${HERE}/tools/patch_buildozer_spec.py" "${HERE}/buildozer.spec" \
+                --assets-only --build-info "${BUILD_INFO_JSON}" 2>&1 | sed 's/^/    /' \
+                || warn "写入 android.add_assets 失败：APK 里不会有 assets/build-info.json"
+        else
+            warn "REPACK=0：不再打包，build-info 只留在 ${BUILD_INFO_JSON}，不会进 APK"
+        fi
+    else
+        warn "缺少 ${BUILD_INFO_JSON} 或 buildozer.spec，跳过 assets/build-info.json"
+    fi
+
     # ------------------------------------------------ 7. 重新打包(让补丁生效)
     if [[ "${REPACK:-1}" == "1" ]]; then
         Step "[${abi}] 应用补丁后重新打包"
@@ -698,6 +747,38 @@ EOF
     fi
     log "APK 含 QNN 运行库(NPU 加速可用)"
 
+    # assets 断言：在**产物**上验，不在 spec 上验。
+    # 理由(实测证据)：spec 里写了 android.add_assets 不代表包里真的有 —— 0.87 那次
+    # 的 build-x86_64.log 里没有任何 --add-asset 痕迹，APK 里也确实没有 assets/models，
+    # 而 pin_min_sdk.sh 是给 spec 写过该键的。最可能的解释是第二次
+    # `pyside6-android-deploy --force` 重新生成了 buildozer.spec，把这一行覆盖掉。
+    # 如果真是这样，build-info.json 会同样消失，而构建"成功"—— 只有产物断言能抓住。
+    Step "[${abi}] 产物断言(assets/build-info.json / assets/models)"
+    local APK_ENTRIES="${ABI_WORK}/apk_entries.txt"
+    unzip -l "${best}" > "${APK_ENTRIES}" 2>/dev/null \
+        || { Fail "读取 APK 条目失败: ${best}(unzip -l 出错)"; return 1; }
+    if ! grep -qE '[[:space:]]assets/build-info\.json$' "${APK_ENTRIES}"; then
+        Fail "APK 里没有 assets/build-info.json：第二次 pyside6-android-deploy 很可能重新生成了
+       buildozer.spec，把 android.add_assets 覆盖掉了(见 tools/patch_buildozer_spec.py 的
+       --assets-only)。请检查第二次 deploy 前后的 buildozer.spec 差异。
+       当前 buildozer.spec 里的该键: $(grep -E '^android\.add_assets' "${HERE}/buildozer.spec" 2>/dev/null || echo '(整行不存在 —— 已被覆盖或删除)')
+       若确实被覆盖，需要在第二次 deploy **之后**再补一次: ${PYTHON_BIN} tools/patch_buildozer_spec.py buildozer.spec --assets-only --build-info ${LOG_DIR}/build-info.json"
+        return 1
+    fi
+    log "APK 含 assets/build-info.json(工具链信息可反查)"
+
+    # assets/models/ 不该出现(模型走 private.tar 分发)，出现就是 +45MB 重复副本。
+    # 这里只观测、不拦截：投递方式是否调整由人看过数据再决定，别让一次已跑完的
+    # 构建因为一条"性能观测"白跑。
+    local MODELS_COUNT MODELS_BYTES MODELS_MB
+    MODELS_COUNT=$(grep -cE '[[:space:]]assets/models/' "${APK_ENTRIES}" || true)
+    if [[ "${MODELS_COUNT:-0}" -gt 0 ]]; then
+        # unzip -l 每行第 1 列是解压后字节数，按条目累加得到真实占用
+        MODELS_BYTES=$(awk '/[[:space:]]assets\/models\// {sum += $1} END {print sum + 0}' "${APK_ENTRIES}")
+        MODELS_MB=$(awk -v b="${MODELS_BYTES}" 'BEGIN {printf "%.1f", b / 1048576}')
+        warn "警告：APK 里出现 assets/models/(${MODELS_COUNT} 个文件，${MODELS_MB} MB)，与 private.tar 里的模型重复；体积目标会受影响。若这是有意为之请忽略。"
+    fi
+
     # 16KB 页门禁：在产物级判定，和上面的加载清单/QNN 清单同一层。
     # 只看 p_align < 16384 的库(Google check_elf_alignment.sh 口径)，
     # Hexagon skel / 非 ELF 数据包会自动跳过。真跑在 16KB 设备上是否正常
@@ -705,7 +786,24 @@ EOF
     Step "[${abi}] 16KB 页对齐门禁"
     if ! "${PYTHON_BIN}" "${HERE}/tools/check_elf_page_align.py" "${best}" --abi "${abi}"; then
         if [[ "${ALLOW_UNALIGNED:-0}" == "1" ]]; then
+            # 放行不能只是"打印一句 warn 就继续"：0.87 就是带着 15 个未对齐库发出去的，
+            # 事后既查不到是谁放的，也查不到为什么放 —— 所以放行必须留痕。
+            # build_logs/ 会被清缓存清掉，所以再往仓库内的 docs/build_audit/ 追加一份。
+            local ALIGN_JSON="${ABI_WORK}/elf_page_align.json"
+            # 再跑一次只为拿机器可读清单(--json)；失败也不影响放行
+            "${PYTHON_BIN}" "${HERE}/tools/check_elf_page_align.py" "${best}" --abi "${abi}" \
+                --json > "${ALIGN_JSON}" 2>/dev/null || true
+            "${PYTHON_BIN}" "${HERE}/tools/record_unaligned_override.py" \
+                --abi "${abi}" --apk "${best}" --align-json "${ALIGN_JSON}" \
+                --repo "${SRC_REPO}" --build-logs "${LOG_DIR}" \
+                --reason "${ALLOW_UNALIGNED_REASON:-}" 2>&1 \
+                | sed 's/^/    /' \
+                || warn "放行审计记录写入失败(本次构建继续；请手工补 docs/build_audit/)"
             warn "ALLOW_UNALIGNED=1，放行未对齐的包(16KB 设备上会退回系统兼容模式)"
+            if [[ -z "${ALLOW_UNALIGNED_REASON:-}" ]]; then
+                printf '\033[1;33m[warn ][%s]\033[0m ★ 本次放行未填写原因(ALLOW_UNALIGNED_REASON)，
+       审计记录里只会留 unspecified —— 下次事故复盘就查不到"为什么放"了 ★\n' "${CTX}" >&2
+            fi
         else
             Fail "有原生库未按 16KB 对齐(清单见上)。NDK r28+ 重编通常即可修复；
        若不是由本脚本编出的库(libc++_shared/openssl 等 recipe 产物)，检查是否走了旧 NDK。

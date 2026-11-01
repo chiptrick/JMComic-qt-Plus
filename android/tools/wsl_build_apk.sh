@@ -46,7 +46,7 @@ NDK="${JM_NDK:-$(jm_resolve_ndk "$SDK")}"   # 不写死版本：取 $SDK/ndk 下
 VPY="$WORK/venv311/bin/python"
 DEPLOY="$WORK/venv311/bin/pyside6-android-deploy"
 P4A="$WORK/p4a"
-# JDK 版本不写死：tools/resolve_jdk.sh 按 versions.env 的区间挑（默认 17~24）
+# JDK 版本不写死：tools/resolve_jdk.sh 按 versions.env 的 JM_JDK_MIN/MAX 区间挑
 jm_apply_jdk || { echo "[FATAL] 找不到可用的构建 JDK；bash android/tools/resolve_jdk.sh --check 看详情"; exit 1; }
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK" ANDROID_NDK_HOME="$NDK"
 # buildozer 会在 PATH 里找 cython/git 等可执行文件，venv311/bin 必须在内
@@ -210,9 +210,23 @@ mkdir -p "$(dirname "$ICON")"
 cp -f "$SRC/res/icon/logo_round.png" "$ICON"
 echo "应用图标: $ICON ($(stat -c %s "$ICON") 字节, $(md5sum "$ICON" | cut -d' ' -f1))"
 
+# 构建工具链信息落盘：事故复盘要从 APK 反查"用了哪个 NDK/JDK/Gradle/Qt"，
+# 靠人的记忆必然过期。生成的 json 作为**单个文件**资产进 assets/build-info.json
+# (unzip 直接可见，不用解 private.tar)，运行时由 src/config/build_info.py 读出来
+# 展示在"设置 → 关于"里。任何一步失败都不拦构建 —— 它是可观测性设施，不是门禁。
+echo "===== [$(date +%T)] 2.8 生成 build-info.json ====="
+BUILD_INFO="$ANDROID/build_logs/build-info.json"
+mkdir -p "$(dirname "$BUILD_INFO")"
+BI_ARGS=(--output "$BUILD_INFO" --repo "$SRC" --qt-wheel "$PYSIDE_WHL"
+         --set "abi=$JM_ABI" --set "build_type=debug")
+[ -n "$APP_VERSION" ] && BI_ARGS+=(--set "app_version=$APP_VERSION")
+"$VPY" "$ANDROID/tools/gen_build_info.py" "${BI_ARGS[@]}" 2>&1 | sed 's/^/    /' || \
+    echo "[warn] build-info 生成失败(构建继续，但 APK 里不会有 assets/build-info.json)"
+
 "$VPY" "$ANDROID/tools/patch_buildozer_spec.py" "$ANDROID/buildozer.spec" \
     --p4a-dir "$P4A" --recipes "$ANDROID/recipes" --abi "$JM_ABI" \
     --libs "libs/$JM_ABI" --icon "$ICON" --models "$ANDROID/sr_qnn/models" \
+    --build-info "$BUILD_INFO" \
     ${APP_VERSION:+--version "$APP_VERSION"} 2>&1 | tail -30
 echo "--- 关键配置 ---"
 grep -E '^(requirements|version|source\.include_exts|android\.api|android\.minapi|android\.add_libs_|android\.permissions|android\.add_assets|p4a\.source_dir|p4a\.local_recipes|android\.ndk_path|android\.sdk_path|package\.name|package\.domain|android\.archs|icon\.filename)' "$ANDROID/buildozer.spec"
@@ -272,23 +286,56 @@ if [ ! -e "$SDK/tools/bin/sdkmanager" ]; then
     echo "已建立 $SDK/tools -> cmdline-tools/latest"
 fi
 ls -l "$SDK/tools/bin/sdkmanager" "$SDK/cmdline-tools/latest/bin/avdmanager" || true
+# 时间戳标记：只接受"本次构建开始之后生成的"APK。
+# 2026-11-01 实测事故：buildozer 失败(exit=1)但脚本没停，后面拿**上一次**的旧包做
+# 4.5/4.6 校验，全部"通过"，日志还打印 [OK] —— 打包失败 + 旧包残留 = 看起来完全成功。
+# 所以打包前先落一个标记文件，收集产物时用 -newer 过滤。
+BUILD_MARKER="$ANDROID/.build_marker"
+: > "$BUILD_MARKER"
+# 回退 2 秒：mtime 粒度只到秒，快速重打时新包可能落在同一秒里，
+# 严格 -newer 会把它误判成旧包(宁可放宽一点，也不要假的"没有新产物")。
+touch -d '2 seconds ago' "$BUILD_MARKER" 2>/dev/null || true
 cd "$ANDROID"
 # warn_on_root=0 已在补丁里设置；yes 只是兜底
 # 完整日志落盘(便于排查 recipe 编译失败)，终端只显示尾部
 yes | "$VPY" -m buildozer android debug 2>&1 | tee "$WORK/logs/buildozer_full.log" | tail -120
-echo "buildozer exit=${PIPESTATUS[1]}"
+# PIPESTATUS 必须紧接着管道读：中间插任何命令都会把它冲掉
+# (下标 1 是 buildozer；下标 0 的 yes 经常因 SIGPIPE 141，不能拿它判断)
+BUILDOZER_RC="${PIPESTATUS[1]}"
+echo "buildozer exit=${BUILDOZER_RC}"
 echo "完整日志: $WORK/logs/buildozer_full.log ($(wc -l < "$WORK/logs/buildozer_full.log" 2>/dev/null) 行)"
+if [ "${BUILDOZER_RC}" -ne 0 ]; then
+    echo "[FATAL] buildozer 打包失败(exit=${BUILDOZER_RC})：本次**没有**产出 APK，"
+    echo "        因此不再做任何 APK 校验 —— 拿上一轮的旧包校验只会得到'校验通过'的假象。"
+    echo "        失败现场(完整日志最后 20 行，全文见 $WORK/logs/buildozer_full.log):"
+    tail -n 20 "$WORK/logs/buildozer_full.log" 2>/dev/null | sed 's/^/    /'
+    exit 1
+fi
 
 echo "===== [$(date +%T)] 4.5 校验 APK：Qt 加载清单 vs 包内 .so ====="
 # 0.47 事故复盘：QtLoader 按 libs.xml 的清单逐个 loadLibrary，清单里有而包里没有
 # 的库(QtTest.abi3.so)会让应用"装完即闪退"，且日志里只有一行 E QtLoader，
 # 极容易被误判成环境问题。这里在收集产物前把清单和产物对一遍，不一致就 fail。
-NEW_APK=$(ls -t "$ANDROID"/JMComic-*-"$JM_ABI"-debug.apk 2>/dev/null | head -1)
-AAPT_BIN=$(ls "$SDK"/build-tools/*/aapt 2>/dev/null | sort -V | tail -1)
+NEW_APK=""
+# 只认"本次构建开始之后"的产物：-printf '%T@ %p' 后按时间倒序，旧包即使更新也不会入选。
+NEW_APK_ALL=$(find "$ANDROID" -maxdepth 4 -name '*.apk' -newer "$BUILD_MARKER" -printf '%T@ %p\n' 2>/dev/null \
+    | sort -nr | cut -d' ' -f2-)
+# 优先取本 ABI 的包(一个 APK 只含一种 ABI)，取不到再退回任意新包并明确告警
+NEW_APK=$(printf '%s\n' "${NEW_APK_ALL}" | grep -m1 -F -- "$JM_ABI" || true)
+if [ -z "$NEW_APK" ] && [ -n "${NEW_APK_ALL}" ]; then
+    NEW_APK=$(printf '%s\n' "${NEW_APK_ALL}" | grep -m1 . || true)
+    [ -n "$NEW_APK" ] && echo "[warn] 本次新产出的 APK 名字里没有 '$JM_ABI'：$NEW_APK（继续校验，架构不符会在这里暴露）"
+fi
 if [ -z "$NEW_APK" ]; then
-    echo "[FATAL] 没找到 $JM_ABI 的 APK，构建可能失败了"
+    echo "[FATAL] 本次构建没有产出新的 APK（最近产物早于构建开始时间）。上一轮打包很可能失败了但被吞掉，检查 buildozer_full.log。"
+    echo "        标记文件: $BUILD_MARKER；目录里现有 APK（按时间）："
+    find "$ANDROID" -maxdepth 4 -name '*.apk' -printf '%TY-%Tm-%Td %TH:%TM:%TS  %s  %p\n' 2>/dev/null \
+        | sort | sed 's/^/    /' || true
     exit 1
 fi
+echo "本次产物: $NEW_APK"
+echo "          mtime=$(date -r "$NEW_APK" '+%Y-%m-%d %H:%M:%S')  字节=$(stat -c %s "$NEW_APK")"
+AAPT_BIN=$(ls "$SDK"/build-tools/*/aapt 2>/dev/null | sort -V | tail -1)
 "$VPY" "$ANDROID/tools/check_apk_qt_libs.py" "$NEW_APK" --abi "$JM_ABI" --aapt "$AAPT_BIN" || {
     echo "[FATAL] APK 校验失败：加载清单与包内 .so 不一致，这个包装上去会闪退"
     echo "        排查：aapt dump --values resources 看 array/qt_libs 与 array/load_local_libs"
@@ -306,6 +353,11 @@ echo "===== [$(date +%T)] 4.6 校验 APK：NPU 运行库是否真的进包 =====
 }
 
 echo "===== [$(date +%T)] 5. 收集产物 ====="
+# 把"这次到底产出了哪个文件"写死在日志里：mtime/字节/md5 三件套是唯一能证明
+# "这个包就是这次编的"的东西(2026-11-01 那次就是靠对比 mtime 才识破假成功)。
+echo "本次产物: $NEW_APK"
+echo "          mtime=$(date -r "$NEW_APK" '+%Y-%m-%d %H:%M:%S')  字节=$(stat -c %s "$NEW_APK")"
+echo "          md5=$(md5sum "$NEW_APK" 2>/dev/null | cut -d' ' -f1)"
 find "$ANDROID" -maxdepth 4 \( -name '*.apk' -o -name '*.aab' \) 2>/dev/null | head
 ls -sh "$ANDROID/bin" 2>/dev/null || true
 echo "===== [$(date +%T)] 结束 ====="
