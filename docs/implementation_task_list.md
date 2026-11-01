@@ -420,6 +420,30 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 
 **对工期的影响**：C0-②′ 的 2~4 天估算里，"kit 获取"可能占掉 1 天。这是 C0 该有的摩擦，不改变 Go/No-Go 判据。
 
+### 更新 19（2026-11-01，订正更新 18）：**Qt 6.12 Android kit 官方存在，已取得并验证**
+
+用户要求核实后，在官方仓库新布局里找到了 kit（**更新 18 的"两条路都不通"结论作废**）：
+
+- 位置：`download.qt.io/online/qtsdkrepository/all_os/android/qt6_6120/`（6.8 起 Android kit 从
+  `linux_x64/android/` 搬到 **`all_os/android/`**；aqt 3.3.0 仍查旧路径，所以报 "Failed to locate XML data"）。
+- 已下载解包（`$JM_WORK/qt-android-6.12/6.12.0/`，qtbase+qttools，Android_ANY 多 ABI 包）并验证四要素：
+  ① `include/`（QtCore/QtWidgets 全）✅；② `lib/cmake/`（Qt6/Qt6Core/Qt6Widgets 主配置）✅；
+  ③ host 工具 `qt-cmake`/`qmake` ✅（**无 androiddeployqt——6.12 官方移除了它**，
+  [What's New in Qt 6.12](https://doc.qt.io/qt/whatsnew612.html)：部署全程由 CMake 处理）；
+  ④ **`libQt6Core_x86_64.so` / `libQt6Widgets_x86_64.so` 实测 PT_LOAD 全 `0x4000`** ✅✅
+  （C 轨道 16KB 前提在库层面坐实）。另有 `jar/Qt6Android.jar` 与 `share/` gradle 模板。
+- 注：解包用 `py7zr`（WSL 无 7z 且无 sudo）；脚本在 `.workbuddy/tmp/fetch_qt612_android.sh` / `extract_qt612_android.sh`。
+
+**Windows 宿主编译问题的结论（用户问）：能，且这是 C++ 轨道的结构性收益。**
+本方案唯一强制 WSL 的原因是 `pyside6-android-deploy`（p4a）不支持 Windows 宿主（§1.3 约束 4）；
+C 轨道用 CMake+Gradle，Qt 官方支持 Windows 作为 Android 构建宿主（Qt Creator on Windows 即此流程），
+6.12 又把部署收进 CMake，Windows 侧只需：JDK 25 + Gradle 9.x（已是基线）+ Android SDK（已有）
++ **NDK r30 Windows 版**（当前 r30 只装在 WSL，需另装 `android-ndk-r30-windows.zip`）+ Qt 6.12 Android kit
+（Windows 宿主变体经官方在线安装器/Qt Creator 获取即可）。附带收益：摆脱 9p 文件系统
+（WSL 里 `/mnt/c` 让冷启测量膨胀 7 倍）、桌面回归与 Android 打包同机、CI 可用 windows runner。
+双轨期内 WSL/p4a 链路仍保留（Python 轨道继续可发布），到 C4 删 Python 运行时时一并退役。
+
+
 
 ---
 
