@@ -369,6 +369,36 @@ team-lead 用独立扫描器逐个解析 bundle 内程序头（本机无 `libpyb
 **同期拍板**：B1 先做 **1~2 人日 spike**（判据：`bench_pipeline --both --main-thread` 的 `main_thread.qt.main_block_ms` p50 ≤ 17ms 且并行生效；判负即弃，省 12 人日）；  
 B3 按"1 周冒烟再定"执行；**不新建 4KB AVD**（设备侧 before 放弃）。
 
+### 更新 17（2026-11-01，用户拍板）：**阶段 C0 提前为最高优先级 —— 用 C++ 轨道绕开 shiboken 上游阻塞**
+
+**决策依据（全部来自本轮实测，非推测）**：
+
+1. shiboken 只存在于 PySide6 链路；C++ 轨道 APK 不含 PySide6/Python-Qt 绑定 → 上游缺陷不再适用。
+2. Qt 6.12 官方 Android 库已实测全部 16384 对齐（0.88 包内 QtCore/Gui/Widgets/Network/Sql/Svg 全绿）；
+   `libsr_qnn*` 自编链路已合规（`foreach` + r30）。
+3. C1 的"保留 Python 网络子进程"不含 Qt 绑定（纯 CPython + 纯 py 模块），p4a 侧 CPython/openssl 等已随 r30 全绿
+   → bundle 门禁在 C 轨道可达 0。
+4. 对照：Python 轨道的 bundle 门禁被上游 wheel 卡死（§0A 更新 15），Android 17 fatal 化后 Python 轨道没有解。
+
+**顺序变更**（原"批次 0 → A/B → C0(并行) → C1~C4(条件)"改为）：
+
+| 优先级 | 任务 | 说明 |
+|---|---|---|
+| **P0（立即）** | **C0-②′：Qt C++ 空壳 APK 过两条 16KB 门禁 + Android 17 实测启动** | "绕开是否成立"的判定实验，量级 2~4 天（CMake/androiddeployqt 出包 → 双门禁 → Pixel_9a 实测）。任一门禁不过 → C 轨道的 16KB 论据作废，回到"等上游/自编 shiboken" |
+| P0（并行） | C0-① curl-impersonate 自编验证、C0-③ libsr_qnn 直接链接 | 原 C0 内容与判据不变（见迁移方案 §9） |
+| P1 | 0.1 收尾（arm64 冷重建 + 双门禁）、A3a（模型外置 + GitHub Release，语言无关，C 轨道同样需要） | |
+| P2 | A1/A2/A4（快赢，桌面侧收益保留；C 轨道下实现位置可能变） | |
+| 暂缓 | B1 spike、B3 冒烟 | 若 C0 三项全过 → 进入 C1，B 阶段多数任务被 C 轨道吸收，不单独做 |
+
+**关键提醒**：C1~C4 全量 30~45 人月，这正是当初否决全量迁移的原因。提前 C0 ≠ 承诺 C1；
+C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由让 Go 的先验概率大增，
+但"单人可维护 70,825 行 / 双轨期成本 / 热更新链路丢失(G5)"三项代价不变，Go/No-Go 仍按迁移方案 §9 判据执行。
+
+**验收判据（按修订 21 三问）**：
+- 命令：出包后 `python android/tools/check_elf_page_align.py <apk>`、`python android/tools/check_pybundle_align.py <apk> <abi>`（无 bundle 则记 N/A），再 `bash android/tools/avd_verify.sh --apk <apk> --serial emulator-5554`；
+- 字段：lib 门禁 未对齐=0；bundle 门禁 0 或 N/A；avd_verify 的 进程存活 非空、16KB 库加载=0 条；
+- 判负：任一门禁在 C++ 空壳上不过 → C0 记 No-Go(16KB 项)，重新决策"等上游 / 自编 shiboken"。
+
 ---
 
 ## 1. 勘察与方案假设的差异清单（先对齐事实）
