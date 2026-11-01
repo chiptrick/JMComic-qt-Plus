@@ -1127,7 +1127,7 @@ adb shell getprop ro.soc.model          # 确认是高通芯片(8 Gen 1 及以�
 
 ```bash
 # 依赖：autoconf/automake/libtool/pkg-config、**perl-core**（openssl recipe 要 FindBin 等核心模块）、
-#       JDK 17~25、Android SDK(platform-tools, platform, build-tools)、
+#       JDK(区间见 tools/versions.env 的 JM_JDK_MIN/MAX)、Android SDK(platform-tools, platform, build-tools)、
 #       Android NDK r28 及以上、Python 3.11/3.12
 export ANDROID_HOME=$HOME/Android/Sdk
 # NDK 不用手动指定：脚本自动取 $ANDROID_HOME/ndk 下版本最高的那个（NDK 28+ 才默认
@@ -1236,6 +1236,59 @@ ABI=arm64-v8a ./build_arm64.sh  # 环境变量指定(等价默认)
 带上这一步）。刻意不用 `android.add_assets`：那会往 APK 里再塞一份 ~200MB 的副本，
 而且 p4a 的 assets 只能通过 Qt 的 `assets:/` 或 Java AssetManager 读，原生
 `fopen` 打不开。
+
+**唯一的例外是 `assets/build-info.json`**（几 KB 的构建工具链信息，见
+§5.0.4）：它本来就要给 Python 侧用 `assets:/` 读，而且必须能在 APK 里
+`unzip -p <apk> assets/build-info.json` 直接看到（事故复盘时要拿它反查 NDK/JDK/Qt），
+塞进 `private.tar` 就等于没有。所以 `patch_buildozer_spec.py --build-info <json>`
+只把这一个**文件**条目写进 `android.add_assets`，绝不带目录（目录条目会被 p4a
+`copytree` 成一份完整副本，那正是上面要避免的事）。
+
+#### 5.0.4 构建工具链落盘(build-info.json)
+
+拿到一个 APK 时，"它是用哪个 NDK / JDK / Gradle / Qt 编的"必须能从产物本身反查 ——
+0.87 带着 15 个未对齐的库发出去却查不出原因，就是因为这个信息从来没落过盘。
+
+- `android/tools/gen_build_info.py` 收集 `git_sha/git_describe/git_dirty/build_time/
+  build_host/operator/app_version/abi/build_type/jdk_version/gradle_version/
+  agp_version/ndk_version/qt_version/p4a_version/python_version/allow_unaligned/
+  unaligned_reason` 并写 JSON；**任何一项读不到就写 `null`，且永远不会让构建失败**。
+- 打包前由 `build_android.sh`（以及 `wsl_build_apk.sh` / `wsl_repack_apk.sh`）生成，
+  同一份 json 落两处：`android/build_logs/build-info.json`（本机/开发环境）与
+  APK 内的 `assets/build-info.json`（产物内，unzip 可见）。
+- 运行期由 `src/config/build_info.py` 读出来（`Get()`/`Summary()`），展示在
+  **设置 → 最底部的「关于 / 构建信息」**（只读可复制）。桌面开发环境读不到
+  `assets:/` 时回退到 `android/build_logs/build-info.json`，都没有就显示"未找到"。
+- 自查：`python3 android/tools/gen_build_info.py --output /tmp/bi.json --print`。
+
+同类审计：16KB 门禁放行（`ALLOW_UNALIGNED=1`）会写
+`android/build_logs/unaligned_override.json` 并**追加**到仓库内可跟踪的
+`docs/build_audit/unaligned_overrides.jsonl`（一行一条 JSON），记录
+`time/operator/host/git_sha/abi/apk/reason/unaligned`。`ALLOW_UNALIGNED_REASON`
+不填不拦构建，但审计里只会记 `unspecified`，终端也会醒目提示。
+字段与复盘命令见 `docs/build_audit/README.md`。
+
+> **判断标准**：`docs/build_audit/unaligned_overrides.jsonl` **长期为空/不存在才是目标状态**。
+> 条数变多说明 16KB 对齐在退化 —— 该去查 `tools/check_elf_page_align.py` 指出的那几份库，
+> 而不是习惯性放行。审计一旦变成放行流程里的"例行一步"（"反正写了记录就能放"），
+> 它的角色就从刹车变成了流程，等于失效。
+
+
+#### 5.0.5 本机路径配置(tools/local.env)
+
+`tools/local.env` 是**机器本地**文件（`.gitignore` 忽略，模板 `local.env.example` 入库）：
+JDK/SDK/构建树的位置写在这里，脚本就不需要每次手工 `export`。
+
+- `JM_WORK` 默认是 `$HOME/jmcomic-build`。以 root 跑（`sudo` / `wsl -u root`）时 `$HOME`
+  是 `/root`，而构建树通常在普通用户家目录下、`/root` 对该用户不可写 —— 所以本机在
+  `local.env` 里显式写了 `JM_WORK=/home/wq159/jmcomic-build`。跟着派生的是
+  `JM_SRC=$JM_WORK/src`、`JM_SDK=$JM_WORK/android-sdk`、`JM_VENV=$JM_WORK/venv311`。
+- `JM_NDK` / `ANDROID_NDK_HOME` **故意留空**：`tools/resolve_ndk.sh` 默认取
+  `$JM_SDK/ndk` 下版本号最高者（当前 r30），装好即生效；写死会盖掉自动发现，而
+  16KB 页对齐正是靠"用新 NDK 重编"修掉的。要钉住某版用 `JM_NDK_VERSION=<版本>`。
+- `TMPDIR` 也留空：WSL 根分区空间充足时不需要指到别处；只有 `/tmp` 是小 tmpfs 时才要写。
+- 换机器/换用户必须重写这个文件；旧值可从 git 历史里找回：
+  `git log -p -- android/tools/local.env`。
 
 #### 5.0.3 版本号参数(全部构建脚本通用)
 
@@ -1429,7 +1482,7 @@ QT_QPA_PLATFORM=offscreen python android/tools/host_test_file_dialog.py
 
 上面 1)2)4) 加上接口解密链（`host_test_crypto_android.py`）和图片解码链路
 （`host_test_image_pipeline.py`）就是 **CI 每次提交都跑的那套门**，见
-`.github/workflows/android.yml`（`ubuntu-latest` + Python 3.11 + PySide6-Essentials 6.11.2，
+`.github/workflows/android.yml`（`ubuntu-latest` + Python 3.11 + PySide6-Essentials 6.12.0，
 Qt offscreen，不需要手机与 Android SDK/NDK）。本地一条命令跑全部：
 `bash android/tools/wsl_run_smoke.sh`。
 
@@ -1587,7 +1640,7 @@ python android/tools/patch_buildozer_spec.py ... --icon "$ICON"   # -> icon.file
 | 变量 | 含义 | 默认值 |
 | --- | --- | --- |
 | `JM_REPO` / `$JmRepo` | 仓库根（脚本自己往上两级推出） | 自动定位 |
-| `JM_WORK` | WSL 构建树 | `/root/jmcomic-build` |
+| `JM_WORK` | WSL 构建树 | `$HOME/jmcomic-build`（本机由 `tools/local.env` 显式指定，见 §5.0.5） |
 | `JM_SDK` / `JM_NDK` | Android SDK / NDK | `$JM_WORK/android-sdk`、`$JM_SDK/ndk` 下版本最高者（可用 `JM_NDK_VERSION` 钉住） |
 | `JM_VENV` / `JM_VPY` | buildozer 宿主 venv / python | `$JM_WORK/venv311` |
 | `JM_ADB` / `$JmAdb` | adb 可执行文件 | 先查 `PATH`，再查 `$ANDROID_HOME`、`~/Android/Sdk` |
@@ -1835,7 +1888,13 @@ python tools/check_elf_page_align.py dist/JMComic-<ver>-arm64-v8a-debug.apk
 python tools/check_elf_page_align.py dist/... --json --soft     # CI 里只报不拦
 python tools/check_elf_page_align.py libs/arm64-v8a --list-ok   # 查目录
 
-# 设备级验收（需要一台真 16KB 设备）
+# 设备级验收（16KB AVD 即可，无需真机：镜像名含 16k，getconf PAGE_SIZE=16384）
+bash tools/avd_verify.sh --apk dist/JMComic-<ver>-x86_64-debug.apk --abi x86_64
+#   一行出 PASS/FAIL 表：装包 / 首帧(am start -W) / 进程存活 / 16KB 库加载 /
+#   兼容模式 / PSS / 截图。判据是"退出码 + 产物 + 日志关键字"三者合判：
+#   ① `dlopen failed: .*program alignment` 与 `UnsatisfiedLinkError` 必须 0 条
+#   ② 应用**不能**被标记为 16KB 兼容模式（否则即使前面全绿也是假绿）
+#   ③ `pidof` 必须非空 —— 页对齐只证明"编对了"，能启动存活才证明"能跑"
 bash tools/check_16kb_device.sh --pkg org.jmcomic.jmcomic --launch
 bash tools/check_16kb_device.sh --pkg org.jmcomic.jmcomic --fatal on   # 严格模式暴露问题
 ```
@@ -1903,7 +1962,7 @@ JM_BUILD_TOOLS=36.0.0 ./build_android.sh    # 强制某个 build-tools
 | 对象 | 解析方式 | 校验 |
 | --- | --- | --- |
 | NDK | `JM_NDK`/`ANDROID_NDK_HOME` → `JM_NDK_VERSION` → `$SDK/ndk/*` 最高版本 | 主版本 ≥ `JM_NDK_MIN_MAJOR` |
-| JDK | `JM_JDK` → `JAVA_HOME`（区间内才用）→ `JM_JDK_VERSION` → 扫描常见安装位 | 主版本 ∈ `[MIN, MAX]`（默认 17~25），越界直接报错并说明原因 |
+| JDK | `JM_JDK` → `JAVA_HOME`（区间内才用）→ `JM_JDK_VERSION` → 扫描常见安装位 | 主版本 ∈ `[JM_JDK_MIN, JM_JDK_MAX]`（区间值见 `tools/versions.env`），越界直接报错并说明原因 |
 | build-tools | `auto` 时取已装最高版本 | 目录存在性检查 |
 | Gradle | 打包前改写 p4a 模板 + dist 的 `gradle-wrapper.properties`；打包后复查 | 低于 `JM_GRADLE_MIN` 告警（`JM_GRADLE_VERSION` 直接改写） |
 | cmake | `cmake --version` | ≥ `JM_CMAKE_MIN` |

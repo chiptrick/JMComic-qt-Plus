@@ -107,7 +107,8 @@ ls $WORK/venv311/bin | grep -i deploy        # 应出现 pyside6-android-deploy
 
 **现象**：脚本全部照默认值跑，第一步就 `Permission denied`。
 
-**原因**：`env.sh` 默认 `JM_WORK=/root/jmcomic-build`（作者以 root 构建）。
+**原因**：`env.sh` 的默认值是 `$HOME/jmcomic-build`；以 root 跑时 `$HOME` 是 `/root`，
+而构建树其实在普通用户的家目录下（本机为 `/home/wq159/jmcomic-build`）。
 WSL 默认用户不是 root 时该目录不可写，且本机 `sudo` 需要交互密码（脚本里 `apt-get` 反而
 用不上——实测编译工具链、dev 头文件都已齐备，只有 ccache 缺失，p4a 会打一行 warning 继续）。
 

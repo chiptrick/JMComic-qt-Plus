@@ -3,7 +3,8 @@ name: android
 # Android 移植的 CI —— 跑的是**宿主侧回归**：不需要手机、不需要 Android SDK/NDK，
 # 也不需要 Qualcomm QNN SDK。
 #
-# 用与 APK 里相同的 Python 3.11 + PySide6 6.11.2（Qt offscreen），执行 android/tools/
+# 用与 APK 里相同的 Qt 大版本（PySide6-Essentials 6.12.0，见
+# src/requirements_android_ci.txt）+ 构建宿主 Python 3.11（Qt offscreen），执行 android/tools/
 # 里的 5 道门，外加 shell 语法检查与全量字节码编译。这些用例就是移植过程中用来定位
 # 真机问题的同一套回归，任何一道红都代表真的坏了。
 #

@@ -5,18 +5,20 @@
 #
 # 可覆盖的环境变量（不设则用下面的默认值）：
 #   JM_REPO    仓库根目录。默认＝本文件所在目录往上两级（android/tools -> 仓库根）
-#   JM_WORK    WSL 内的构建树（ext4，避免 /mnt/c 慢）      默认 /root/jmcomic-build
+#   JM_WORK    WSL 内的构建树（ext4，避免 /mnt/c 慢）      默认 $HOME/jmcomic-build
+#              （写成 $HOME 而不是 /root：用非 root 用户跑时 /root 根本无写权限，
+#                报错却是 "Permission denied" 路径，和"路径配错"看起来一模一样）
 #   JM_SRC     $JM_WORK/src —— 仓库同步过去的副本
 #   JM_SDK     Android SDK                                 默认 $JM_WORK/android-sdk
 #   JM_NDK     Android NDK                                 默认 $JM_SDK/ndk 下版本最高者
 #              (不写死版本；要钉住某版用 JM_NDK_VERSION=<版本>，或直接给 JM_NDK=<目录>)
 #   JM_NDK_VER 上面选中的 NDK 版本号(只读，从 source.properties 读)
 #   JM_JDK     构建 JDK 目录(不盲信 PATH/JAVA_HOME)        默认 $JM_JDK > JAVA_HOME > 扫描
-#              版本区间由 JM_JDK_MIN/JM_JDK_MAX 限定(默认 17~24，见 versions.env)
+#              版本区间由 tools/versions.env 的 JM_JDK_MIN/JM_JDK_MAX 决定(不在此写死数字)
 #   JM_JDK_VER 选中的 JDK 主版本(只读)
 #   ---- 以下来自 tools/versions.env，只读 ----
 #   JM_API_LEVEL(34) JM_MIN_SDK(34) JM_BUILD_TOOLS(auto) JM_CMAKE_MIN(3.20)
-#   JM_GRADLE_MIN(8.14.6) JM_GRADLE_VERSION() JM_NDK_MIN_MAJOR(28) JM_ORT_VERSION
+#   JM_GRADLE_MIN(9.1.0) JM_GRADLE_VERSION() JM_NDK_MIN_MAJOR(28) JM_ORT_VERSION
 #   JM_VENV    buildozer 宿主 venv（要求 python <= 3.11）   默认 $JM_WORK/venv311
 #   JM_VPY     宿主 python                                默认 $JM_VENV/bin/python
 #   JM_DEPLOY  pyside6-android-deploy                     默认 $JM_VENV/bin/pyside6-android-deploy
@@ -78,8 +80,8 @@ if [ -n "${JM_NDK:-}" ]; then
     JM_NDK_VER="$(jm_ndk_version_of "$JM_NDK")"
 fi
 
-# JDK 同理：不写死 17，也不盲信 PATH/JAVA_HOME（系统默认可能已是 27，
-# 而 Gradle 8.14 只支持到 Java 24）。区间定义在 tools/versions.env。
+# JDK 同理：不写死 17，也不盲信 PATH/JAVA_HOME（系统默认可能已远超 Gradle 支持的
+# class file 版本）。区间定义在 tools/versions.env。
 # shellcheck source=resolve_jdk.sh
 . "$JM_TOOLS_DIR/resolve_jdk.sh"
 if [ -z "${JM_JDK:-}" ]; then

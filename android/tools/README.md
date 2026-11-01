@@ -100,7 +100,7 @@ Android 移植用的脚本集合。**所有脚本都不写死本机路径**，�
 | `resolve_ndk.sh` | **NDK 版本不写死的唯一入口**：显式路径 > `JM_NDK_VERSION` > `$SDK/ndk/*` 中最高版本；被 `build_android.sh`/`build_arm64.sh`/`build_x86_64.sh`/`env.sh` 复用 |
 | `versions.env` | **工具链版本号的唯一事实来源**：API level / minSdk / build-tools / JDK 区间 / Gradle 下限 / cmake / NDK / ORT。只放数据不放逻辑，环境变量可覆盖 |
 | `resolve_host.sh` | **宿主平台抽象**：`jm_host_os`（识别 WSL）、`jm_nproc`、`jm_stat_mtime`、`jm_sha256`、`jm_sed_i`（GNU/BSD 通用）、`jm_realpath`、`jm_norm_path`（`D:\x` → `/mnt/d/x`）、`jm_ver_ge`、`jm_sdk_latest_pkg` |
-| `resolve_jdk.sh` | **构建 JDK 发现+区间校验**：不盲信 `PATH`/`JAVA_HOME`，只在 `JM_JDK_MIN~JM_JDK_MAX`（默认 17~24）内挑，越界给原因（Gradle 8.14 跑不了 Java 27） |
+| `resolve_jdk.sh` | **构建 JDK 发现+区间校验**：不盲信 `PATH`/`JAVA_HOME`，只在 `JM_JDK_MIN~JM_JDK_MAX`（区间值见 `versions.env`，不在此写死）内挑，越界给原因（Gradle 跑不了超区间的主版本） |
 | `check_scripts.py` | 脚本卫生：CRLF / BOM / shebang / 可执行位；`--fix` 一键规范化。CRLF 的 .sh 在 Linux 下报的是 `bad interpreter`，极易误判成环境问题 |
 | `gradle_wrapper.py` | 读/校验/改写 p4a dist 里的 `gradle-wrapper.properties`；改写时自动删掉 `distributionSha256Sum`（换了分发包校验和必失败） |
 | `check_elf_page_align.py` | **16KB 页对齐门禁**：APK/目录/单个 .so 的 `PT_LOAD.p_align` 是否 ≥16384（与 Google `check_elf_alignment.sh` 同口径），Hexagon skel 与非 ELF 数据包自动跳过，`--json/--soft` 供 CI 用 |
@@ -201,3 +201,12 @@ adb logcat -s python | grep -E "sr_qnn loaded|backend|ADSP_LIBRARY_PATH"
 * 中间产物、日志、真机证据写进 `$JM_WORK/logs`、`$JM_WORK/icon`、`android/build_logs`；
   其中 `android/build_logs/` 已被 `.gitignore` 排除，**不要提交**（含真机账号/代理 IP/样本图）。
 * 新增脚本如果只跑过一次，请放进 `archive/`，别留在这一层。
+* **`tools/local.env` 是本机唯一不入库的配置文件**（`.gitignore` 里
+  `android/tools/local.env` 一行；模板 `local.env.example` 入库）。它只写"这台机器的
+  JDK / SDK / 构建树在哪"，**缺省时一切回退到 `versions.env` 的默认值**，所以新人
+  不建它也能跑（只是会自己扫常见路径）。
+  为什么必须忽略：一旦提交，别人拿到的是"指向我机器"的路径——**不会报错，只会在他
+  机器上静默失效**，属于最难发现的一类问题。改动它不要 `git add -A`，也不要写进
+  任何文档当示例（示例放 `local.env.example`）。
+  与本机路径无关的开关（如 `JM_KEEP_BUILDOZER_CACHE=1`）也放这里，不入库。
+

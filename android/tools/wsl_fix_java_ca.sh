@@ -5,7 +5,7 @@
 set -uo pipefail
 WORK="$JM_WORK"
 JKS=/opt/java-ca.jks
-# JDK 版本不写死：tools/resolve_jdk.sh 按 versions.env 的区间挑（默认 17~24）
+# JDK 版本不写死：tools/resolve_jdk.sh 按 versions.env 的 JM_JDK_MIN/MAX 区间挑
 jm_apply_jdk || { echo "[FATAL] 找不到可用的构建 JDK；bash android/tools/resolve_jdk.sh --check 看详情"; exit 1; }
 export PATH="$JAVA_HOME/bin:$PATH"
 exec > >(tee -a "$WORK/logs/java_ca.log") 2>&1

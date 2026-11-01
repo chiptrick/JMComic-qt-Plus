@@ -2,8 +2,9 @@
 # android/tools/resolve_jdk.sh —— JDK 发现 / 版本区间校验（与 resolve_ndk.sh 同一套路）
 #
 # 为什么不能直接用 `java`：
-#   p4a → buildozer → Gradle 这条链对"构建 JVM"的版本有硬约束。Gradle 8.14.x 支持
-#   运行在 Java 17~24；系统默认 java 一旦被换成 25/27，构建会在 Groovy 初始化阶段
+#   p4a → buildozer → Gradle 这条链对"构建 JVM"的版本有硬约束。Gradle 只支持一个
+#   有限的主版本区间（下界由 Gradle 本身决定，上界由它支持的 class file 版本决定），
+#   系统默认 java 一旦超出区间（例如已是 27），构建会在 Groovy 初始化阶段
 #   直接抛 "Unsupported class file major version 71"，报错位置和真实原因毫无关系。
 #   而且本机 `java -version` 已经是 27，属于"随时会踩"的状态。
 #
@@ -12,7 +13,8 @@
 #   2. JAVA_HOME                系统设置，落在区间内才采用；不在区间则告警后继续找
 #   3. JM_JDK_VERSION=<版本>    按版本号在候选里挑
 #   4. 扫描常见安装位置，取**区间内版本最高**的一个
-# 区间：JM_JDK_MIN ~ JM_JDK_MAX（默认 17~24，定义在 tools/versions.env）
+# 区间：由 tools/versions.env 的 JM_JDK_MIN ~ JM_JDK_MAX 决定
+#   （这里刻意不写具体数字：写死过一次 17~24，后来上界升到 25，注释就成了假信息）
 #
 # 用法：
 #   . tools/resolve_jdk.sh && jm_resolve_jdk       # 设置 JM_JDK / JM_JDK_VER
