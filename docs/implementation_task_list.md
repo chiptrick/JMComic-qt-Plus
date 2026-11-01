@@ -466,6 +466,32 @@ dlopen 的）与 Qt 库无符号/ABI 冲突，C1 的"壳直接调超分"链路�
 构建脚本补充坑：host Qt 的 moc 在 `libexec/`（不在 `bin/`）；`gradle.properties` 由 make_apk 首次生成，
 补丁须在"第一次构建后、第二次构建前"打（build_wsl.sh 已改为两遍构建收敛）。
 
+### 更新 22（2026-11-01，判定实验出结果）：**C0-① 事实已成立 —— curl-impersonate 全栈在 Android 上可用且已在生产，自编推迟到 C2 决策点**
+
+对 `curl_cffi-0.16.3-cp314-cp314-android_24_arm64_v8a.whl`（Python 轨道在用的同一份，recipe 解包）实测：
+
+| 项 | 结果 |
+|---|---|
+| wheel 内 .so | 仅 2 个：`curl_cffi/_wrapper.abi3.so`（24MB，**libcurl-impersonate + BoringSSL + ngtcp2/nghttp3(H3) + ECH 全部静态内联**）+ `curl_cffi.libs/libc++_shared-d523468d.so` |
+| 16KB 对齐 | **两份都合规**（PT_LOAD 出现 0x10000 与 0x4000，最小 0x4000）——shiboken 那种上游缺陷这里没有 |
+| C API | `curl_easy_impersonate` 等 **1619 个 C 符号**全局导出（静态链接默认可见性） |
+| 耦合 | `_wrapper.abi3.so` NEEDED `libpython3.14.so`——它是 Python 扩展，**不是独立 C 库**；wheel 里没有单独的 libcurl-impersonate .so |
+| 覆盖 | PyPI(阿里云索引)只有 `android_24_arm64_v8a`（cp313/cp314），**无 x86_64 Android wheel** |
+| 应用指纹 | `src/server/server.py:243` 用 `impersonate="chrome110"`——0.16.3 支持 |
+
+**结论与定界（C0-① 记 GO，但含义变了）**：
+1. **"curl-impersonate 能在 Android 跑（TLS 指纹 + H3 + ECH）"已是事实**——生产 Python 轨道真机用户就在用；C0-① 原判据验证的"能力"不需要再证明。
+2. **C1 不需要任何新工作**：C1 架构保留 Python 网络子进程，网络指纹由现有 wheel 提供。
+3. **C++ 直连只在 C2+（删 Python）时才需要**，届时两条路：
+   - A. dlopen `_wrapper.abi3.so`（需进程内备好 libpython3.14.so + hash 名 libc++_shared——C++ 进程里塞 CPython，重）；
+   - B. 自编独立 libcurl-impersonate（NDK r30；**对齐合规已被 wheel 证明可达**，量级数天）。
+   推荐：**C0-① 定界为"已验证，自编推迟到 C2 触发时再做"**，把 C0 三项记为完成；C2 启动前再评估 A/B。
+4. 顺手收获：curl_cffi wheel 的 libc++_shared 与 NDK 的同名库是**两个不同产物**（hash 名即版本隔离），
+   arm64 dist 里那份 `libc++_shared-d523468d.so` 的对齐归一化问题维持"N3 已知风险、暂不处理"的既有结论。
+
+**至此 C0 三项全部完成（②′/③ 实验通过，① 事实成立+定界）。按用户指示，不进入 C1，等下一步指示。**
+验证脚本：`.workbuddy/tmp/verify_curlcffi_wheel.sh`（临时脚本，不随库走）。
+
 ### 更新 19（2026-11-01，订正更新 18）：**Qt 6.12 Android kit 官方存在，已取得并验证**
 
 用户要求核实后，在官方仓库新布局里找到了 kit（**更新 18 的"两条路都不通"结论作废**）：
