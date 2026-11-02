@@ -752,6 +752,25 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./sr_vk_probe ./libsr_vk.so"
 ```
 > adb 推送到 `/data/local/tmp` 时必须 `MSYS_NO_PATHCONV=1`（否则 Git Bash 会把远端路径改写成 `C:/Program Files/Git/...`）。
 
+**M2 完成（2026-11-02）：tile 管线 + ncnn 推理，MuMu 上与 ONNX 版逐像素一致**
+- `sr_vk.cpp` 实现 `srq_add/srq_load/srq_free_result`（签名与 `sr_qnn.h` 完全一致：modelId/taskId/
+  scale/target/tileSize、RGB888/RGBA、stride、SrqResult 结构体）。
+- 模型清单 `models_vk.txt`：`NAME|param|bin|scale|tile|in_channels`（样例见
+  `android/sr_qnn/cpp_vk/models_vk.sample.txt`）。
+- 实测（MuMu / Adreno 740 虚拟 / SRMD_UP2X / 192×192 输入 → 384×384）：
+  | 模式 | 与 ONNX 版对比 | 单 tile 耗时 |
+  |---|---|---|
+  | CPU（`JM_SR_VK_CPU=1`） | **PSNR 92.04dB，max\|Δ\|=1** | 0.81s |
+  | **Vulkan** | **PSNR 92.04dB，max\|Δ\|=1** | 0.87s |
+  > 1 LSB 差异来自 8bit 取整；模拟器的"虚拟 Adreno"比 CPU 还慢是正常的，真机才有意义。
+
+三个已定位的坑（都写进代码注释）：
+1. **SRMD 的 ncnn 模型要 19 通道**（3 图 + 15 退化常量 + noise）；只喂 3 通道会让 ncnn 卷积读越界 →
+   **直接段错误**，不是"结果不对"；
+2. **fp16 必须按设备能力开**：x86 模拟器的虚拟 Adreno 报 `support_fp16_storage=false`，硬开同样段错误；
+3. `Extractor::input/extract(int)` 收的是 **blob 索引**，不是"第几个输入/输出"；用 0 会拿输入块当输出
+   （表现为"输出跟输入一样大"），应改用 `input_indexes()/output_indexes()`。
+
 ## 0D. 临时运维措施（整个计划完成前有效）
 
 **GitHub CI 已全部禁用**（2026-11-02 15:37，用户要求：计划完成前暂停所有 CI）。

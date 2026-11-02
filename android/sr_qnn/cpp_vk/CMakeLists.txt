@@ -45,10 +45,8 @@ target_link_libraries(sr_vk PRIVATE
     m
     atomic
 )
-# ncnn 用 NCNN_OPENMP=ON 编的，符号是 __kmpc_*（clang 的 libomp），不是 glibc 的 libgomp。
-# 用 -fopenmp 让 NDK clang 自己挂 libomp（NDK 里 libomp.a 在 clang/<ver>/lib/linux/<arch>/）。
-target_compile_options(sr_vk PRIVATE -fopenmp)
-target_link_options(sr_vk PRIVATE -fopenmp)
+# 与 ncnn 的编译口径保持一致（这些宏在头文件里守卫着 load_param(const char*) / input_names 等声明）
+target_compile_definitions(sr_vk PRIVATE NCNN_VULKAN NCNN_STRING NCNN_STDIO)
 
 set_target_properties(sr_vk PROPERTIES
     OUTPUT_NAME "sr_vk"
