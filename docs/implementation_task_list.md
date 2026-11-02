@@ -729,6 +729,29 @@ Python 层 `sr_backend` 按能力选择：有 QNN → `libsr_qnn`；无 QNN 但�
 **已启动**：`android/tools/build_ncnn_android.sh`（ncnn tag `20240820`，`-DNCNN_VULKAN=ON`，NDK r30，
 arm64-v8a；源码需在宿主 clone 后传到 WSL，因为 WSL 到 github 不通）。
 
+## 0D. 临时运维措施（整个计划完成前有效）
+
+**GitHub CI 已全部禁用**（2026-11-02 15:37，用户要求：计划完成前暂停所有 CI）。
+
+| 仓库 | workflow | 状态 |
+|---|---|---|
+| `chiptrick/JMComic-qt-Android` | CI (`.github/workflows/CI.yml`) | `disabled_manually` |
+| 同上 | android (`.github/workflows/android.yml`) | `disabled_manually` |
+| 同上 | release (`.github/workflows/release.yml`) | `disabled_manually` |
+
+禁用方式是 **GitHub API 级禁用**（不是删文件/改 yml），因此：① 仓库文件零改动、历史可追溯；
+② 对 push 立即生效（不会因为新提交被重新触发）；③ 恢复只需一条命令。
+
+**恢复（计划完成后执行）**：
+```bash
+for id in 378532840 378532841 378532843; do
+  gh api -X PUT "repos/chiptrick/JMComic-qt-Android/actions/workflows/$id/enable"
+done
+gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
+  --jq '.workflows[] | "\(.state)\t\(.name)"'      # 应全部回到 active
+```
+> 注意：workflow id 是仓库内固定值；若未来新增 workflow，需要单独禁用。
+
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
 
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。
