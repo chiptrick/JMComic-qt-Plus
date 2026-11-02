@@ -98,13 +98,26 @@ bool EnsureReady(QString *pyBin, QString *err)
         LOGI("unpacked python bundle to %s", qPrintable(bundleRoot));
     }
 
+    const QString sitePackages = bundleRoot + QStringLiteral("/_python_bundle/site-packages");
     qputenv("PYTHONPATH",
             QStringLiteral("%1:%2:%3")
                 .arg(bundleRoot + QStringLiteral("/_python_bundle/stdlib.zip"),
                      bundleRoot + QStringLiteral("/_python_bundle/modules"),
-                     bundleRoot + QStringLiteral("/_python_bundle/site-packages"))
+                     sitePackages)
                 .toUtf8());
     qputenv("LD_LIBRARY_PATH", binDir.toUtf8());
+
+    // Python 的 ssl 只认编译期的 OpenSSL 证书路径（/etc/ssl/certs），Android 上并不存在，
+    // 于是任何 HTTPS 都会 CERTIFICATE_VERIFY_FAILED（模拟器实测：P4 net.request 直接死在
+    // 这里，错误码 SSLErr）。bundle 里自带 certifi，指过去即可。
+    const QString caFile = sitePackages + QStringLiteral("/certifi/cacert.pem");
+    if (QFile::exists(caFile)) {
+        qputenv("SSL_CERT_FILE", caFile.toLocal8Bit());
+        qputenv("REQUESTS_CA_BUNDLE", caFile.toLocal8Bit());
+    } else {
+        LOGI("certifi cacert.pem not found: %s", qPrintable(caFile));
+    }
+
     if (pyBin) *pyBin = bin;
     return true;
 }
