@@ -1046,6 +1046,38 @@ bash android/tools/c1_w7_regression.sh --apk <apk>    # 真机到位后跑；无
 4. `set -o pipefail` 下 `unzip -l "$APK" | grep -q` 会因 SIGPIPE 误判"包里没有"，
    门禁要先落盘清单再 grep。
 
+### 0E-3. 构建链路迁至 Windows + W7/W8 真机结果（2026-11-02 第四轮）
+
+**为什么迁**：WSL 那套 Qt 只解了 x86_64 kit（没有 arm64 库与 arm64 TLS 插件），
+arm64 包卡在 `C1_TLS_PLUGIN`；Windows 侧 `android_arm64_v8a`/`android_x86_64` 是完整的，
+NDK 30 / JDK 21 / Gradle 9.8.2 也都在本机。
+
+| 项 | 结果 |
+|---|---|
+| 入口 | `powershell -File android/c1_shell/build_windows.ps1 -Abi arm64-v8a` |
+| 依赖缓存 | `C:\Users\WQ159\jmcomic-build\deps\{libs,openssl}\<abi>`（不入库，脚本校验） |
+| arm64 OpenSSL | 源码 3.3.1 交叉编译，`SONAME=libssl.so`、`p_align=0x4000`（16KB） |
+| 产物 | `JMComic-c1-0.2-arm64-v8a-debug.apk` **68MB** |
+| 门禁 | 23 库全对齐 / 直链命中 / CA 与两套 OpenSSL 与 TLS 插件在包内 |
+
+**真机（vivo V2463A / Android 17 / Enforcing / 120Hz）W7 结果**：
+
+| 项 | 值 | 对照 Python 版 |
+|---|---|---|
+| 冷启动中位 | **189ms** | 211ms |
+| PSS | **206MB** | 547MB |
+| 阅读器自检 | `selftest done pages=4 twoPage=1 rtl=1 brightness=0.75` | — |
+| 设置自检 | `settings selftest OK` | — |
+| 网络 | `net OK 200 17143B 102ms` | Python 走 curl_cffi |
+| 直链 | `sr_qnn in link map OK` | — |
+| 崩溃 | 0 | — |
+| 帧率 p95 | **未取得**（仪器不适用，见 W7 §4） | — |
+
+**遗留**：
+1. 帧率打点（`QWindow::frameSwapped`）——决定 P3 是否成立；
+2. 人工 checklist（F2/F3/F5/F6/F7 + S2/S3）；
+3. CI 恢复（`378532840/841/843`）。
+
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。
 

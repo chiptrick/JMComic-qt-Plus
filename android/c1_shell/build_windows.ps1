@@ -1,0 +1,183 @@
+# C1 shell - Windows one-shot build (replaces build_wsl.sh)
+#
+# Why: the WSL Qt install only has the x86_64 kit (no arm64 libs / no arm64 TLS plugin),
+# while the Windows Qt install ships android_arm64_v8a + android_x86_64 complete, and
+# NDK / JDK / Gradle are local. Keep this file ASCII-only: Windows PowerShell 5.1 reads
+# BOM-less UTF-8 as ANSI and non-ASCII text breaks the parser.
+#
+# Dependencies (prepared once, not in the repo):
+#   <DepsRoot>\libs\<abi>\{libsr_qnn.so,libonnxruntime.so}
+#   <DepsRoot>\openssl\<abi>\{libssl.so,libcrypto.so}     # 16KB-aligned preferred
+#
+# Usage:
+#   powershell -File android/c1_shell/build_windows.ps1 -Abi arm64-v8a
+#   powershell -File android/c1_shell/build_windows.ps1 -Abi x86_64 -SkipGates
+#
+[CmdletBinding()]
+param(
+    [ValidateSet('arm64-v8a', 'x86_64')] [string]$Abi = 'arm64-v8a',
+    [string]$DepsRoot = 'C:\Users\WQ159\jmcomic-build\deps',
+    [string]$QtRoot = 'C:\Qt\6.12.0',
+    [string]$Ndk = '',
+    [string]$ApiLevel = 'android-36',
+    [switch]$SkipGates
+)
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+function Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+function Fail($msg) { Write-Host "[fail] $msg" -ForegroundColor Red; exit 1 }
+
+$C1Dir = $PSScriptRoot
+$Repo = (Resolve-Path (Join-Path $C1Dir '..\..')).Path
+$Build = Join-Path $C1Dir "build-win\$Abi"
+$QtAndroid = Join-Path $QtRoot ("android_" + ($Abi -replace '-', '_'))
+$QtHost = Join-Path $QtRoot 'mingw_64'
+$QtCmake = Join-Path $QtAndroid 'bin\qt-cmake.bat'
+# Qt Tools live next to the version dir (C:\Qt\Tools\Ninja), not inside C:\Qt\6.12.0
+$QtToolsRoot = Join-Path (Split-Path $QtRoot -Parent) 'Tools'
+$Ninja = Join-Path $QtToolsRoot 'Ninja\ninja.exe'
+$TlsPlugin = Join-Path $QtAndroid "plugins\tls\libplugins_tls_qopensslbackend_$Abi.so"
+
+$Sdk = $env:ANDROID_HOME
+if (-not $Sdk) { $Sdk = $env:ANDROID_SDK_ROOT }
+if (-not $Sdk) { $Sdk = 'C:\Users\WQ159\AppData\Local\Android\Sdk' }
+if (-not $Ndk) { $Ndk = Join-Path $Sdk 'ndk\30.0.16248370' }
+
+$SslSrc = Join-Path $DepsRoot "openssl\$Abi"
+$LibSrc = Join-Path $DepsRoot "libs\$Abi"
+
+# ---- Preflight: fail loudly, never guess ----
+foreach ($p in @($QtCmake, $TlsPlugin, (Join-Path $QtHost 'bin\androiddeployqt.exe'),
+                 (Join-Path $Ndk 'ndk-build.cmd'), (Join-Path $Sdk "platforms\$ApiLevel"),
+                 (Join-Path $SslSrc 'libssl.so'), (Join-Path $SslSrc 'libcrypto.so'),
+                 (Join-Path $LibSrc 'libsr_qnn.so'), (Join-Path $C1Dir 'assets\cacert.pem'))) {
+    if (-not (Test-Path $p)) { Fail "missing prerequisite: $p" }
+}
+if (-not (Test-Path $Ninja)) { $Ninja = (Get-Command ninja -ErrorAction SilentlyContinue).Source }
+if (-not $Ninja) { Fail "ninja not found (Qt\Tools\Ninja or PATH)" }
+
+# Gradle needs a JVM; prefer Android Studio's JBR over the javapath stub
+if (-not $env:JAVA_HOME) {
+    $jbr = 'C:\Program Files\Android\Android Studio\jbr'
+    if (Test-Path (Join-Path $jbr 'bin\java.exe')) { $env:JAVA_HOME = $jbr }
+}
+Step "ABI=$Abi Qt=$QtAndroid NDK=$Ndk JAVA_HOME=$env:JAVA_HOME"
+
+# ---- Fresh build dir + OpenSSL staging (with the _3 aliases Qt looks for) ----
+if (Test-Path $Build) { Remove-Item $Build -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $Build | Out-Null
+$SslStage = Join-Path $Build 'staging\openssl'
+New-Item -ItemType Directory -Force -Path $SslStage | Out-Null
+Copy-Item (Join-Path $SslSrc 'libssl.so') (Join-Path $SslStage 'libssl.so') -Force
+Copy-Item (Join-Path $SslSrc 'libcrypto.so') (Join-Path $SslStage 'libcrypto.so') -Force
+# Qt's OSSL backend on Android asks for libssl_3.so / libcrypto_3.so; a plain
+# libssl.so alone yields "Failed to load libssl/libcrypto." at runtime.
+Copy-Item (Join-Path $SslSrc 'libssl.so') (Join-Path $SslStage 'libssl_3.so') -Force
+Copy-Item (Join-Path $SslSrc 'libcrypto.so') (Join-Path $SslStage 'libcrypto_3.so') -Force
+
+# ---- Configure ----
+Step "qt-cmake configure"
+& $QtCmake -S $C1Dir -B $Build -G Ninja `
+    "-DCMAKE_MAKE_PROGRAM=$Ninja" `
+    "-DANDROID_ABI=$Abi" `
+    "-DANDROID_PLATFORM=$ApiLevel" `
+    "-DANDROID_SDK_ROOT=$Sdk" `
+    "-DANDROID_NDK_ROOT=$Ndk" `
+    "-DCMAKE_BUILD_TYPE=Debug" `
+    "-DQT_HOST_PATH=$QtHost" `
+    "-DSRQ_LIBS_DIR=$LibSrc" `
+    "-DOPENSSL_DIR=$SslStage" `
+    "-DC1_TLS_PLUGIN=$TlsPlugin"
+if ($LASTEXITCODE -ne 0) { Fail "configure failed (exit $LASTEXITCODE)" }
+
+# First pass: generates gradle config. It may fail because Qt defaults compileSdk to 34
+# while androidx requires >= 36 - that is expected, we patch and rebuild below.
+# NOTE: build output goes to files, never to a pipe. The Gradle daemon inherits the
+# child's stdout handle, so piping the build into e.g. `| Select-Object` makes the outer
+# pipeline wait forever even after the APK is produced.
+Step "build pass 1 (generate gradle config)"
+$Log1 = Join-Path $Build 'build-pass1.log'
+& cmake --build $Build *> $Log1
+if (Test-Path $Log1) { Get-Content $Log1 -Tail 15 | Out-Host }
+
+$GradleProps = Join-Path $Build 'android-build\gradle.properties'
+if (Test-Path $GradleProps) {
+    (Get-Content $GradleProps) -replace '^androidCompileSdkVersion=.*', "androidCompileSdkVersion=$ApiLevel" |
+        Set-Content $GradleProps -Encoding ascii
+    Step "gradle.properties: compileSdk=$ApiLevel"
+}
+
+# CA bundle into assets (qrc is the primary path, assets is the fallback + gate check)
+$AssetsDir = Join-Path $Build 'android-build\assets'
+New-Item -ItemType Directory -Force -Path $AssetsDir | Out-Null
+Copy-Item (Join-Path $C1Dir 'assets\cacert.pem') (Join-Path $AssetsDir 'cacert.pem') -Force
+
+# Wrapper via Tencent mirror (upstream often fails TLS through a proxy here)
+$WrapperProps = Join-Path $Build 'android-build\gradle\wrapper\gradle-wrapper.properties'
+if (Test-Path $WrapperProps) {
+    (Get-Content $WrapperProps) -replace '^distributionUrl=.*',
+        'distributionUrl=https\://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip' |
+        Set-Content $WrapperProps -Encoding ascii
+    Step "gradle wrapper -> Tencent mirror"
+}
+
+Step "build pass 2 (compile + package)"
+$Log2 = Join-Path $Build 'build-pass2.log'
+& cmake --build $Build *> $Log2
+if (Test-Path $Log2) { Get-Content $Log2 -Tail 20 | Out-Host }
+if ($LASTEXITCODE -ne 0) { Fail "build failed (exit $LASTEXITCODE)" }
+
+$Apk = Join-Path $Build 'android-build\build\outputs\apk\debug\android-build-debug.apk'
+if (-not (Test-Path $Apk)) { Fail "no APK produced: $Apk" }
+$sizeMb = [math]::Round((Get-Item $Apk).Length / 1MB, 1)
+Step "APK: $Apk ($sizeMb MB)"
+
+if (-not $SkipGates) {
+    # ---- Gate 1: required entries inside the APK ----
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Apk)
+    $names = $zip.Entries | ForEach-Object { $_.FullName }
+    $zip.Dispose()
+    $required = @(
+        'assets/cacert.pem',
+        "lib/$Abi/libssl.so",
+        "lib/$Abi/libcrypto.so",
+        "lib/$Abi/libssl_3.so",
+        "lib/$Abi/libcrypto_3.so",
+        "lib/$Abi/libplugins_tls_qopensslbackend_$Abi.so"
+    )
+    foreach ($r in $required) {
+        if ($names -contains $r) { Write-Host "[OK] APK contains $r" -ForegroundColor Green }
+        else { Fail "APK misses $r (Qt TLS backend will not find OpenSSL)" }
+    }
+
+    # ---- Gate 2: direct link (main .so must NEED libsr_qnn.so) ----
+    $ReadElf = Join-Path $Ndk 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe'
+    $AppSo = Get-ChildItem $Build -Filter "libc1shell_*.so" -File | Select-Object -First 1
+    if (-not $AppSo) { Fail "libc1shell_*.so not found, cannot verify direct link" }
+    $needed = & $ReadElf -d $AppSo.FullName | Select-String 'NEEDED'
+    if ($needed -match 'libsr_qnn\.so') {
+        Write-Host "[OK] direct link: $($AppSo.Name) DT_NEEDED has libsr_qnn.so" -ForegroundColor Green
+    } else {
+        Fail "$($AppSo.Name) DT_NEEDED has no libsr_qnn.so - direct link broken"
+    }
+
+    # ---- Gate 3: 16KB page alignment ----
+    $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if ($py) {
+        & $py (Join-Path $Repo 'android\tools\check_elf_page_align.py') $Apk
+        if ($LASTEXITCODE -ne 0) { Fail "16KB gate failed" }
+    } else {
+        Write-Host "[warn] python not found, skip 16KB gate" -ForegroundColor Yellow
+    }
+}
+
+# ---- Archive ----
+$Dist = Join-Path $Repo 'android\dist'
+New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+$Version = '0.2'
+$Dest = Join-Path $Dist "JMComic-c1-$Version-$Abi-debug.apk"
+Copy-Item $Apk $Dest -Force
+Step "archived: $Dest"

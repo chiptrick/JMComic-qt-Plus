@@ -185,3 +185,5 @@ docs/bench_raw/**/*.apk
 # 量化低精度变体（PSNR<35dB，仅本地留存，不进交付）
 *_q16_lowq.onnx
 .Trash-0/
+android/c1_shell/build-win/
+android/c1_shell/openssl/

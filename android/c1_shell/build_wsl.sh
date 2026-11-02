@@ -49,19 +49,39 @@ rsync -a --delete "$REPO_WSL/android/c1_shell/" "$SRC/"
 # --- C1 网络：随包 OpenSSL（Qt TLS 后端运行时 dlopen 它） ---
 ABI="${ABI:-x86_64}"
 NET_SSL_DIR="$SRC/openssl/$ABI"
-NET_SSL_SRC=$(find "$HOME/jmcomic-build/keep-"* -path "*/dists/*/libs/$ABI/libssl.so" 2>/dev/null | head -1 || true)
-if [ -n "$NET_SSL_SRC" ] && [ -f "$NET_SSL_SRC" ]; then
-  mkdir -p "$NET_SSL_DIR"
-  cp "$NET_SSL_SRC" "$NET_SSL_DIR/libssl.so"
-  cp "$(dirname "$NET_SSL_SRC")/libcrypto.so" "$NET_SSL_DIR/libcrypto.so"
+mkdir -p "$NET_SSL_DIR"
+
+# 三个来源按优先级取：
+#   1) 自编的 16KB 对齐版本（arm64 专用，见 /tmp/build_openssl_a64.sh）；
+#   2) p4a dist（x86_64 有；arm64 的 dist 缺 openssl）；
+#   3) 同 ABI 的成品 APK 里抽（arm64 走这条：0.88 包里带 libssl/libcrypto，4KB 对齐）。
+SSL_DIR=""
+if [ -f "$HOME/jmcomic-build/openssl-a64/libssl.so" ]; then
+  SSL_DIR="$HOME/jmcomic-build/openssl-a64"
+fi
+if [ -z "$SSL_DIR" ]; then
+  _p=$(find "$HOME/jmcomic-build/keep-"* -path "*/dists/*/libs/$ABI/libssl.so" 2>/dev/null | head -1 || true)
+  [ -n "$_p" ] && SSL_DIR=$(dirname "$_p")
+fi
+if [ -z "$SSL_DIR" ]; then
+  _apk=$(ls -t "$HOME"/jmcomic-build/src/android/*"$ABI"*.apk 2>/dev/null | head -1 || true)
+  if [ -n "$_apk" ]; then
+    unzip -o -q "$_apk" "lib/$ABI/libssl.so" "lib/$ABI/libcrypto.so" -d "$NET_SSL_DIR/extract" 2>/dev/null || true
+    SSL_DIR="$NET_SSL_DIR/extract/lib/$ABI"
+    echo "OpenSSL 取自 $_apk（注意：p4a 的 arm64 库是 4KB 对齐）"
+  fi
+fi
+
+if [ -n "$SSL_DIR" ] && [ -f "$SSL_DIR/libssl.so" ] && [ -f "$SSL_DIR/libcrypto.so" ]; then
+  cp "$SSL_DIR/libssl.so" "$NET_SSL_DIR/libssl.so"
+  cp "$SSL_DIR/libcrypto.so" "$NET_SSL_DIR/libcrypto.so"
   # Qt 在 Android 上按它自己 android_openssl 包的命名（libssl_3.so / libcrypto_3.so）
   # 找库；只给 libssl.so 会得到 "Failed to load libssl/libcrypto."（插件能加载但后端不可用）。
-  # 同一份文件多两个别名，代价约 6MB，换 TLS 可用。
-  cp "$NET_SSL_SRC" "$NET_SSL_DIR/libssl_3.so"
-  cp "$(dirname "$NET_SSL_SRC")/libcrypto.so" "$NET_SSL_DIR/libcrypto_3.so"
-  echo "OpenSSL libs -> $NET_SSL_DIR (from $(dirname "$NET_SSL_SRC"))"
+  cp "$SSL_DIR/libssl.so" "$NET_SSL_DIR/libssl_3.so"
+  cp "$SSL_DIR/libcrypto.so" "$NET_SSL_DIR/libcrypto_3.so"
+  echo "OpenSSL libs -> $NET_SSL_DIR (from $SSL_DIR)"
 else
-  echo "[fail] 没找到 $ABI 的 libssl.so/libcrypto.so（p4a dist 里应有）；HTTPS 会不可用"
+  echo "[fail] 没找到 $ABI 的 libssl.so/libcrypto.so（三处来源都空）；HTTPS 会不可用"
   exit 1
 fi
 

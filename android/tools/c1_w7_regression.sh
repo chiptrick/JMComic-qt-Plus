@@ -54,6 +54,17 @@ mkdir -p "$OUT"
 REPORT="$OUT/report.md"
 
 say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$OUT/run.log"; }
+# 启动应用：vivo 上 am start 紧跟 force-stop 偶尔不生效（日志里连启动痕迹都没有），
+# 这里用 -W 等待并对 pid 做一次校验重试，避免"静默没起来"被当成"功能 MISS"。
+start_app() {
+  "$ADB" -s "$DEV" shell am start -W -n "$PKG/$ACT" >/dev/null 2>&1 || true
+  sleep 2
+  if [ -z "$("$ADB" -s "$DEV" shell pidof "$PKG" 2>/dev/null | tr -d '\r')" ]; then
+    "$ADB" -s "$DEV" shell am start -n "$PKG/$ACT" >/dev/null 2>&1 || true
+    sleep 2
+  fi
+}
+
 row() { printf '| %s | %s | %s | %s |\n' "$1" "$2" "$3" "$4" >> "$REPORT"; }
 
 # ---- 0. 设备 ----
@@ -115,14 +126,16 @@ fi
 # 投图（阅读器目录：应用私有 files/reader）
 if [ -n "$IMAGES" ] && [ -d "$IMAGES" ]; then
   say "投图: $IMAGES"
-  "$ADB" -s "$DEV" shell run-as "$PKG" mkdir -p files/reader >/dev/null 2>&1
+  "$ADB" -s "$DEV" shell "run-as $PKG mkdir -p files/reader" >/dev/null 2>&1
   for img in "$IMAGES"/*; do
     [ -f "$img" ] || continue
     case "${img,,}" in
       *.jpg|*.jpeg|*.png|*.webp|*.bmp|*.gif)
-        "$ADB" -s "$DEV" push "$img" "/data/local/tmp/$(basename "$img")" >/dev/null 2>&1
-        "$ADB" -s "$DEV" shell run-as "$PKG" cp "/data/local/tmp/$(basename "$img")" \
-          "files/reader/$(basename "$img")" >/dev/null 2>&1
+        # 不能走 /data/local/tmp 中转（应用 uid 无法遍历该目录），也不能用 stdin
+        # （adb shell 的 PTY 会截断二进制）。base64 走命令行是唯一稳定的路径，
+        # 已用 md5 对拍验证过。
+        b64=$(base64 -w0 "$img")
+        "$ADB" -s "$DEV" shell "run-as $PKG sh -c 'echo $b64 | base64 -d > files/reader/$(basename "$img")'" >/dev/null 2>&1
         ;;
     esac
   done
@@ -149,8 +162,8 @@ say "冷启动中位: ${MEDIAN}ms"
 "$ADB" -s "$DEV" logcat -c >/dev/null 2>&1
 "$ADB" -s "$DEV" shell am force-stop "$PKG" >/dev/null 2>&1
 sleep 1
-"$ADB" -s "$DEV" shell run-as "$PKG" sh -c 'touch files/selftest files/net_selftest' >/dev/null 2>&1
-"$ADB" -s "$DEV" shell am start -n "$PKG/$ACT" >/dev/null 2>&1
+"$ADB" -s "$DEV" shell "run-as $PKG sh -c 'touch files/selftest files/net_selftest'" >/dev/null 2>&1
+start_app
 say "已触发 selftest / net_selftest，等待 30s 采集日志"
 sleep 30
 "$ADB" -s "$DEV" logcat -d > "$OUT/logcat.txt" 2>/dev/null
@@ -160,8 +173,9 @@ grep -q "selftest done pages=" "$OUT/c1_log.txt" && SE=OK || SE=MISS
 grep -q "settings selftest OK" "$OUT/c1_log.txt" && SS=OK || SS=MISS
 grep -q "net OK 2[0-9][0-9]" "$OUT/c1_log.txt" && NET=OK || NET=MISS
 grep -q "CA ready" "$OUT/c1_log.txt" && CA=OK || CA=MISS
-grep -q "sr_qnn direct-link: YES" "$OUT/c1_log.txt" && SRQ=OK || SRQ=MISS
-CRASH=$(grep -cE "FATAL EXCEPTION|AndroidRuntime.*FATAL" "$OUT/logcat.txt" 2>/dev/null || echo 0)
+grep -q "sr_qnn in link map OK" "$OUT/c1_log.txt" && SRQ=OK || SRQ=MISS
+CRASH=$(grep -cE "FATAL EXCEPTION|AndroidRuntime.*FATAL" "$OUT/logcat.txt" 2>/dev/null | head -1 || true)
+CRASH=${CRASH:-0}
 
 # ---- 4. PSS ----
 PSSLINE=$("$ADB" -s "$DEV" shell dumpsys meminfo "$PKG" 2>/dev/null | tr -d '\r' | awk '/TOTAL/ {print; exit}')
@@ -172,8 +186,14 @@ row "内存 PSS" "${PSS_MB}MB（${PSS:-NA}KB）" "≤450MB" "$([ "${PSS_MB:-0}" 
 
 # ---- 5. 帧耗时（gfxinfo p95） ----
 "$ADB" -s "$DEV" shell dumpsys gfxinfo "$PKG" reset >/dev/null 2>&1
-say "翻页采样：请在设备上手动连续翻 20 页，等待 10s 后继续"
-sleep 10
+# 不等人工：用 selftest 钩子让阅读器自己连续翻页/缩放（间隔 300ms），
+# 这样 gfxinfo 采到的是真实渲染帧，而不是空窗口下的 0 帧。
+"$ADB" -s "$DEV" shell "run-as $PKG sh -c 'touch files/selftest'" >/dev/null 2>&1
+"$ADB" -s "$DEV" shell am force-stop "$PKG" >/dev/null 2>&1
+sleep 1
+start_app
+say "翻页采样：selftest 自动翻页中，等待 12s"
+sleep 12
 "$ADB" -s "$DEV" shell dumpsys gfxinfo "$PKG" > "$OUT/gfxinfo.txt" 2>/dev/null
 P95=$("$ADB" -s "$DEV" shell dumpsys gfxinfo "$PKG" 2>/dev/null | tr -d '\r' \
       | awk -F': ' '/95th percentile/ {print $2+0; exit}')
@@ -195,7 +215,7 @@ cat >> "$REPORT" <<EOF
 | 设置页自检 | \`settings selftest OK\` | $SS | $([ "$SS" = OK ] && echo PASS || echo FAIL) |
 | CA 证书就绪 | \`CA ready\` | $CA | $([ "$CA" = OK ] && echo PASS || echo FAIL) |
 | 真实请求 | \`net OK 2xx\` | $NET | $([ "$NET" = OK ] && echo PASS || echo FAIL) |
-| 直链探针 | \`sr_qnn direct-link: YES\` | $SRQ | $([ "$SRQ" = OK ] && echo PASS || echo FAIL) |
+| 直链探针 | \`sr_qnn in link map OK\` | $SRQ | $([ "$SRQ" = OK ] && echo PASS || echo FAIL) |
 | 崩溃行数 | 0 | $CRASH | $([ "$CRASH" -eq 0 ] && echo PASS || echo FAIL) |
 
 ## 3. 必须人工确认（脚本不代判）
