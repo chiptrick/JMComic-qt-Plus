@@ -54,6 +54,7 @@ ModelNames = [
 ]
 
 LibName = "libsr_qnn.so"
+VulkanLibName = "libsr_vk.so"
 ProcName = "libsr_qnn_proc.so"
 Version = "sr_qnn 1.4.1 (ONNX Runtime QNN/HTP)"
 # QNN 后端库(位于 libsr_qnn.so 同目录，由 onnxruntime-android-qnn 提供)
@@ -66,6 +67,8 @@ _procError = ""         # 进程模式失败的具体原因(自检会打印)
 _lock = threading.Lock()
 _loaded = False
 _loadError = ""
+_engineKind = "qnn"       # qnn / vulkan：同一套 Python 兼容接口，原生实现不同
+_activeModelDir = ""
 _modelIdByName = {}
 _modelNameById = {}
 _modelInfoById = {}
@@ -99,7 +102,12 @@ def _SearchLib():
 
 
 def _SearchFile(name):
-    envKey = "JM_SR_QNN_PROC" if name == ProcName else "JM_SR_QNN_LIB"
+    if name == ProcName:
+        envKey = "JM_SR_QNN_PROC"
+    elif name == VulkanLibName:
+        envKey = "JM_SR_VK_LIB"
+    else:
+        envKey = "JM_SR_QNN_LIB"
     envLib = os.environ.get(envKey)
     if envLib and os.path.exists(envLib):
         return envLib
@@ -444,10 +452,10 @@ class _ProcEngine(object):
         return
 
 
-def _PreloadLibs(libDir):
-    """ 预加载依赖库 """
+def _PreloadLibs(libDir, names=None):
+    """ 预加载依赖库；Vulkan 后端只需要 libc++，不能强拉 ONNX/QNN """
     loaded = []
-    for name in DependLibs:
+    for name in (DependLibs if names is None else names):
         path = os.path.join(libDir, name)
         if not os.path.exists(path):
             continue
@@ -541,13 +549,15 @@ def _LoadModelTable():
         _modelIdByName[name] = modelId
         _modelNameById[modelId] = name
         globals()["MODEL_" + name] = modelId
-    # 自检：C++ 内置表/模型清单/界面下拉列表三处必须一致，不一致时提示(不影响运行)
-    loaded = set(_modelIdByName.keys())
-    expected = set(ModelNames)
-    missing = sorted(expected - loaded)
-    extra = sorted(loaded - expected)
-    if missing or extra:
-        Log.Warn("sr_qnn 模型表与界面列表不一致, 缺失:{} 多余:{}".format(missing, extra))
+    # 自检：QNN 的 C++ 内置表/模型清单/界面下拉列表三处必须一致。
+    # Vulkan 是按需下载的子集，只列已装模型，不能与完整 ModelNames 比数量。
+    if _engineKind == "qnn":
+        loaded = set(_modelIdByName.keys())
+        expected = set(ModelNames)
+        missing = sorted(expected - loaded)
+        extra = sorted(loaded - expected)
+        if missing or extra:
+            Log.Warn("sr_qnn 模型表与界面列表不一致, 缺失:{} 多余:{}".format(missing, extra))
     return count
 
 
@@ -569,6 +579,11 @@ def _HasQnnRuntime():
         · x86_64：直接走 ctypes + CPU EP
     """
     return bool(_SearchFile(QnnBackendLib))
+
+
+def HasQnnRuntime():
+    """ 包内是否带 QNN 运行库；后端选择用它避免在无 QNN 机型先占住 CPU 后端 """
+    return _HasQnnRuntime()
 
 
 def Diagnose():
@@ -665,19 +680,27 @@ def _StartProcEngine(modelDir):
     return None
 
 
-def LoadEngine(modelDir=None):
+def LoadEngine(modelDir=None, backend="qnn"):
     """ 加载引擎并初始化(失败返回 False，不抛异常)
 
-    优先进程模式(QNN HTP 的 FastRPC 只有子进程能拿到)，失败再回退 ctypes。
+    backend="qnn"：优先进程模式(QNN HTP 的 FastRPC 只有子进程能拿到)，失败回退 ctypes。
+    backend="vulkan"：直接加载 libsr_vk.so，模型目录默认是 <models>/vk。
     """
-    global _lib, _proc, _loaded, _loadError
+    global _lib, _proc, _loaded, _loadError, _engineKind, _activeModelDir
     with _lock:
         if _loaded:
-            return True
+            return _engineKind == backend
         if _lib is not None or _proc is not None:
             return False
         if modelDir is None:
             modelDir = platform_mobile.GetAndroidModelDir()
+            if backend == "vulkan":
+                modelDir = os.path.join(modelDir, "vk")
+        if backend == "vulkan":
+            return _LoadVulkanEngine(modelDir)
+        _engineKind = "qnn"
+        _activeModelDir = modelDir
+        os.environ["JM_SR_MODELS"] = modelDir
         proc = _StartProcEngine(modelDir)
         if proc is not None:
             if CountAvailableModels() > 0:
@@ -726,6 +749,46 @@ def LoadEngine(modelDir=None):
             _loadError = str(es)
             Log.Error(es)
             return False
+
+
+def _LoadVulkanEngine(modelDir):
+    """ ctypes 加载 ncnn/Vulkan 后端；调用方已持有 _lock """
+    global _lib, _loaded, _loadError, _engineKind, _activeModelDir
+    try:
+        path = _SearchFile(VulkanLibName)
+        if not os.path.isabs(path) or not os.path.exists(path):
+            _loadError = "找不到 {} (解析结果: {})".format(VulkanLibName, path)
+            Log.Warn(_loadError)
+            return False
+        os.makedirs(modelDir, exist_ok=True)
+        _PreloadLibs(os.path.dirname(os.path.abspath(path)), ("libc++_shared.so",))
+        lib = ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+        _Bind(lib)
+        lib.srq_set_model_dir(modelDir.encode("utf-8"))
+        stat = lib.srq_init()
+        if stat < 0:
+            _loadError = (lib.srq_get_last_error() or b"").decode("utf-8", "ignore")
+            Log.Warn("sr_vk init failed: {}".format(_loadError))
+            return False
+        _lib = lib
+        _engineKind = "vulkan"
+        _activeModelDir = modelDir
+        os.environ["JM_SR_MODELS"] = modelDir
+        _LoadModelTable()
+        if CountAvailableModels() <= 0:
+            _loadError = "未找到任何 ncnn 模型，请下载到 {}".format(modelDir)
+            Log.Warn(_loadError)
+            _lib = None
+            return False
+        _loaded = True
+        Log.Warn("sr_vk loaded: {}, models:{}/{}, backend:{}".format(
+            path, CountAvailableModels(), len(_modelIdByName), GetBackendInfo()))
+        return True
+    except Exception as es:
+        _loadError = str(es)
+        _lib = None
+        Log.Error(es)
+        return False
 
 
 def _PrepareQnnEnv(libDir):
@@ -800,6 +863,29 @@ def RefreshStatus():
     return False
 
 
+def IsVulkan():
+    """ 当前引擎是否 ncnn/Vulkan 后端(非高通机型的 GPU 路径) """
+    return _loaded and _engineKind == "vulkan"
+
+
+def GetModelDir():
+    """ 引擎实际在用的模型目录（QNN=models 根；Vulkan=<root>/vk） """
+    return _activeModelDir
+
+
+def ReloadModels():
+    """ 让引擎重扫模型目录（下载/删除 ncnn 模型之后必须调用） """
+    if not _loaded or _proc is not None or not _activeModelDir:
+        return False
+    try:
+        _lib.srq_set_model_dir(_activeModelDir.encode("utf-8"))
+        _LoadModelTable()
+        return True
+    except Exception as es:
+        Log.Error(es)
+        return False
+
+
 # ---------------------------------------------------------------- 兼容接口
 def init():
     """ 与 sr_vulkan 一致：>=0 表示成功 """
@@ -835,9 +921,17 @@ def getVersion():
 
 
 def getGpuInfo():
-    """ 设备列表：NPU 优先，CPU 兜底(与 sr_vulkan 的显卡列表语义一致) """
+    """ 设备列表：QNN 报 NPU+CPU；Vulkan 报 GPU 设备名(与 sr_vulkan 的显卡列表语义一致) """
     info = []
-    if _loaded and HasHtp():
+    if not _loaded:
+        return info
+    if _engineKind == "vulkan":
+        backend = GetBackendInfo()
+        if backend:
+            info.append("GPU (ncnn Vulkan: {})".format(backend))
+        info.append("CPU (ncnn)")
+        return info
+    if HasHtp():
         info.append("Qualcomm Hexagon NPU (QNN HTP)")
     info.append("CPU (ONNX Runtime)")
     return info
@@ -904,10 +998,10 @@ def GetModelInfo(modelId):
 
 
 def CountAvailableModels():
-    """ 统计 models 目录里真实存在的 onnx 数量 """
+    """ 统计引擎模型目录里真实存在的模型文件数量 """
     if _lib is None and not _modelInfoById:
         return 0
-    modelDir = os.environ.get("JM_SR_MODELS") or platform_mobile.GetAndroidModelDir()
+    modelDir = _activeModelDir or os.environ.get("JM_SR_MODELS") or platform_mobile.GetAndroidModelDir()
     files = set()
     if _lib is None:
         for modelId, info in _modelInfoById.items():
@@ -1111,13 +1205,13 @@ def stop():
     return
 
 
-def Reinit(modelDir=None):
+def Reinit(modelDir=None, backend=None):
     """ 诊断用：按当前环境变量重新初始化引擎
 
     进程模式下 JM_SR_PROFILE / JM_QNN_DEBUG 之类的开关只能在子进程 spawn 时生效，
     所以自检要拿到逐节点 profile 时必须重启子进程。
     """
-    global _proc, _lib, _loaded
+    global _proc, _lib, _loaded, _engineKind, _activeModelDir, _modelIdByName, _modelNameById, _modelInfoById
     try:
         stop()
     except Exception:
@@ -1125,6 +1219,13 @@ def Reinit(modelDir=None):
     _proc = None
     _lib = None
     _loaded = False
+    _engineKind = "qnn"
+    _activeModelDir = ""
+    _modelIdByName = {}
+    _modelNameById = {}
+    _modelInfoById = {}
+    if backend:
+        return LoadEngine(modelDir, backend)
     return LoadEngine(modelDir)
 
 

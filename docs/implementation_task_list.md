@@ -764,6 +764,34 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./sr_vk_probe ./libsr_vk.so"
   | **Vulkan** | **PSNR 92.04dB，max\|Δ\|=1** | 0.87s |
   > 1 LSB 差异来自 8bit 取整；模拟器的"虚拟 Adreno"比 CPU 还慢是正常的，真机才有意义。
 
+**M3+M4 完成（2026-11-02）：ncnn 模型按需下载 + 后端自动选择**
+
+M3（模型分发）：
+- 仓库新增 `android/sr_qnn/models_vk/`（SRMD 全 6 个 ncnn 模型，param+bin 共 12 文件，
+  合计 17.5MB）+ `models_vk.txt`（含 in_channels 列）；已推 `chiptrick/JMComic-qt-Android`
+  的 `android/sr_qnn/models_vk/`（远端 13 文件 / 17.5MB）。
+- 清单生成器增加 `--ncnn-dir` + `--ncnn-base-url`：ncnn 走**独立下载源**
+  （`/models/` → `/models_vk/`），每个模型条目带 `providers`、`param/bin size/sha256`；
+  `ModelStore.Download()` 支持条目级 providers（ONNX 主源仍不变）。
+- `ModelStore` 新增 `VkRoot/Ncnn/NcnnFor/InstalledNcnn/SyncVkRegistry/DownloadNcnn`：
+  双文件下载 + sha256 校验 + 生成 `models_vk.txt`（只写已装模型）；ncnn 不混进 ONNX 列表。
+  自检新增第 9 节（独立源下载 / 注册表写入 / 不混列表），现共 19 项全过。
+- `sr_vk` 引擎只列"文件已就位"的模型（按需下载语义下清单 ≠ 可用）。
+
+M4（后端选择）：
+- `sr_backend.GetSrModule()` 选择顺序：**包内有 QNN 运行库 → sr_qnn(QNN/HTP)**；
+  否则 **有 libsr_vk.so → ncnn/Vulkan**；都不行回退 **sr_qnn CPU EP**（旧行为）。
+  `JM_SR_BACKEND=qnn|vulkan|cpu` 可强制。关键点：没有 QNN 运行库的机型**不先走 QNN**——
+  否则 CPU EP 会把引擎占住，真正能出 GPU 的 Vulkan 就没机会了。
+- `sr_qnn` 复用同一套 Python 兼容接口加载 `libsr_vk.so`：`LoadEngine(backend="vulkan")`、
+  `IsVulkan()/GetModelDir()/ReloadModels()`；Vulkan 的 `getGpuInfo()` 报
+  `GPU (ncnn Vulkan: <设备名>)`，UI 引擎名显示 `Vulkan (ncnn) / <backend>`。
+- UI（SrModelTable）支持 ncnn 模型"未安装 → 点击下载 → 引擎重扫 → 自动选中"：
+  缺失行按 `param+bin` 总体积显示，下载完调 `ReloadModels()` 后再刷新/选中。
+
+M3 回归（MuMu / SRMD_UP2X / Vulkan 模式）：仍为 **PSNR 92.04dB、max|Δ|=1**；
+A3a 三套自检全过（model_store / sr_model_table / 下载端到端）。
+
 三个已定位的坑（都写进代码注释）：
 1. **SRMD 的 ncnn 模型要 19 通道**（3 图 + 15 退化常量 + noise）；只喂 3 通道会让 ncnn 卷积读越界 →
    **直接段错误**，不是"结果不对"；

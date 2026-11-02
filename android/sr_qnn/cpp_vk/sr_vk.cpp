@@ -81,6 +81,13 @@ void SetErr(const std::string& err) {
     g_lastError = err;
 }
 
+bool FileExists(const std::string& path) {
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (fp == nullptr) return false;
+    fclose(fp);
+    return true;
+}
+
 void LoadRegistry(const std::string& dir) {
     g_models.clear();
     FILE* fp = fopen(Join(dir, "models_vk.txt").c_str(), "r");
@@ -109,6 +116,10 @@ void LoadRegistry(const std::string& dir) {
         if (parts.size() > 3) m.scale = std::max(1, atoi(parts[3].c_str()));
         if (parts.size() > 4) m.tile = std::max(32, atoi(parts[4].c_str()));
         if (parts.size() > 5) m.inCh = std::max(3, atoi(parts[5].c_str()));
+        // 只列"文件已就位"的模型：A3a 之后模型是按需下载的，清单里可能列着还没下的
+        if (!FileExists(Join(dir, m.param)) || !FileExists(Join(dir, m.bin))) {
+            continue;
+        }
         g_models.push_back(m);
     }
     fclose(fp);
@@ -313,7 +324,7 @@ void srq_set_debug(int enable) {
 }
 
 const char* srq_get_version(void) {
-    return "sr_vk 0.2.0 (ncnn Vulkan backend, M2 tile pipeline)";
+    return "sr_vk 0.3.0 (ncnn Vulkan backend, M3 on-demand models)";
 }
 
 const char* srq_get_backend_info(void) {
@@ -426,6 +437,11 @@ void srq_stop(void) {}
 void srq_remove(const int* taskIds, int count) {
     (void)taskIds;
     (void)count;
+}
+
+/* ABI 兼容：sr_qnn 有"等待队列"这个概念（进程模式），这里同步推理没有对应物，给个空实现 */
+void srq_remove_wait(const int* taskIds, int count) {
+    srq_remove(taskIds, count);
 }
 
 }  // extern "C"

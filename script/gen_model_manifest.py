@@ -101,6 +101,10 @@ def main():
     ap.add_argument("--models", default="android/sr_qnn/models")
     ap.add_argument("--base-url", action="append", default=[],
                     help="可重复：运行时按顺序尝试的下载源；第一个为主源")
+    ap.add_argument("--ncnn-dir", default="",
+                    help="ncnn 模型目录（含 models_vk.txt 与 param/bin）；用于 Vulkan 后端")
+    ap.add_argument("--ncnn-base-url", action="append", default=[],
+                    help="ncnn 下载源，可重复；缺省时把 --base-url 的 /models/ 替换为 /models_vk/")
     ap.add_argument("--quantized-suffix", default="_q16.onnx",
                     help="量化版文件名后缀；存在则登记到 quantized 段（不占模型列表）")
     ap.add_argument("--out", default="src/config/sr_models_manifest.json")
@@ -135,6 +139,41 @@ def main():
     if os.path.isfile(mt):
         texts.append({"file": "models.txt", "size": os.path.getsize(mt), "sha256": sha256_of(mt)})
 
+    # Vulkan(ncnn) 模型：每个模型是 param+bin 一对，按 models_vk.txt 的登记顺序输出。
+    # ncnn 与 ONNX 在仓库里是两个并列目录，不能共用同一组 URL（否则稳定 404）。
+    ncnn_providers = [u for u in (args.ncnn_base_url or []) if u]
+    if not ncnn_providers:
+        ncnn_providers = [u.replace("/models/", "/models_vk/") for u in providers]
+    ncnn_providers = [u.rstrip("/") + "/" for u in ncnn_providers]
+    ncnn_models = []
+    if args.ncnn_dir and os.path.isdir(args.ncnn_dir):
+        reg = os.path.join(args.ncnn_dir, "models_vk.txt")
+        if os.path.isfile(reg):
+            for line in open(reg, encoding="utf-8"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("|")
+                if len(parts) < 3:
+                    continue
+                item = {"name": parts[0], "param": parts[1], "bin": parts[2],
+                        "scale": int(parts[3]) if len(parts) > 3 else 2,
+                        "tile": int(parts[4]) if len(parts) > 4 else 192,
+                        "in_ch": int(parts[5]) if len(parts) > 5 else 3,
+                        "providers": ncnn_providers}
+                ok = True
+                for key in ("param", "bin"):
+                    path = os.path.join(args.ncnn_dir, item[key])
+                    if not os.path.isfile(path):
+                        print("[warn] ncnn 缺文件: {}（跳过 {}）".format(item[key], item["name"]),
+                              file=sys.stderr)
+                        ok = False
+                        break
+                    item[key + "_size"] = os.path.getsize(path)
+                    item[key + "_sha256"] = sha256_of(path)
+                if ok:
+                    ncnn_models.append(item)
+
     # 量化版：与 float 同名 + 后缀，登记为附带的"资产"（列表/UI 不变，引擎按约定自动优先）
     quantized = []
     for m in models:
@@ -156,6 +195,9 @@ def main():
         "providers": providers,
         # 模型族出处（官方仓库）；它们**不能**当下载源，仅用于复现与致谢
         "sources": SOURCES,
+        "ncnn": ncnn_models,
+        "ncnn_providers": ncnn_providers,
+        "ncnn_bytes": sum(m["param_size"] + m["bin_size"] for m in ncnn_models),
         "quantized": quantized,
         "quantized_bytes": sum(q["size"] for q in quantized),
         "total_bytes": sum(m["size"] for m in models),
@@ -167,9 +209,10 @@ def main():
         json.dump(doc, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
 
-    print("写出 {}：{} 个模型（{:.1f} MB）+ {} 个量化版（{:.1f} MB）".format(
+    print("写出 {}：{} 个模型（{:.1f} MB）+ {} 个量化版（{:.1f} MB）+ {} 个 ncnn（{:.1f} MB）".format(
         args.out, len(models), doc["total_bytes"] / 1048576.0,
-        len(quantized), doc["quantized_bytes"] / 1048576.0))
+        len(quantized), doc["quantized_bytes"] / 1048576.0,
+        len(ncnn_models), doc["ncnn_bytes"] / 1048576.0))
     print("Release 上传（在模型目录执行）：")
     print("  gh release create models-v1 --title 'SR models v1' --notes 'waifu2x/realcugan ONNX (fixed-shape)'")
     for m in models:

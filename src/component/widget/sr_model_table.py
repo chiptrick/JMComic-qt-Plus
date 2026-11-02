@@ -242,18 +242,29 @@ def ProbeModels():
     安卓端（sr_qnn）除了模型名还要核对 onnx 文件真的在 models 目录里：C++ 模型表是
     "内置表 + models.txt 覆盖"，条目可能指向一个没放进去的文件，这种模型选中后必然
     跑到一半失败，所以不能出现在列表里。
+    ncnn/Vulkan 后端是"只列已装"：引擎列表就是可用集，缺失的模型由清单补进 missing。
     """
     try:
         from tools import sr_backend
         module = sr_backend.GetSrModule()
+        isVk = sr_backend.IsVulkanNcnn()
     except Exception:
         module = None
+        isVk = False
     if module is None:
         return Detected(False)
 
-    engineNames = [name for name in dir(module) if name.startswith("MODEL_")]
-    if not engineNames:
+    if isVk:
+        installed = set(module.GetModelList())
+        engineNames = ["MODEL_" + name for name in installed]
+    else:
+        installed = None
+        engineNames = [name for name in dir(module) if name.startswith("MODEL_")]
+    if not engineNames and not isVk:
         return Detected(False)
+    if isVk and not engineNames:
+        # 后端可用但一个模型都没下：仍然要继续，让下面把清单里的 ncnn 补成 missing
+        engineNames = []
 
     getInfo = getattr(module, "GetModelInfo", None)
     modelDir = _ModelDir() if getInfo is not None else ""
@@ -291,13 +302,36 @@ def ProbeModels():
                     "up": int(info[1] or 0),
                     "denoise": int(info[2]) if info[2] is not None else -1,
                 })
-        elif name not in statics:
+        elif not isVk and name not in statics:
             # 桌面端没有 GetModelInfo：常量在即认为可用，展示名去掉 MODEL_ 前缀
             customs.append({
                 "key": name, "file": "", "title": name[len("MODEL_"):],
                 "up": 0, "denoise": -1,
             })
         names.add(name)
+
+    if isVk:
+        # 清单里有、本地没下的 ncnn 模型：进 missing，UI 显示"未安装 · 可下载"
+        try:
+            from component.sr.model_store import ModelStore
+            store = ModelStore()
+            ncnnNames = set()
+            ncnnBins = {}
+            for item in store.Ncnn():
+                ncnnNames.add(item["name"])
+                ncnnBins[item["name"]] = item["bin"]
+            for model in SrModels:
+                key = FullModelName(model)
+                raw = key[len("MODEL_"):]
+                if raw in ncnnNames and key not in names:
+                    missing.append({
+                        "key": key,
+                        "file": ncnnBins[raw],
+                        "up": int(model[2] or 0),
+                        "denoise": int(model[3]) if model[3] is not None else -1,
+                    })
+        except Exception:
+            pass
 
     customs.sort(key=lambda item: item["key"])
     return Detected(True, names, customs, missing)
@@ -335,9 +369,15 @@ def BuildCatalog(detected, store=None):
                     # 显示一个永远装不上的灰行只会让人困惑
                     continue
                 ent = byFile.get(miss.get("file") or "", {})
+                size = int(ent.get("size") or 0)
+                if not size and store is not None:
+                    # ncnn 模型不在 models 段里，体积是 param+bin 之和
+                    nc = store.NcnnFor(key[len("MODEL_"):])
+                    if nc is not None:
+                        size = int(nc.get("param_size") or 0) + int(nc.get("bin_size") or 0)
                 records.append(ModelRecord(key, algo, model[2], model[3], model[4],
                                            model[5], model[0], state="missing",
-                                           size=int(ent.get("size") or 0),
+                                           size=size,
                                            file=miss.get("file") or ""))
                 continue
             records.append(ModelRecord(key, algo, model[2], model[3], model[4],
@@ -470,7 +510,11 @@ class _DownloadWorker(QThread):
         try:
             def cb(done, total):
                 self.progress.emit(self._key, int(done), int(total))
-            path = self._store.Download(self._entry, progress=cb)
+            ncnnName = self._entry.get("_ncnn_name")
+            if ncnnName:
+                path = self._store.DownloadNcnn(ncnnName, progress=cb)
+            else:
+                path = self._store.Download(self._entry, progress=cb)
             self.done.emit(self._key, path or "")
         except Exception as es:                      # noqa: BLE001 worker 边界统一兜住
             self.failed.emit(self._key, str(es))
@@ -779,6 +823,11 @@ class SrModelTable(QTableWidget):
         for item in store.Manifest().get("models", []):
             if (item.get("file") or "") == (record.file or ""):
                 return store, item
+        # ncnn 模型不在 models 段：用名字找，让下载器走 DownloadNcnn(param+bin)
+        nc = store.NcnnFor((record.key or "")[len("MODEL_"):])
+        if nc is not None:
+            size = int(nc.get("param_size") or 0) + int(nc.get("bin_size") or 0)
+            return store, {"_ncnn_name": nc["name"], "size": size}
         return store, None
 
     def StartDownload(self, fullName):
@@ -826,6 +875,15 @@ class SrModelTable(QTableWidget):
         self._downloading.pop(key, None)
         self._downloadError.pop(key, None)
         self._workers.pop(key, None)
+        # ncnn 模型下载完必须让引擎重扫 models_vk.txt，否则列表仍是旧的"未安装"
+        try:
+            from tools import sr_backend
+            if sr_backend.IsVulkanNcnn():
+                module = sr_backend.GetSrModule()
+                if module is not None:
+                    module.ReloadModels()
+        except Exception:
+            pass
         self.RefreshCatalog()
         # 下完就选上：用户点灰行本来就是为了用它
         self.PickModel(key)
@@ -853,7 +911,19 @@ class SrModelTable(QTableWidget):
         if entry is None:
             from component.sr.model_store import ModelOffline
             raise ModelOffline("清单里没有 {}".format(record.file or record.key))
-        path = store.Download(entry, progress=progress)
+        ncnnName = entry.get("_ncnn_name")
+        if ncnnName:
+            path = store.DownloadNcnn(ncnnName, progress=progress)
+            try:
+                from tools import sr_backend
+                if sr_backend.IsVulkanNcnn():
+                    module = sr_backend.GetSrModule()
+                    if module is not None:
+                        module.ReloadModels()
+            except Exception:
+                pass
+        else:
+            path = store.Download(entry, progress=progress)
         self.RefreshCatalog()
         return path
 

@@ -1,6 +1,6 @@
 {
   "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",
-  "generated_at": "2026-11-02T15:14:59+0800",
+  "generated_at": "2026-11-02T17:01:47+0800",
   "models": [
     {
       "denoise": 3,
@@ -353,6 +353,109 @@
       "size": 6213171,
       "tile": 192
     }
+  ],
+  "ncnn": [
+    {
+      "bin": "srmd_x2.bin",
+      "bin_sha256": "4eea55fc0acd3fad68b46d2b3cdad6cd6b4f8b18f390397eb6074e024316b13a",
+      "bin_size": 3026272,
+      "in_ch": 19,
+      "name": "SRMD_UP2X",
+      "param": "srmd_x2.param",
+      "param_sha256": "1a240d786ad57398230cdae674185a0b5848af4a6dc1bbf56648e04b26a8bc62",
+      "param_size": 1230,
+      "providers": [
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models_vk/"
+      ],
+      "scale": 2,
+      "tile": 192
+    },
+    {
+      "bin": "srmd_x3.bin",
+      "bin_sha256": "27dd6663a4f0757374c6769b1acdf04b6141547bc0c6b48b34334f5c6f561116",
+      "bin_size": 3060892,
+      "in_ch": 19,
+      "name": "SRMD_UP3X",
+      "param": "srmd_x3.param",
+      "param_sha256": "ddfa92c2824f2449b97eaf02f69cae660981bd07a52e0d74c0d53f26860e5a4a",
+      "param_size": 1230,
+      "providers": [
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models_vk/"
+      ],
+      "scale": 3,
+      "tile": 192
+    },
+    {
+      "bin": "srmd_x4.bin",
+      "bin_sha256": "c8a59cffd2ec9e7b7e0c29cb149808f766812db75a4bb0feee77f7081cb0af9a",
+      "bin_size": 3109360,
+      "in_ch": 19,
+      "name": "SRMD_UP4X",
+      "param": "srmd_x4.param",
+      "param_sha256": "2dcde0224b30ad4a65638df1f1a822915d3e9393791ff104d39cdf77fb1153fa",
+      "param_size": 1230,
+      "providers": [
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models_vk/"
+      ],
+      "scale": 4,
+      "tile": 192
+    },
+    {
+      "bin": "srmdnf_x2.bin",
+      "bin_sha256": "7ad5db8ca7e6ae04738ccf8f09d157ffb8e3e8fc1c5ed8be746d2a69d305ba27",
+      "bin_size": 3023968,
+      "in_ch": 18,
+      "name": "SRMDNF_UP2X",
+      "param": "srmdnf_x2.param",
+      "param_sha256": "975e36fcc252583773bbbc691672e68b71e9c8e452b3055cb2cf523c75ecdae9",
+      "param_size": 1230,
+      "providers": [
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models_vk/"
+      ],
+      "scale": 2,
+      "tile": 192
+    },
+    {
+      "bin": "srmdnf_x3.bin",
+      "bin_sha256": "07520a171844c4df3e69a556e812a933d5cf976c4ebf44bddf518087ba50fd28",
+      "bin_size": 3058588,
+      "in_ch": 18,
+      "name": "SRMDNF_UP3X",
+      "param": "srmdnf_x3.param",
+      "param_sha256": "f68036764d84081ae6e1ed316d4c50955c91a5a1b56548f19ba3135a726473d2",
+      "param_size": 1230,
+      "providers": [
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models_vk/"
+      ],
+      "scale": 3,
+      "tile": 192
+    },
+    {
+      "bin": "srmdnf_x4.bin",
+      "bin_sha256": "da889e651e777ef51d18f1acb88e24046b387a2cc7398ac76fd2a68107fa81b3",
+      "bin_size": 3107056,
+      "in_ch": 18,
+      "name": "SRMDNF_UP4X",
+      "param": "srmdnf_x4.param",
+      "param_sha256": "b661e34f0b16b9df50436c5c9793e7773b8873ff91e1dc8efc19dbdb5b208b87",
+      "param_size": 1230,
+      "providers": [
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models_vk/"
+      ],
+      "scale": 4,
+      "tile": 192
+    }
+  ],
+  "ncnn_bytes": 18393516,
+  "ncnn_providers": [
+    "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models_vk/",
+    "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models_vk/"
   ],
   "providers": [
     "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",

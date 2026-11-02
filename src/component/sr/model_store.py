@@ -139,6 +139,58 @@ class ModelStore(object):
             raise ModelOffline("清单里没有 {} 的量化版".format(base_file))
         return self.Download(entry, progress=progress, retries=retries)
 
+    # ---------- Vulkan(ncnn) 模型 ----------
+    def VkRoot(self):
+        """ ncnn 模型放在 <模型目录>/vk/ 下（引擎按该目录里的 models_vk.txt 列模型） """
+        return os.path.join(self.root, "vk")
+
+    def Ncnn(self):
+        return self.Manifest().get("ncnn", []) or []
+
+    def NcnnFor(self, name):
+        for item in self.Ncnn():
+            if item.get("name") == name:
+                return item
+        return None
+
+    def InstalledNcnn(self):
+        vk = self.VkRoot()
+        out = []
+        for item in self.Ncnn():
+            if os.path.isfile(os.path.join(vk, item["param"])) and \
+                    os.path.isfile(os.path.join(vk, item["bin"])):
+                out.append(item["name"])
+        return out
+
+    def SyncVkRegistry(self):
+        """ 把已下载的 ncnn 模型写进 models_vk.txt（libsr_vk 读它来列/载模型） """
+        vk = self.VkRoot()
+        os.makedirs(vk, exist_ok=True)
+        lines = ["# 由 ModelStore.SyncVkRegistry() 生成，勿手改"]
+        for item in self.Ncnn():
+            if item["name"] not in self.InstalledNcnn():
+                continue
+            lines.append("{name}|{param}|{bin}|{scale}|{tile}|{in_ch}".format(**item))
+        path = os.path.join(vk, "models_vk.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        return path
+
+    def DownloadNcnn(self, name, progress=None):
+        """ 下载一个 ncnn 模型（param+bin 一对）并刷新 models_vk.txt """
+        item = self.NcnnFor(name)
+        if item is None:
+            raise ModelOffline("清单里没有 ncnn 模型: {}".format(name))
+        vk = self.VkRoot()
+        os.makedirs(vk, exist_ok=True)
+        sub = ModelStore(root=vk, manifest_path=self.manifest_path, timeout=self.timeout)
+        for key in ("param", "bin"):
+            sub.Download({"file": item[key], "size": item.get(key + "_size"),
+                          "sha256": item.get(key + "_sha256"),
+                          "providers": item.get("providers")}, progress=progress)
+        self.SyncVkRegistry()
+        return os.path.join(vk, item["bin"])
+
     def List(self):
         """ 返回 [{'entry': 原清单项, 'state': ..., 'installed': bool}]，UI 直接消费 """
         out = []
@@ -194,7 +246,10 @@ class ModelStore(object):
         progress(done, total) 每 16KB 调一次；返回本地路径。
         失败一律抛 ModelOffline（UI 只处理这一种异常）。
         """
-        providers = self.Providers()
+        # 条目可带自己的源：ncnn 文件位于 models_vk/，与 ONNX 的 models/ 不同。
+        providers = [(u.rstrip("/") + "/") for u in (entry.get("providers") or []) if u]
+        if not providers:
+            providers = self.Providers()
         if not providers:
             raise ModelOffline("未配置下载源（manifest.providers 为空）")
         os.makedirs(self.root, exist_ok=True)

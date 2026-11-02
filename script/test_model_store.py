@@ -134,6 +134,37 @@ def main():
     Check(not any(item["installed"] and item["entry"]["file"] == "a_q16.onnx"
                   for item in st5.List()), "量化版不进入模型列表")
 
+    print("== 9. Vulkan(ncnn) 双文件下载与注册 ==")
+    vk_remote = os.path.join(tmp, "vk_remote")
+    os.makedirs(vk_remote)
+    param_blob = b"7767517\n2 2\n" * 20
+    bin_blob = b"ncnn-weights" * 400
+    with open(os.path.join(vk_remote, "tiny.param"), "wb") as f:
+        f.write(param_blob)
+    with open(os.path.join(vk_remote, "tiny.bin"), "wb") as f:
+        f.write(bin_blob)
+    doc3["ncnn"] = [{
+        "name": "SRMD_UP2X", "param": "tiny.param", "bin": "tiny.bin",
+        "scale": 2, "tile": 192, "in_ch": 19,
+        "param_size": len(param_blob), "param_sha256": hashlib.sha256(param_blob).hexdigest(),
+        "bin_size": len(bin_blob), "bin_sha256": hashlib.sha256(bin_blob).hexdigest(),
+        # 与 ONNX 的 remote 不同目录，验证条目级 providers 生效
+        "providers": ["file://" + vk_remote + "/"],
+    }]
+    with open(mp3, "w", encoding="utf-8") as f:
+        _json.dump(doc3, f)
+    st6 = ModelStore(root=os.path.join(tmp, "m6"), manifest_path=mp3)
+    st6.SyncVkRegistry()
+    Check(st6.InstalledNcnn() == [], "未下载时 ncnn 注册表为空")
+    vk_bin = st6.DownloadNcnn("SRMD_UP2X")
+    Check(open(vk_bin, "rb").read() == bin_blob, "ncnn bin 从独立源下载并校验通过")
+    Check(st6.InstalledNcnn() == ["SRMD_UP2X"], "param/bin 齐备后视为已安装")
+    registry = open(os.path.join(st6.VkRoot(), "models_vk.txt"), encoding="utf-8").read()
+    Check("SRMD_UP2X|tiny.param|tiny.bin|2|192|19" in registry,
+          "models_vk.txt 写入完整模型参数")
+    Check(not any(item["entry"]["file"] == "tiny.bin" for item in st6.List()),
+          "ncnn 模型不混进 ONNX 列表")
+
     shutil.rmtree(tmp, ignore_errors=True)
     print()
     if FAIL:

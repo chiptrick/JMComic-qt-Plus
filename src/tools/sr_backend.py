@@ -2,12 +2,17 @@
 """ 超分(waifu2x)后端解析
 
 桌面端：sr_vulkan(Vulkan 计算)，行为与原来完全一致
-Android：sr_qnn(ONNX Runtime + 高通 QNN/HTP NPU)，接口与 sr_vulkan 同构
+Android：
+    1. 包里有 QNN 运行库 -> sr_qnn(ONNX Runtime + 高通 QNN/HTP NPU)；
+    2. 没有 QNN 但有 ncnn/Vulkan 后端(libsr_vk.so) -> sr_qnn(ncnn 模型)；
+    3. 都不行 -> 回退 sr_qnn 的 CPU EP（旧行为，保证能用）。
+接口与 sr_vulkan 同构，业务代码无需改动。
 
 业务代码里的 `from sr_vulkan import sr_vulkan as sr` 不需要改动：
-Android 端由 InstallQnnCompat() 把 sr_qnn 注册成 sr_vulkan 模块，
+Android 端由 InstallQnnCompat() 把选中的引擎注册成 sr_vulkan 模块，
 这样 task_waifu2x / main_view / tool / waifu2x_check 等原有调用点全部照旧工作。
 """
+import os
 import sys
 import types
 
@@ -17,8 +22,25 @@ _qnnEngine = None
 _engineType = ""
 
 
+def _TryQnn():
+    import sr_qnn
+    if sr_qnn.LoadEngine():
+        return sr_qnn
+    return None
+
+
+def _TryVulkan():
+    import sr_qnn
+    if sr_qnn.LoadEngine(backend="vulkan"):
+        return sr_qnn
+    return None
+
+
 def GetSrModule():
-    """ 返回当前可用的超分引擎模块，没有则返回 None """
+    """ 返回当前可用的超分引擎模块，没有则返回 None
+
+    顺序由 JM_SR_BACKEND 覆盖：auto(默认) / qnn / vulkan / cpu。
+    """
     global _qnnEngine, _engineType
     if _qnnEngine is not None:
         return _qnnEngine
@@ -29,19 +51,32 @@ def GetSrModule():
             return sr
         except Exception:
             return None
-    try:
+    preferred = (os.environ.get("JM_SR_BACKEND") or "auto").strip().lower()
+    sr = None
+    if preferred in ("auto", "qnn"):
+        # 没有 QNN 运行库的机型不先走 QNN：否则 CPU EP 会把引擎占住，
+        # 后面真正能出 GPU 的 Vulkan 后端就没机会了。
         import sr_qnn
-        if sr_qnn.LoadEngine():
-            _qnnEngine = sr_qnn
+        if preferred == "qnn" or sr_qnn.HasQnnRuntime():
+            sr = _TryQnn()
+            if sr is not None:
+                _engineType = "qnn"
+    if sr is None and preferred in ("auto", "vulkan"):
+        sr = _TryVulkan()
+        if sr is not None:
+            _engineType = "vulkan-ncnn"
+    if sr is None and preferred == "auto":
+        # 旧行为兜底：QNN 路径(CPU EP)至少保证功能可用
+        sr = _TryQnn()
+        if sr is not None:
             _engineType = "qnn"
-            return sr_qnn
-    except Exception:
-        pass
-    return None
+    if sr is not None:
+        _qnnEngine = sr
+    return sr
 
 
 def InstallQnnCompat():
-    """ Android 专用：把 sr_qnn 注册为 sr_vulkan，保持原有 import 语句可用 """
+    """ Android 专用：把选中的超分引擎注册为 sr_vulkan，保持原有 import 语句可用 """
     if not platform_mobile.IsAndroid():
         return False
     sr = GetSrModule()
@@ -67,6 +102,11 @@ def IsQnn():
     return _engineType == "qnn"
 
 
+def IsVulkanNcnn():
+    """ 当前是否 ncnn/Vulkan 后端（非高通机型的 GPU 路径） """
+    return _engineType == "vulkan-ncnn"
+
+
 def GetEngineName():
     """ 引擎显示名；QNN 后端还要带上真实挂载状态
 
@@ -74,6 +114,14 @@ def GetEngineName():
     "QNN HTP (部分算子 CPU 回退)" / "CPU (ONNX Runtime, QNN 未生效)"。
     这类降级必须让用户在日志里一眼看到，否则会被当成"QNN 超分很慢"。
     """
+    if IsVulkanNcnn():
+        info = ""
+        try:
+            import sr_qnn
+            info = sr_qnn.GetBackendInfo()
+        except Exception:
+            pass
+        return "Vulkan (ncnn) / {}".format(info or "GPU")
     if IsQnn():
         info = ""
         try:
