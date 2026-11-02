@@ -1,6 +1,6 @@
 {
   "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",
-  "generated_at": "2026-11-02T13:53:21+0800",
+  "generated_at": "2026-11-02T14:27:51+0800",
   "models": [
     {
       "denoise": 3,
@@ -280,6 +280,24 @@
       "sha256": "a63ec2da859c06966552a1042f812d1e302e437db8ab5e87af8fe81ea6bf6fca",
       "size": 17959544,
       "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realesrgan_general_up4x.onnx",
+      "name": "REALESRGAN_GENERAL_UP4X",
+      "scale": 4,
+      "sha256": "aeca9d01d423ebc26c60537d76306abdd6137e06e13f73ccd17a642b6975658c",
+      "size": 4866393,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realesrgan_general_wdn_up4x.onnx",
+      "name": "REALESRGAN_GENERAL_WDN_UP4X",
+      "scale": 4,
+      "sha256": "f41deae3973466f3ad27d175a81196f915fbc3a2a76b9ac09f4f63e6e0372c97",
+      "size": 4866393,
+      "tile": 192
     }
   ],
   "providers": [
@@ -321,10 +339,10 @@
   "texts": [
     {
       "file": "models.txt",
-      "sha256": "d771d6946dc783c7c6c6c437f4c391633b22b3ee51674f41aa0c21567a29af7d",
-      "size": 5086
+      "sha256": "ae62879ac696a8275647901b4949b1b5b464708fabbe6caee8a649a236929ae7",
+      "size": 4848
     }
   ],
-  "total_bytes": 228255061,
+  "total_bytes": 237987847,
   "version": 2
 }

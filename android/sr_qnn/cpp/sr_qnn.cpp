@@ -629,6 +629,8 @@ void BuildBuiltinModels() {
         {"REALESRGAN_ANIMAVIDEOV3_UP4X", "realesrgan_animevideo_v3_up4x.onnx"},
         {"REALESRGAN_X4PLUS_UP4X", "realesrgan_x4plus_up4x.onnx"},
         {"REALESRGAN_X4PLUSANIME_UP4X", "realesrgan_x4plus_anime_up4x.onnx"},
+        {"REALESRGAN_GENERAL_UP4X", "realesrgan_general_up4x.onnx"},
+        {"REALESRGAN_GENERAL_WDN_UP4X", "realesrgan_general_wdn_up4x.onnx"},
     };
     const int esrganScales[5] = {2, 3, 4, 4, 4};
     for (int i = 0; i < 5; ++i) {

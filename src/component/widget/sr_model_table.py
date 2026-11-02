@@ -105,6 +105,8 @@ SrModels = (
     ("ANIMAVIDEOV3_UP4X", "Real-ESRGAN", 4, -1, 400, False),
     ("X4PLUS_UP4X", "Real-ESRGAN", 4, -1, 600, False),
     ("X4PLUSANIME_UP4X", "Real-ESRGAN", 4, -1, 400, False),
+    ("GENERAL_UP4X", "Real-ESRGAN", 4, -1, 150, False),
+    ("GENERAL_WDN_UP4X", "Real-ESRGAN", 4, -1, 150, False),
 )
 
 
