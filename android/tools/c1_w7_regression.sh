@@ -149,17 +149,17 @@ say "冷启动中位: ${MEDIAN}ms"
 "$ADB" -s "$DEV" logcat -c >/dev/null 2>&1
 "$ADB" -s "$DEV" shell am force-stop "$PKG" >/dev/null 2>&1
 sleep 1
-"$ADB" -s "$DEV" shell run-as "$PKG" sh -c 'touch files/selftest files/python_selftest files/net_selftest' >/dev/null 2>&1
+"$ADB" -s "$DEV" shell run-as "$PKG" sh -c 'touch files/selftest files/net_selftest' >/dev/null 2>&1
 "$ADB" -s "$DEV" shell am start -n "$PKG/$ACT" >/dev/null 2>&1
-say "已触发 selftest / python_selftest / net_selftest，等待 30s 采集日志"
+say "已触发 selftest / net_selftest，等待 30s 采集日志"
 sleep 30
 "$ADB" -s "$DEV" logcat -d > "$OUT/logcat.txt" 2>/dev/null
-grep -E "C1Shell|C1Reader|C1PyBridge|C1PyRuntime" "$OUT/logcat.txt" > "$OUT/c1_log.txt" 2>/dev/null || true
+grep -E "C1Shell|C1Reader|C1Net" "$OUT/logcat.txt" > "$OUT/c1_log.txt" 2>/dev/null || true
 
 grep -q "selftest done pages=" "$OUT/c1_log.txt" && SE=OK || SE=MISS
 grep -q "settings selftest OK" "$OUT/c1_log.txt" && SS=OK || SS=MISS
-grep -q "bridge response id=.*method=ping" "$OUT/c1_log.txt" && PING=OK || PING=MISS
 grep -q "net OK 2[0-9][0-9]" "$OUT/c1_log.txt" && NET=OK || NET=MISS
+grep -q "CA ready" "$OUT/c1_log.txt" && CA=OK || CA=MISS
 grep -q "sr_qnn direct-link: YES" "$OUT/c1_log.txt" && SRQ=OK || SRQ=MISS
 CRASH=$(grep -cE "FATAL EXCEPTION|AndroidRuntime.*FATAL" "$OUT/logcat.txt" 2>/dev/null || echo 0)
 
@@ -193,8 +193,8 @@ cat >> "$REPORT" <<EOF
 |---|---|---|---|
 | 阅读器自检 | \`selftest done pages=N\` | $SE | $([ "$SE" = OK ] && echo PASS || echo FAIL) |
 | 设置页自检 | \`settings selftest OK\` | $SS | $([ "$SS" = OK ] && echo PASS || echo FAIL) |
-| 桥 ping | \`method=ping ok=true\` | $PING | $([ "$PING" = OK ] && echo PASS || echo FAIL) |
-| P4 真实请求 | \`net OK 2xx\` | $NET | $([ "$NET" = OK ] && echo PASS || echo FAIL) |
+| CA 证书就绪 | \`CA ready\` | $CA | $([ "$CA" = OK ] && echo PASS || echo FAIL) |
+| 真实请求 | \`net OK 2xx\` | $NET | $([ "$NET" = OK ] && echo PASS || echo FAIL) |
 | 直链探针 | \`sr_qnn direct-link: YES\` | $SRQ | $([ "$SRQ" = OK ] && echo PASS || echo FAIL) |
 | 崩溃行数 | 0 | $CRASH | $([ "$CRASH" -eq 0 ] && echo PASS || echo FAIL) |
 
@@ -211,7 +211,7 @@ cat >> "$REPORT" <<EOF
 | F8 设置读写 | config.ini 字段一致 | MANUAL |
 | S1 连续翻 20 页 | 无 crash/OOM | MANUAL |
 | S2 连续切页 10 次 | 无 crash | MANUAL |
-| S3 桥崩溃重启 | 杀桥后仍能 ping | MANUAL |
+| S3 网络层异常 | 断网/超时后能继续请求 | MANUAL |
 
 ## 4. 原始产物
 

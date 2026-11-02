@@ -1,13 +1,16 @@
 # C1-W1：Qt 6.12 C++ 壳工程骨架（壳 + 导航占位；沿用 C0 的直链与 16KB 门禁）
-# 验收：lib 门禁 0 未对齐 + bundle 门禁 N/A（无 Python）+ Android 17 实机启动；
+# 验收：lib 门禁 0 未对齐 + Android 17 实机启动；
 # C0-③：libsr_qnn.so 以 IMPORTED 方式直链（去 ctypes），随 APK 打包并在设备上验证加载。
+#
+# 网络：C1 不再起 Python 子进程（原 W6/P4 方案），改由 net_client.cpp 在进程内发请求。
+# TLS 交给 Qt 的 OpenSSL 后端，所以要把 libssl/libcrypto 一起打进 APK（见 OPENSSL_DIR）。
 cmake_minimum_required(VERSION 3.22.1)
-project(C1Shell VERSION 0.1 LANGUAGES CXX)
+project(C1Shell VERSION 0.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Network)
 
 qt_standard_project_setup()
 
@@ -15,8 +18,14 @@ qt_add_executable(c1shell
     main.cpp
     reader.cpp
     settings_page.cpp
-    python_bridge.cpp
-    pyruntime.cpp
+    net_client.cpp
+)
+
+# CA 证书编进二进制（qrc）。APK 的 assets 也留一份，但 Android 上 assets 路径引擎
+# 并非在所有生命周期阶段都可用——资源是确定性最高的那条路。
+qt_add_resources(c1shell "ca_bundle"
+    PREFIX "/"
+    FILES assets/cacert.pem
 )
 
 # --- C1：sr_qnn 直链 ---
@@ -47,32 +56,55 @@ else()
     message(WARNING "C1: sr_qnn/onnxruntime 库不在 ${SRQ_LIBS_DIR}，本次构建不含直链验证")
 endif()
 
-# --- C1-W6：Python 运行时（可选；缺了就是 W6 未完成，不会静默假装绿） ---
-# 由 build_wsl.sh 从现有 p4a dist 里拷进来：libpythonbin.so + libpython3.14.so +
-# sqlite/ffi/ssl/crypto + libpybundle.so(tar.gz 容器)。缺任何一个都不打包。
-set(PY_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/pylibs/${ANDROID_ABI}"
-    CACHE PATH "Python 运行时库目录（由 build_wsl.sh 填充）")
-set(PY_RUNTIME_LIBS
-    "${PY_RUNTIME_DIR}/libpythonbin.so"
-    "${PY_RUNTIME_DIR}/libpython3.14.so"
-    "${PY_RUNTIME_DIR}/libsqlite3.so"
-    "${PY_RUNTIME_DIR}/libffi.so"
-    "${PY_RUNTIME_DIR}/libcrypto.so"
-    "${PY_RUNTIME_DIR}/libssl.so")
-set(PY_RUNTIME_OK ON)
-foreach(lib IN LISTS PY_RUNTIME_LIBS)
-    if(NOT EXISTS "${lib}")
-        set(PY_RUNTIME_OK OFF)
-        message(STATUS "C1-W6: Python runtime lib missing: ${lib}")
-    endif()
-endforeach()
-if(PY_RUNTIME_OK AND EXISTS "${PY_RUNTIME_DIR}/libpybundle_fixed.so")
-    # Python 运行时统一走 assets/（build_wsl.sh 塞进去），运行时复制到私有目录再启动；
-    # 不进 QT_ANDROID_EXTRA_LIBS：extractNativeLibs=false 时 .so 不落盘、没法 exec。
-    target_compile_definitions(c1shell PRIVATE C1_HAVE_PY_RUNTIME=1)
-    message(STATUS "C1-W6: Python runtime staged in ${PY_RUNTIME_DIR}")
+# --- C1 网络：OpenSSL（Qt 的 TLS 后端在运行时 dlopen libssl/libcrypto） ---
+# build_wsl.sh 从现有 p4a dist 复制到 openssl/<abi>/（soname 就是 libssl.so /
+# libcrypto.so，p_align=0x4000，与 16KB 门禁口径一致）。
+# 缺了会怎样：APK 能装能跑，但所有 HTTPS 直接 SSLErr——比崩溃更难查，所以默认必须存在。
+set(OPENSSL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/openssl/${ANDROID_ABI}"
+    CACHE PATH "随包 OpenSSL 库目录（Qt TLS 后端运行时加载）")
+option(C1_TLS_REQUIRED "缺少 libssl/libcrypto 时直接报错（HTTPS 依赖）" ON)
+
+if(EXISTS "${OPENSSL_DIR}/libssl.so" AND EXISTS "${OPENSSL_DIR}/libcrypto.so")
+    list(APPEND C1_EXTRA_LIBS
+        "${OPENSSL_DIR}/libssl.so" "${OPENSSL_DIR}/libcrypto.so")
+    # Qt 的 OSSL 后端在 Android 上按 libssl_3.so / libcrypto_3.so 命名找库（它自家
+    # android_openssl 包的约定）；只给 libssl.so 会报 "Failed to load libssl/libcrypto."
+    foreach(_alias libssl_3 libcrypto_3)
+        if(EXISTS "${OPENSSL_DIR}/${_alias}.so")
+            list(APPEND C1_EXTRA_LIBS "${OPENSSL_DIR}/${_alias}.so")
+        endif()
+    endforeach()
+    message(STATUS "C1: packaging OpenSSL from ${OPENSSL_DIR}")
+elseif(C1_TLS_REQUIRED)
+    message(FATAL_ERROR "C1: 缺 ${OPENSSL_DIR} 下的 libssl.so / libcrypto.so。"
+                        "没有它们 HTTPS 会全部失败；确有需要可 -DC1_TLS_REQUIRED=OFF。")
 else()
-    message(WARNING "C1-W6: Python runtime incomplete; APK will not contain Python subprocess runtime")
+    message(WARNING "C1: 未打包 OpenSSL，HTTPS 请求会在运行时报 SSLErr")
+endif()
+
+# Qt 的 TLS 后端是插件：androiddeployqt 不会因为 target_link_libraries(Qt6::Network) 就
+# 把它塞进 APK（实测包内 plugins/ 为空 → 运行期 "TLS initialization failed"）。
+# Android 上 Qt 从 lib/<abi>/ 按 libplugins_tls_<name>_<abi>.so 的名字找插件，所以直接把
+# 插件的 .so 加进随包库即可。
+if(ANDROID)
+    # 优先用构建脚本显式传入的路径（它知道 $QT_ANDROID）；没传就按 Qt6::Core 的安装位置推。
+    set(C1_TLS_PLUGIN "" CACHE FILEPATH "Qt TLS 后端插件路径（libplugins_tls_qopensslbackend_<abi>.so）")
+    if(NOT C1_TLS_PLUGIN)
+        get_target_property(_qtcore_loc Qt6::Core IMPORTED_LOCATION)
+        if(_qtcore_loc)
+            get_filename_component(_qtlib_dir "${_qtcore_loc}" DIRECTORY)
+            get_filename_component(_qt_prefix "${_qtlib_dir}" DIRECTORY)
+            set(C1_TLS_PLUGIN
+                "${_qt_prefix}/plugins/tls/libplugins_tls_qopensslbackend_${ANDROID_ABI}.so")
+        endif()
+    endif()
+    if(C1_TLS_PLUGIN AND EXISTS "${C1_TLS_PLUGIN}")
+        list(APPEND C1_EXTRA_LIBS "${C1_TLS_PLUGIN}")
+        message(STATUS "C1: packaging TLS backend ${C1_TLS_PLUGIN}")
+    else()
+        message(FATAL_ERROR "C1: 找不到 Qt TLS 后端插件（C1_TLS_PLUGIN='${C1_TLS_PLUGIN}'）；"
+                            "没有它 HTTPS 一定失败（QNetworkAccessManager 报 TLS initialization failed）")
+    endif()
 endif()
 
 if(C1_EXTRA_LIBS)
@@ -84,13 +116,14 @@ set_target_properties(c1shell PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.jmcomic.c1shell"
     QT_ANDROID_MIN_SDK_VERSION 34
     QT_ANDROID_TARGET_SDK_VERSION 34
-    QT_ANDROID_VERSION_CODE 1
-    QT_ANDROID_VERSION_NAME "0.1-c1"
+    QT_ANDROID_VERSION_CODE 2
+    QT_ANDROID_VERSION_NAME "0.2-c1"
 )
 
 target_link_libraries(c1shell PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Network
     log
 )

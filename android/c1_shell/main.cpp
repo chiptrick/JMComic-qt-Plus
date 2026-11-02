@@ -19,6 +19,8 @@
 #include <QVector>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QLoggingCategory>
+#include <QSslSocket>
 
 #include <android/log.h>
 #include <dlfcn.h>
@@ -26,8 +28,7 @@
 
 #include "reader.h"
 #include "settings_page.h"
-#include "python_bridge.h"
-#include "pyruntime.h"
+#include "net_client.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "C1Shell", __VA_ARGS__)
 
@@ -70,70 +71,9 @@ QString ProbeSrq()
     return line;
 }
 
-// P4：桥脚本（bridge.py + net_client.py）随 APK 进 assets/，首次使用时复制到应用私有
-// 目录。此前 build_wsl.sh 没有打包这两个文件，main.cpp 便退化成一段内联 echo 脚本，
-// 于是"Android 端桥能跑"验的其实是桩代码——这里把退路去掉，缺文件就明确报错。
-bool CopyBridgeAsset(const QString &name, const QString &dst)
-{
-    static const QStringList bases = {QStringLiteral("assets:/"),
-                                      QStringLiteral("assets:/pylibs/")};
-    for (const QString &base : bases) {
-        const QString src = base + name;
-        if (QFile::exists(src))
-            return QFile::copy(src, dst);
-    }
-    return false;
-}
-
-QString StageBridgeScripts(QString *err)
-{
-    const QString dir = QStandardPaths::writableLocation(
-                            QStandardPaths::AppLocalDataLocation)
-                        + QStringLiteral("/bridge");
-    if (!QDir().mkpath(dir)) {
-        if (err)
-            *err = QStringLiteral("mkdir failed: %1").arg(dir);
-        return QString();
-    }
-    const QStringList names = {QStringLiteral("bridge.py"), QStringLiteral("net_client.py")};
-    for (const QString &name : names) {
-        const QString dst = dir + QLatin1Char('/') + name;
-        if (QFile::exists(dst) && QFileInfo(dst).size() > 0)
-            continue;  // 已解出且非空：复用，避免每次启动重写
-        QFile::remove(dst);
-        if (!CopyBridgeAsset(name, dst)) {
-            if (err)
-                *err = QStringLiteral("asset missing: %1").arg(name);
-            return QString();
-        }
-        QFile::setPermissions(dst, QFileDevice::ReadOwner | QFileDevice::WriteOwner
-                                       | QFileDevice::ReadGroup | QFileDevice::ReadOther);
-    }
-    return dir + QStringLiteral("/bridge.py");
-}
-
-// HTTP 结果压缩成一行，给状态栏与 logcat 共用（P4 验收要看得到 http_status/耗时）
-QString DescribeNetResult(const QJsonObject &obj)
-{
-    if (!obj.value(QStringLiteral("ok")).toBool()) {
-        const QJsonObject e = obj.value(QStringLiteral("error")).toObject();
-        return QStringLiteral("net ERR %1: %2 (attempts=%3, %4ms)")
-            .arg(e.value(QStringLiteral("code")).toString(),
-                 e.value(QStringLiteral("message")).toString())
-            .arg(e.value(QStringLiteral("attempts")).toInt())
-            .arg(e.value(QStringLiteral("elapsed_ms")).toInt());
-    }
-    const QJsonObject r = obj.value(QStringLiteral("result")).toObject();
-    return QStringLiteral("net OK %1 %2B %3ms%4")
-        .arg(r.value(QStringLiteral("http_status")).toInt())
-        .arg(r.value(QStringLiteral("body_len")).toInt())
-        .arg(r.value(QStringLiteral("elapsed_ms")).toInt())
-        .arg(r.value(QStringLiteral("http_error")).toBool() ? QStringLiteral(" (http_error)")
-                                                            : QString());
-}
-
 // W4：页面栈 + 历史返回栈。Push 记录来源页，Pop 回退；标题栏跟随当前页。
-class ShellWindow : public QMainWindow{
+class ShellWindow : public QMainWindow
+{
 public:
     enum Page { Home = 0, Reader = 1, Settings = 2 };
 
@@ -199,37 +139,13 @@ public:
         status_->setAlignment(Qt::AlignCenter);
         root->addWidget(status_);
 
-        bridge_ = new PythonBridge(central);
-        connect(bridge_, &PythonBridge::Response, this, [this](const QJsonObject &obj) {
-            // 协议 v1 回带 method：早期只按 id 关联时这里永远拿到空串，pong 便永远认不出来
-            const QString method = obj.value(QStringLiteral("method")).toString();
-            const bool ok = obj.value(QStringLiteral("ok")).toBool();
-            LOGI("bridge response id=%d method=%s ok=%s",
-                 obj.value(QStringLiteral("id")).toInt(),
-                 qPrintable(method), ok ? "true" : "false");
-            if (method == QStringLiteral("ping")) {
-                SetTitle(QStringLiteral("bridge pong"));
-            } else if (method == QStringLiteral("net.request")) {
-                const QString line = DescribeNetResult(obj);
-                status_->setText(line);
-                LOGI("%s", qPrintable(line));
-            } else if (method == QStringLiteral("net.status")) {
-                const QJsonObject r = obj.value(QStringLiteral("result")).toObject();
-                const QString line = QStringLiteral("py %1 rss=%2KB up=%3ms")
-                                         .arg(r.value(QStringLiteral("python")).toString())
-                                         .arg(r.value(QStringLiteral("rss_kb")).toInt())
-                                         .arg(r.value(QStringLiteral("uptime_ms")).toInt());
-                status_->setText(line);
-                LOGI("%s", qPrintable(line));
-            }
-        });
-        connect(bridge_, &PythonBridge::Error, this, [this](const QString &text) {
-            status_->setText(QStringLiteral("bridge: %1").arg(text));
-            LOGI("bridge error: %s", qPrintable(text));
-        });
-        connect(bridge_, &PythonBridge::Crashed, this, [this] {
-            status_->setText(QStringLiteral("bridge crashed; restarting"));
-            LOGI("bridge crashed; restarting");
+        net_ = new NetClient(central);
+        connect(net_, &NetClient::Finished, this, [this](const NetResult &r) {
+            const QString line = r.Summary();
+            status_->setText(line);
+            LOGI("%s", qPrintable(line));
+            if (r.ok)
+                SetTitle(QStringLiteral("net %1").arg(r.httpStatus));
         });
 
         connect(openReader, &QPushButton::clicked, this, [this] {
@@ -237,12 +153,6 @@ public:
             Push(Page::Reader);
         });
         connect(netBtn, &QPushButton::clicked, this, [this] {
-            QString err;
-            if (!StartBridge(&err)) {
-                status_->setText(QStringLiteral("bridge: %1").arg(err));
-                LOGI("net test: bridge start failed: %s", qPrintable(err));
-                return;
-            }
             RunNetProbe();
         });
         connect(next, &QPushButton::clicked, this, [this] { reader_->NextPage(); });
@@ -297,85 +207,26 @@ public:
             QTimer::singleShot(200, this, [this] { reader_->RunSelfTest(); });
             QTimer::singleShot(3200, this, [this] { settings_->RunSelfTest(); });
         }
-        MaybeRunPythonSelfTest();
         MaybeRunNetSelfTest();
     }
 
-    // 起桥：Python 解释器 + 真实 bridge.py（含 net_client.py）。失败必须说出来，
-    // 不允许退化成内联 echo 桩——否则"Android 端桥能跑"验的是桩，不是真代码。
-    bool StartBridge(QString *err)
-    {
-        QString python;
-#ifdef C1_HAVE_PY_RUNTIME
-        if (!PyRuntime::EnsureReady(&python, err))
-            return false;
-#else
-        python = qEnvironmentVariable("JM_C1_PYTHON");
-        if (python.isEmpty())
-            python = QStandardPaths::findExecutable(QStringLiteral("python3"));
-        if (python.isEmpty()) {
-            if (err)
-                *err = QStringLiteral("no python runtime");
-            return false;
-        }
-#endif
-        QString script = qEnvironmentVariable("JM_C1_BRIDGE");
-        if (script.isEmpty())
-            script = StageBridgeScripts(err);
-        if (script.isEmpty())
-            return false;
-        if (!bridge_->Start(python, {script})) {
-            if (err)
-                *err = bridge_->GetLastError();
-            return false;
-        }
-        LOGI("bridge started: %s %s", qPrintable(python), qPrintable(script));
-        return true;
-    }
-
-    // P4：发一次真实请求，URL 可由 JM_C1_NET_URL 覆盖（默认取一个稳定的小页面）
+    // 一次真实请求，URL 可由 JM_C1_NET_URL 覆盖（默认取一个稳定的小页面）。
+    // 与旧 Python 桥相比没有子进程：失败只可能是网络层错误，不会再有
+    // "进程起不来 / 被 SELinux 拒绝 exec" 这类环境问题。
     void RunNetProbe()
     {
         const QString url = qEnvironmentVariable("JM_C1_NET_URL",
                                                  QStringLiteral("https://www.baidu.com/"));
         LOGI("net probe: GET %s", qPrintable(url));
-        QTimer::singleShot(350, this, [this, url] {
-            if (!bridge_->NetRequest(QStringLiteral("GET"), url, {}, 15000)) {
-                status_->setText(QStringLiteral("net: %1").arg(bridge_->GetLastError()));
-                LOGI("net probe send failed: %s", qPrintable(bridge_->GetLastError()));
-            }
-        });
+        NetRequest req;
+        req.url = QUrl(url);
+        req.timeoutMs = 15000;
+        req.maxBytes = 64 * 1024;
+        if (!net_->Send(req))
+            LOGI("net probe rejected: %s", qPrintable(net_->GetLastError()));
     }
 
-    // W6 冒烟：run-as 建 `python_selftest` 标记即可触发；设备上没有 Python 时会明确失败
-    void MaybeRunPythonSelfTest()
-    {
-        const QString marker = QStandardPaths::writableLocation(
-                                   QStandardPaths::AppLocalDataLocation)
-                               + QStringLiteral("/python_selftest");
-        if (!QFile::exists(marker))
-            return;
-        QFile::remove(marker);
-        LOGI("python selftest marker found");
-        QString err;
-        if (!StartBridge(&err)) {
-            LOGI("python selftest: bridge start failed: %s", qPrintable(err));
-            status_->setText(QStringLiteral("bridge: %1").arg(err));
-            return;
-        }
-        // 若同时存在 net_selftest 标记，它的 net.request 已经证明桥可用；再发 ping 只会撞上
-        // 单通道保护（日志里多一条 "bridge busy"，让取证者误以为是缺陷）。
-        const QString netMarker = QStandardPaths::writableLocation(
-                                      QStandardPaths::AppLocalDataLocation)
-                                  + QStringLiteral("/net_selftest");
-        if (QFile::exists(netMarker)) {
-            LOGI("python selftest: net_selftest 同时存在，跳过 ping（由 net.request 覆盖）");
-            return;
-        }
-        QTimer::singleShot(600, this, [this] { bridge_->SendRequest(QStringLiteral("ping"), {}); });
-    }
-
-    // P4 冒烟：run-as 建 `net_selftest` 标记即可触发一次真实网络请求 + net.status
+    // 自检钩子：run-as 建 `net_selftest` 标记即可触发（W7 的取证入口）
     void MaybeRunNetSelfTest()
     {
         const QString marker = QStandardPaths::writableLocation(
@@ -385,14 +236,7 @@ public:
             return;
         QFile::remove(marker);
         LOGI("net selftest marker found");
-        QString err;
-        if (!StartBridge(&err)) {
-            LOGI("net selftest: bridge start failed: %s", qPrintable(err));
-            status_->setText(QStringLiteral("bridge: %1").arg(err));
-            return;
-        }
         RunNetProbe();
-        QTimer::singleShot(16000, this, [this] { bridge_->NetStatus(); });
     }
 
 private:
@@ -447,7 +291,7 @@ private:
     QStackedWidget *stack_ = nullptr;
     ReaderView *reader_ = nullptr;
     SettingsPage *settings_ = nullptr;
-    PythonBridge *bridge_ = nullptr;
+    NetClient *net_ = nullptr;
     QLabel *title_ = nullptr;
     QLabel *status_ = nullptr;
     QPushButton *back_ = nullptr;
@@ -461,7 +305,17 @@ private:
 
 int main(int argc, char *argv[])
 {
+    // TLS 后端问题只会在第一次用 QSslSocket 时才暴露，且默认日志级别看不到原因；
+    // 打开 qt.network.ssl 的 debug 规则，把"为什么不可用"打到 logcat。
+    QLoggingCategory::setFilterRules(QStringLiteral("qt.network.ssl.debug=true"));
     QApplication app(argc, argv);
+    // TLS 后端与证书就位情况各打一行：Android 上"没有后端/没有 CA"都只会表现为
+    // SSLErr，不留痕迹的话现场无法定位。
+    LOGI("tls backends: [%s] supportsSsl=%d",
+         qPrintable(QSslSocket::availableBackends().join(QLatin1Char(','))),
+         int(QSslSocket::supportsSsl()));
+    const int caCount = NetClient::EnsureCaCertificates();
+    LOGI("CA certificates: %d", caCount);
     ShellWindow win;
     win.show();
     win.MaybeRunSelfTest();

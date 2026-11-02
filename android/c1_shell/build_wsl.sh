@@ -46,24 +46,23 @@ done
 mkdir -p "$(dirname "$SRC")"
 rsync -a --delete "$REPO_WSL/android/c1_shell/" "$SRC/"
 
-# --- W6：Python 运行时打包（从现有 p4a dist 复制；没有就跳过，CMake 会明确告警） ---
-# 这里不把 96MB bundle 提交进仓库：它属于构建产物，p4a 已经验证过一次。
+# --- C1 网络：随包 OpenSSL（Qt TLS 后端运行时 dlopen 它） ---
 ABI="${ABI:-x86_64}"
-PY_DEST="$SRC/pylibs/$ABI"
-PY_SRC_GLOB=$(find "$HOME/jmcomic-build/keep-"* -path "*/dists/*/libs/$ABI/libpythonbin.so" 2>/dev/null | head -1 || true)
-if [ -n "$PY_SRC_GLOB" ] && [ -f "$PY_SRC_GLOB" ]; then
-  PY_SRC_DIR=$(dirname "$PY_SRC_GLOB")
-  mkdir -p "$PY_DEST"
-  for lib in libpythonbin.so libpython3.14.so libsqlite3.so libffi.so libcrypto.so libssl.so; do
-    cp "$PY_SRC_DIR/$lib" "$PY_DEST/" 2>/dev/null || true
-  done
-  # bundle 里目录 mode=644（无 x），应用用户解不开；重打包成 755
-  if [ ! -f "$PY_DEST/libpybundle_fixed.so" ]; then
-    python3 "$SRC/make_pybundle.py" "$PY_SRC_DIR/libpybundle.so" "$PY_DEST/libpybundle_fixed.so"
-  fi
-  echo "Python runtime libs -> $PY_DEST (from $PY_SRC_DIR)"
+NET_SSL_DIR="$SRC/openssl/$ABI"
+NET_SSL_SRC=$(find "$HOME/jmcomic-build/keep-"* -path "*/dists/*/libs/$ABI/libssl.so" 2>/dev/null | head -1 || true)
+if [ -n "$NET_SSL_SRC" ] && [ -f "$NET_SSL_SRC" ]; then
+  mkdir -p "$NET_SSL_DIR"
+  cp "$NET_SSL_SRC" "$NET_SSL_DIR/libssl.so"
+  cp "$(dirname "$NET_SSL_SRC")/libcrypto.so" "$NET_SSL_DIR/libcrypto.so"
+  # Qt 在 Android 上按它自己 android_openssl 包的命名（libssl_3.so / libcrypto_3.so）
+  # 找库；只给 libssl.so 会得到 "Failed to load libssl/libcrypto."（插件能加载但后端不可用）。
+  # 同一份文件多两个别名，代价约 6MB，换 TLS 可用。
+  cp "$NET_SSL_SRC" "$NET_SSL_DIR/libssl_3.so"
+  cp "$(dirname "$NET_SSL_SRC")/libcrypto.so" "$NET_SSL_DIR/libcrypto_3.so"
+  echo "OpenSSL libs -> $NET_SSL_DIR (from $(dirname "$NET_SSL_SRC"))"
 else
-  echo "[warn] 没找到 p4a dist 里的 Python 运行时（$ABI），本次 APK 不会带 Python"
+  echo "[fail] 没找到 $ABI 的 libssl.so/libcrypto.so（p4a dist 里应有）；HTTPS 会不可用"
+  exit 1
 fi
 
 # --- 配置 + 编译 + 出包 ---
@@ -74,7 +73,8 @@ rm -rf "$BUILD"
   -DANDROID_SDK_ROOT="$SDK" \
   -DANDROID_NDK_ROOT="$NDK" \
   -DCMAKE_BUILD_TYPE=Debug \
-  -DQT_HOST_PATH="$QT_HOST"
+  -DQT_HOST_PATH="$QT_HOST" \
+  -DC1_TLS_PLUGIN="$QT_ANDROID/plugins/tls/libplugins_tls_qopensslbackend_$ABI.so"
 
 # gradle.properties / wrapper 由 make_apk 步骤按配置首次生成（已存在则不改）。
 # 所以：先完整构建一次（若 Qt 默认 compileSdk=34 被 androidx 拒收会失败，但配置文件已生成），
@@ -84,19 +84,14 @@ cmake --build "$BUILD" || true
 # Qt 默认 compileSdk=android-34，被 androidx.core:1.17.0 拒收（要求 >=36）
 sed -i 's/androidCompileSdkVersion=.*/androidCompileSdkVersion=android-36/' "$BUILD/android-build/gradle.properties" 2>/dev/null || true
 
-# W6：Python 运行时不靠 nativeLibraryDir（extractNativeLibs=false 时 .so 不落盘、没法 exec）。
-# 统一打进 assets/，运行时复制到应用私有目录再启动（见 pyruntime.cpp）。
-if [ -f "$SRC/pylibs/$ABI/libpybundle_fixed.so" ]; then
-  mkdir -p "$BUILD/android-build/assets"
-  for lib in libpythonbin.so libpython3.14.so libsqlite3.so libffi.so libcrypto.so libssl.so; do
-    cp "$SRC/pylibs/$ABI/$lib" "$BUILD/android-build/assets/$lib" 2>/dev/null || true
-  done
-  cp "$SRC/pylibs/$ABI/libpybundle_fixed.so" "$BUILD/android-build/assets/libpybundle.so" 2>/dev/null || true
-fi
-# P4：桥脚本一起进 assets（main.cpp 会复制到私有目录再执行）。
-# 少了这一步，C1 只能跑 main.cpp 里那段内联 echo 桩——"Android 端桥能跑"就变成假绿。
+# C1 网络：CA 证书进 assets（Qt 的 OpenSSL 后端在 Android 上读不到系统证书库）
 mkdir -p "$BUILD/android-build/assets"
-cp "$SRC/bridge.py" "$SRC/net_client.py" "$BUILD/android-build/assets/"
+if [ -f "$SRC/assets/cacert.pem" ]; then
+  cp "$SRC/assets/cacert.pem" "$BUILD/android-build/assets/cacert.pem"
+else
+  echo "[fail] 缺 $SRC/assets/cacert.pem —— 没有它所有 HTTPS 都会 SSLErr"
+  exit 1
+fi
 # wrapper 默认源经代理 TLS 失败 → 腾讯镜像
 sed -i 's|distributionUrl=.*|distributionUrl=https\\://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip|' \
   "$BUILD/android-build/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null || true
@@ -107,12 +102,16 @@ APK=$(find "$BUILD" -name '*.apk' | head -1)
 [ -n "$APK" ] || { echo "[fail] 未产出 APK"; exit 1; }
 echo "APK: $APK  ($(du -m "$APK" | cut -f1) MB)"
 
-# --- P4 门禁：桥脚本必须真的在包里（否则设备上只能跑内联桩） ---
-for f in bridge.py net_client.py; do
-  if unzip -l "$APK" 2>/dev/null | grep -q "assets/$f"; then
-    echo "[OK] APK assets 含 $f"
+# --- C1 网络门禁：CA 与 OpenSSL 必须真的在包里（否则 HTTPS 一定失败且难查） ---
+# 注意：这里先把清单落盘再匹配。`unzip -l | grep -q` 在 `set -o pipefail` 下会因为
+# grep 提前退出触发 SIGPIPE，把整条管道判成失败——库在包里也会报"没有"。
+unzip -l "$APK" > "$BUILD/apk_list.txt" 2>/dev/null || true
+for f in assets/cacert.pem "lib/$ABI/libssl.so" "lib/$ABI/libcrypto.so" \
+         "lib/$ABI/libplugins_tls_qopensslbackend_$ABI.so"; do
+  if grep -qF "$f" "$BUILD/apk_list.txt"; then
+    echo "[OK] APK 含 $f"
   else
-    echo "[FAIL] APK 里没有 assets/$f —— 设备侧 net.* 一定不可用"
+    echo "[FAIL] APK 里没有 $f —— Qt 的 TLS 后端会在运行时找不到 OpenSSL"
     exit 1
   fi
 done
@@ -133,16 +132,9 @@ else
   exit 1
 fi
 
+
 # --- 门禁 ---
 PY="$HOME/jmcomic-build/venv311/bin/python"
 "$PY" "$REPO_WSL/android/tools/check_elf_page_align.py" "$APK"
-# 以前这里无条件写 "N/A（C++ 空壳无 Python 运行时）"，但 W6 之后包里确实带 bundle：
-# 无条件 N/A 等于给了一条永远不会红的门禁。有 bundle 就必须真跑。
-if unzip -l "$APK" 2>/dev/null | grep -q "assets/libpybundle.so"; then
-  # shiboken6 的 0x1000 是上游缺陷（文档 §0A 更新 15），且 C1 的 bridge.py 只 import stdlib，
-  # 从不 import PySide6 → 该 .so 不会被 dlopen。把它写成显式例外，而不是把整条门禁关掉。
-  "$PY" "$REPO_WSL/android/tools/check_pybundle_align.py" "$APK" "$ABI" \
-    --member assets/libpybundle.so --allow shiboken6
-else
-  echo "bundle 门禁 N/A（本包未含 Python runtime 的 libpybundle.so）"
-fi
+# 已移除 Python 运行时，"bundle 门禁"不再适用；C1 的原生依赖只剩 libQt6* + sr_qnn/onnx + OpenSSL，
+# 全部由上面的 check_elf_page_align.py（lib/ 布局）覆盖。
