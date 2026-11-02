@@ -1,7 +1,11 @@
-// C1-W2：Qt 6.12 C++ 壳 —— 导航 + 本地阅读器骨架。
+// C1-W4/W5：Qt 6.12 C++ 壳 —— 返回栈 + 标题栏 + 侧栏 + 本地阅读器 + 设置页。
 //
 // W1：可出包 + 16KB 门禁 0 未对齐 + 同 C0 的空壳级启动；
-// W2：本地阅读器（打开本地目录 → 翻页 → 缩放），保持 libsr_qnn.so 直链不退回 ctypes。
+// W2：本地阅读器（打开本地目录 → 翻页 → 缩放）；
+// W3：阅读器体验（双页/RTL/亮度/手势）；
+// W4：返回栈 + 标题栏 + 侧栏（页面切换矩阵）；
+// W5：设置页（QSettings INI，与 Python 版 config.ini 同格式同 section/key）。
+// 保持 libsr_qnn.so 直链不退回 ctypes。
 #include <QApplication>
 #include <QFile>
 #include <QLabel>
@@ -10,6 +14,7 @@
 #include <QStandardPaths>
 #include <QStackedWidget>
 #include <QTimer>
+#include <QVector>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 
@@ -18,6 +23,8 @@
 #include <link.h>
 
 #include "reader.h"
+#include "settings_page.h"
+#include "python_bridge.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "C1Shell", __VA_ARGS__)
 
@@ -60,10 +67,12 @@ QString ProbeSrq()
     return line;
 }
 
-// W4 会替换成完整的返回栈/标题栏/侧栏；这里只保证"页面栈 + 返回"可用。
+// W4：页面栈 + 历史返回栈。Push 记录来源页，Pop 回退；标题栏跟随当前页。
 class ShellWindow : public QMainWindow
 {
 public:
+    enum Page { Home = 0, Reader = 1, Settings = 2 };
+
     ShellWindow()
     {
         setWindowTitle(QStringLiteral("C1 shell"));
@@ -72,14 +81,26 @@ public:
         auto *central = new QWidget(this);
         auto *root = new QVBoxLayout(central);
 
-        title_ = new QLabel(QStringLiteral("C1 shell / W2"), central);
+        // ---- 标题栏 + 侧栏（顶部导航行；真机宽屏时也可横向排列） ----
+        auto *nav = new QHBoxLayout();
+        back_ = new QPushButton(QStringLiteral("Back"), central);
+        homeBtn_ = new QPushButton(QStringLiteral("Home"), central);
+        readerBtn_ = new QPushButton(QStringLiteral("Reader"), central);
+        settingsBtn_ = new QPushButton(QStringLiteral("Settings"), central);
+        nav->addWidget(back_);
+        nav->addWidget(homeBtn_);
+        nav->addWidget(readerBtn_);
+        nav->addWidget(settingsBtn_);
+        root->addLayout(nav);
+
+        title_ = new QLabel(QStringLiteral("Home"), central);
         title_->setAlignment(Qt::AlignCenter);
         root->addWidget(title_);
 
         stack_ = new QStackedWidget(central);
         root->addWidget(stack_, 1);
 
-        // 首页：入口占位
+        // ---- Home ----
         auto *home = new QWidget(central);
         auto *homeLay = new QVBoxLayout(home);
         auto *openReader = new QPushButton(QStringLiteral("Open local reader"), home);
@@ -87,17 +108,20 @@ public:
         homeLay->addStretch(1);
         stack_->addWidget(home);
 
-        // 阅读页：W2 骨架（目录 → 图片列表 → 翻页/缩放）
+        // ---- Reader ----
         reader_ = new ReaderView(central);
         stack_->addWidget(reader_);
 
+        // ---- Settings ----
+        settings_ = new SettingsPage(central);
+        stack_->addWidget(settings_);
+
+        // ---- Reader 工具条 ----
         auto *bar = new QHBoxLayout();
-        auto *back = new QPushButton(QStringLiteral("Back"), central);
         auto *next = new QPushButton(QStringLiteral("Next page"), central);
         auto *twoPage = new QPushButton(QStringLiteral("2-up"), central);
         auto *dirBtn = new QPushButton(QStringLiteral("RTL"), central);
         auto *bright = new QPushButton(QStringLiteral("Dim"), central);
-        bar->addWidget(back);
         bar->addWidget(next);
         bar->addWidget(twoPage);
         bar->addWidget(dirBtn);
@@ -108,20 +132,46 @@ public:
         status_->setAlignment(Qt::AlignCenter);
         root->addWidget(status_);
 
+        bridge_ = new PythonBridge(central);
+        connect(bridge_, &PythonBridge::Response, this, [this](const QJsonObject &obj) {
+            const QString method = obj.value(QStringLiteral("method")).toString();
+            LOGI("bridge response id=%d ok=%s",
+                 obj.value(QStringLiteral("id")).toInt(),
+                 obj.value(QStringLiteral("ok")).toBool() ? "true" : "false");
+            if (method == QStringLiteral("ping"))
+                SetTitle(QStringLiteral("bridge pong"));
+        });
+        connect(bridge_, &PythonBridge::Error, this, [this](const QString &text) {
+            status_->setText(QStringLiteral("bridge: %1").arg(text));
+            LOGI("bridge error: %s", qPrintable(text));
+        });
+        connect(bridge_, &PythonBridge::Crashed, this, [this] {
+            status_->setText(QStringLiteral("bridge crashed; restarting"));
+            LOGI("bridge crashed; restarting");
+        });
+
         connect(openReader, &QPushButton::clicked, this, [this] {
             reader_->LoadDefaultOrPick();
-            Push(1);
+            Push(Page::Reader);
         });
         connect(next, &QPushButton::clicked, this, [this] { reader_->NextPage(); });
         connect(twoPage, &QPushButton::clicked, this, [this] { reader_->ToggleTwoPage(); });
         connect(dirBtn, &QPushButton::clicked, this, [this] { reader_->ToggleDirection(); });
         connect(bright, &QPushButton::clicked, this, [this] { reader_->CycleBrightness(); });
-        connect(back, &QPushButton::clicked, this, [this] { Pop(); });
+
+        connect(homeBtn_, &QPushButton::clicked, this, [this] { Push(Page::Home); });
+        connect(readerBtn_, &QPushButton::clicked, this, [this] {
+            reader_->LoadDefaultOrPick();
+            Push(Page::Reader);
+        });
+        connect(settingsBtn_, &QPushButton::clicked, this, [this] { Push(Page::Settings); });
+        connect(back_, &QPushButton::clicked, this, [this] { Pop(); });
+
         connect(reader_, &ReaderView::PageChanged, this, [this](int cur, int total, const QString &path) {
             if (total > 0)
-                title_->setText(QStringLiteral("Reader %1/%2").arg(cur).arg(total));
+                SetTitle(QStringLiteral("Reader %1/%2").arg(cur).arg(total));
             else
-                title_->setText(QStringLiteral("Reader (no pages)"));
+                SetTitle(QStringLiteral("Reader (no pages)"));
             if (!path.isEmpty())
                 LOGI("page %d/%d %s", cur, total, qPrintable(path));
         });
@@ -130,8 +180,14 @@ public:
             LOGI("%s", qPrintable(text));
         });
         connect(reader_, &ReaderView::SelfTestDone, this, [this] {
-            title_->setText(QStringLiteral("selftest done"));
+            SetTitle(QStringLiteral("selftest done"));
         });
+        connect(settings_, &SettingsPage::StatusMessage, this, [this](const QString &text) {
+            status_->setText(text);
+            LOGI("%s", qPrintable(text));
+        });
+
+        UpdateNavEnabled();
         setCentralWidget(central);
     }
 
@@ -143,12 +199,56 @@ public:
                                + QStringLiteral("/selftest");
         if (!QFile::exists(marker)) {
             LOGI("selftest marker absent: %s", qPrintable(marker));
+        } else {
+            QFile::remove(marker);
+            LOGI("selftest marker found: %s", qPrintable(marker));
+            Push(Page::Reader);
+            QTimer::singleShot(200, this, [this] { reader_->RunSelfTest(); });
+            QTimer::singleShot(3200, this, [this] { settings_->RunSelfTest(); });
+        }
+        MaybeRunPythonSelfTest();
+    }
+
+    // W6 冒烟：run-as 建 `python_selftest` 标记即可触发；设备上没有 Python 时会明确失败
+    void MaybeRunPythonSelfTest()
+    {
+        const QString marker = QStandardPaths::writableLocation(
+                                   QStandardPaths::AppLocalDataLocation)
+                               + QStringLiteral("/python_selftest");
+        if (!QFile::exists(marker))
+            return;
+        QFile::remove(marker);
+        LOGI("python selftest marker found");
+        QString python = qEnvironmentVariable("JM_C1_PYTHON");
+        if (python.isEmpty())
+            python = QStandardPaths::findExecutable(QStringLiteral("python3"));
+        if (python.isEmpty()) {
+            LOGI("no python runtime; skip bridge selftest");
             return;
         }
-        QFile::remove(marker);
-        LOGI("selftest marker found: %s", qPrintable(marker));
-        Push(1);
-        QTimer::singleShot(200, this, [this] { reader_->RunSelfTest(); });
+        QString script = qEnvironmentVariable("JM_C1_BRIDGE");
+        if (script.isEmpty()) {
+            const QStringList candidates = {
+                QStringLiteral("bridge.py"),
+                QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+                    + QStringLiteral("/bridge.py"),
+                QStringLiteral("/data/local/tmp/bridge.py"),
+            };
+            for (const QString &cand : candidates) {
+                if (QFile::exists(cand)) {
+                    script = cand;
+                    break;
+                }
+            }
+        }
+        if (script.isEmpty()) {
+            LOGI("bridge.py not found; skip bridge selftest");
+            return;
+        }
+        if (bridge_->Start(python, {script}))
+            QTimer::singleShot(500, this, [this] {
+                bridge_->SendRequest(QStringLiteral("ping"), {});
+            });
     }
 
 private:
@@ -156,19 +256,61 @@ private:
     {
         if (index < 0 || index >= stack_->count())
             return;
-        stack_->setCurrentIndex(index);
+        if (stack_->currentIndex() != index) {
+            history_.append(stack_->currentIndex());
+            stack_->setCurrentIndex(index);
+        }
+        UpdateTitle();
+        UpdateNavEnabled();
     }
 
     void Pop()
     {
-        if (stack_->currentIndex() > 0)
-            stack_->setCurrentIndex(0);
+        if (history_.isEmpty()) {
+            if (stack_->currentIndex() != Page::Home)
+                stack_->setCurrentIndex(Page::Home);
+        } else {
+            stack_->setCurrentIndex(history_.takeLast());
+        }
+        UpdateTitle();
+        UpdateNavEnabled();
+    }
+
+    void UpdateTitle()
+    {
+        switch (stack_->currentIndex()) {
+        case Page::Reader:
+            SetTitle(QStringLiteral("Reader"));
+            break;
+        case Page::Settings:
+            SetTitle(QStringLiteral("Settings"));
+            break;
+        default:
+            SetTitle(QStringLiteral("Home"));
+        }
+    }
+
+    void SetTitle(const QString &text)
+    {
+        title_->setText(text);
+    }
+
+    void UpdateNavEnabled()
+    {
+        back_->setEnabled(!history_.isEmpty());
     }
 
     QStackedWidget *stack_ = nullptr;
     ReaderView *reader_ = nullptr;
+    SettingsPage *settings_ = nullptr;
+    PythonBridge *bridge_ = nullptr;
     QLabel *title_ = nullptr;
     QLabel *status_ = nullptr;
+    QPushButton *back_ = nullptr;
+    QPushButton *homeBtn_ = nullptr;
+    QPushButton *readerBtn_ = nullptr;
+    QPushButton *settingsBtn_ = nullptr;
+    QVector<int> history_;
 };
 
 }  // namespace

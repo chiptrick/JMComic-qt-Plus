@@ -14,6 +14,8 @@ qt_standard_project_setup()
 qt_add_executable(c1shell
     main.cpp
     reader.cpp
+    settings_page.cpp
+    python_bridge.cpp
 )
 
 # --- C1：sr_qnn 直链 ---

@@ -879,6 +879,27 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 实测（x86_64 / MuMu 12 / Android 15）：APK 67.5MB；16KB 对齐 13 / 未对齐 0；直链生效；
 自检日志：`two-page on` → `direction RTL` → `brightness 0.75` → `selftest done pages=3 twoPage=1 rtl=1 brightness=0.75`。
 
+**W4/W5/W6 已落一版（壳/设置/子进程桥）**：
+
+- **W4 返回栈 + 标题栏 + 侧栏**：`main.cpp` 的 `ShellWindow.Push/Pop`，历史栈支持 Home/Reader/Settings
+  三页切换；Back 在栈空时回 Home；标题栏跟随当前页（阅读页显示 `Reader n/m`）。
+- **W5 设置页（同格式 config.ini）**：`settings_page.{h,cpp}`，QSettings INI，
+  section/key 与 `src/config/setting.py` 完全同名（`GeneraSetting/ThemeIndex`、
+  `ProxySetting/IsUseHttps`、`DownloadSetting/SavePath`、`ReadSetting/LookReadMode`、
+  `Waifu2xSetting/IsOpenWaifu`、`Other/UserId`）；`JM_C1_CONFIG_PATH` 可指向 Python 版的
+  config.ini 做同机互通验证；默认路径是 `AppLocalDataLocation/config.ini`。
+- **W6 Python 子进程桥**：`python_bridge.{h,cpp}` + `bridge.py`。QProcess + 行分隔 JSON
+  请求/响应（request 带 id/method/params；response 带 id/ok/result/error），内置
+  起停 / 请求 / 超时 / 崩溃检测 / 自动重启。`host_test_python_bridge.cpp` 用 Qt6Core
+  跑桌面闭环（`start -> ping -> echo -> crash -> restart -> ping`）；`bridge.py` 是
+  最小 echo 服务（`ping`/`echo`/`crash`），协议已在宿主端逐行验证。
+  **注意**：Android 端还没有打包 Python 运行时，所以 `python_selftest` 标记会走
+  `no python runtime; skip bridge selftest` —— 这是当前 C1 的真实边界，不是"假绿"。
+
+实测（x86_64 / MuMu 12 / Android 15）：APK 67.6MB；16KB 对齐 13 / 未对齐 0；直链生效；
+自检链路：`settings selftest OK` → `selftest done pages=3 twoPage=1 rtl=1 brightness=0.75`。
+桥协议在宿主端逐行验证（ping/echo 均返回 ok=true）。
+
 W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放），并配 bench 对照口径。
 
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
