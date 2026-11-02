@@ -1,150 +1,170 @@
-# C1 Python 桥协议 v1
+# C1 网络层（C++ 进程内实现）
 
-- 版本：v1（`protocol: 1`）
+- 版本：v2（取代 v1 的"Python 子进程桥"）
 - 日期：2026-11-02
-- 适用：`android/c1_shell/bridge.py`（Python 侧）↔ `android/c1_shell/python_bridge.{h,cpp}`（C++ 侧）
-- 来源：C1-W6 的行协议 + C1-P4（W6 真实网络接入）
+- 代码：`android/c1_shell/net_client.{h,cpp}`；CA：`android/c1_shell/assets/cacert.pem`
+- 决策依据：用户拍板"把 C3 提前，一次性去掉 Python 运行时"
 
 ---
 
-## 1. 传输
+## 1. 为什么不再用 Python 子进程
 
-- C++ 用 `QProcess` 拉起 `libpythonbin.so bridge.py`，stdin/stdout 各一行一个 JSON 对象（UTF-8，`\n` 结尾）。
-- stderr 不参与协议，只作为诊断输出。
-- **单通道**：C++ 侧同时只允许一个 in-flight 请求。已有请求未完成时再次 `SendRequest` 会直接失败并给出 `bridge busy: <method> pending`，而不是覆盖 `pendingId_`。
+v1 的桥（`bridge.py` + `PythonBridge`）把 Python 运行时打进 APK，`net.request` 走子进程。
+实测结论：
 
-## 2. 请求
+| 环境 | SELinux | 结果 |
+|---|---|---|
+| MuMu 12 / Android 15 AVD | Permissive | ✅ 可 exec |
+| Android 17 16KB 镜像 | Enforcing | ❌ `execve: Permission denied` |
 
-```json
-{"id": 7, "method": "net.request", "params": {"url": "https://example.com/"}}
+原因是实现把 `libpythonbin.so` 复制到 `files/pybin/` 再 exec，而 `app_data_file` 在 Enforcing
+下不可执行。量产机一律 Enforcing，因此该方案在真机上不可能成立。
+
+改为进程内实现后：
+
+- 不再依赖 SELinux 策略，也不需要可执行文件落盘；
+- APK 从 **177MB → 76MB**（去掉 96MB Python bundle 与运行时库）；
+- 少一个进程，故障面从"进程起停/崩溃重启/协议解析"收敛为"HTTP 客户端"。
+
+## 2. 分层
+
+```
+UI (main.cpp)
+   └─ NetClient                 // QObject，单通道，信号 Finished(NetResult)
+        └─ QNetworkAccessManager
+             └─ Qt TLS 后端（qopensslbackend 插件）
+                  └─ libssl.so / libcrypto.so（随包，Android）
 ```
 
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| `id` | int | 由 C++ 侧自增，响应必须原样带回 |
-| `method` | string | 见 §4 |
-| `params` | object | 可选，缺省为 `{}` |
+- **TLS** 交给 Qt 的 OpenSSL 后端，不自建 TLS。OpenSSL 由 `build_wsl.sh` 从现有 p4a dist
+  复制到 `openssl/<abi>/`，再经 `QT_ANDROID_EXTRA_LIBS` 进 APK 的 `lib/<abi>/`。
+  两者 `p_align=0x4000`（16KB 合规）。
 
-## 3. 响应
+  这里有两个**必须照做**的 Android 细节，缺一个就是"插件加载成功但后端不可用"：
 
-成功：
+  1. **库名**：Qt 的 OSSL 后端在 Android 上按 `libssl_3.so` / `libcrypto_3.so` 找库
+     （它自家 android_openssl 包的命名）。只放 `libssl.so` 会得到
+     `qt.tlsbackend.ossl: Failed to load libssl/libcrypto.`，最终表现为
+     `TLS initialization failed`。因此同一份文件同时放两种名字。
+  2. **TLS 插件要自己打包**：`target_link_libraries(Qt6::Network)` 不会让 androiddeployqt
+     把 `libplugins_tls_qopensslbackend_<abi>.so` 放进 APK（实测包内 `plugins/` 为空）。
+     必须把它加进 `QT_ANDROID_EXTRA_LIBS`，Qt 才能在 `lib/<abi>/` 下按名加载。
 
-```json
-{"id": 7, "method": "net.request", "ok": true, "result": {...}, "protocol": 1}
+- **证书**：Android 的 OpenSSL 后端取不到系统证书库，因此把 Mozilla CA 包
+  （`assets/cacert.pem`，118 张）**编进 Qt 资源**，启动时读入并并入系统证书。
+  走 qrc 而不是 `assets:/`：实测 assets 路径引擎读 236KB 要 **8 秒**，qrc 是毫秒级。
+  不预置的后果是所有 HTTPS 直接 `SSLErr`，而日志只有 "handshake failed"。
+
+## 3. 接口
+
+```cpp
+struct NetRequest {
+    QString method = "GET";
+    QUrl url;
+    QHash<QString, QString> headers;
+    QByteArray body;
+    int timeoutMs = 10000;   // 总预算，含重试
+    int retries = 1;         // 额外尝试次数
+    qint64 maxBytes = 256 * 1024;
+};
+
+struct NetResult {
+    bool ok;            // 是否拿到响应（4xx/5xx 也算拿到）
+    bool httpError;     // httpStatus >= 400
+    int httpStatus;
+    QByteArray body;
+    qint64 bodyLen;
+    bool truncated;
+    int attempts;
+    qint64 elapsedMs;
+    QString errorCode;  // 失败时非空，见 §4
+    QString errorText;
+    QString Summary() const;   // 一行摘要，状态栏与 logcat 共用
+};
+
+class NetClient : public QObject {
+    bool Send(const NetRequest &req);   // 单通道，已在飞时返回 false
+    bool Get(const QUrl &url, int timeoutMs = 10000);
+    static int EnsureCaCertificates(const QString &pemPath = QString());
+signals:
+    void Finished(const NetResult &result);
+};
 ```
 
-失败：
+## 4. 语义约定
 
-```json
-{"id": 7, "method": "net.request", "ok": false,
- "error": {"code": "TimeOut", "message": "...", "attempts": 2, "elapsed_ms": 1400},
- "protocol": 1}
+| 项 | 约定 | 理由 |
+|---|---|---|
+| `timeoutMs` | **总预算**，按尝试次数均分（每次 ≥200ms） | 若按"每次尝试"计，`retries=1` 时总耗时可到 2 倍预算，调用方的等待上限就失真 |
+| 重试 | 仅 `DnsError/TimeOut/ConnectErr/ResetErr`；4xx/5xx 不重试 | 重试 404 只是把同一个 404 再打一遍 |
+| 4xx/5xx | `ok=true` + `httpError=true` | 把"网络不通"和"服务器说没有"分开，业务层才能读 403 响应体做诊断 |
+| `maxBytes` | 到顶即 abort 并置 `truncated=true` | 不让大响应打爆内存；abort 不算失败 |
+| 并发 | 单通道，第二个请求直接返回 false | 避免"谁的超时/谁的结果"说不清；需要并发时再扩成 id→回调表 |
+| 重定向 | `NoLessSafeRedirectPolicy`，最多 5 跳 | 默认策略不接受 https→http 降级 |
+
+### 错误码
+
+| code | 触发 |
+|---|---|
+| `UserError` | URL 非法（scheme 非 http/https）、参数错误 |
+| `DnsError` | `HostNotFoundError` |
+| `TimeOut` | 单次尝试超过预算（`abort()` 后归类） |
+| `ConnectErr` | 连接被拒 / 对端关闭 / 会话建立失败 |
+| `ResetErr` | 连接重置（预留；Qt 通常归到 ConnectErr） |
+| `SSLErr` | TLS 握手失败（含缺 CA、域名不匹配） |
+| `NetError` | 其它传输层错误 |
+
+词表与 `src/tools/status.py` 的 `Status` 同名，Python 版的日志经验可直接复用。
+
+## 5. 自检钩子（W7 取证入口）
+
+```bash
+adb shell run-as org.jmcomic.c1shell sh -c 'touch files/net_selftest'
+adb shell am force-stop org.jmcomic.c1shell
+adb shell am start -n org.jmcomic.c1shell/org.qtproject.qt.android.bindings.QtActivity
 ```
 
-约定：
+预期日志（tag `C1Net` / `C1Shell`）：
 
-1. **响应恒定回带 `method`**。P4 之前的版本不回带，导致 `main.cpp` 里 `method == "ping"` 的分支永远不成立；只靠 `id` 关联时，调用方无法判断回来的到底是哪个方法。
-2. `error` 是**对象**（旧版是字符串）。`code` 取自 `src/tools/status.py` 的 `Status` 名字，便于与生产日志同一套词表读。
-3. 非法 JSON 也必须有响应：`{"id": null, "method": null, "ok": false, "error": {"code": "UserError", ...}}`。
-4. 未知方法返回 `UserError`，不静默丢弃。
+```
+C1Net  : CA ready: bundled=118 system=N total=... (tls=openssl)
+C1Net  : req 1/1 GET https://www.baidu.com/ (timeout=14500ms/attempt)
+C1Shell: net OK 200 17143B 148ms
+```
 
-### 3.1 错误码
+URL 可用环境变量 `JM_C1_NET_URL` 覆盖（默认 `https://www.baidu.com/`）。
 
-| code | 触发条件 |
-|---|---|
-| `UserError` | 参数非法（scheme 非 http/https、method 不支持、timeout≤0）、未知方法、坏 JSON |
-| `DnsError` | 域名解析失败 |
-| `TimeOut` | 总预算内未拿到响应 |
-| `ConnectErr` | 连接被拒 / 不可达 |
-| `ResetErr` | 连接被重置 |
-| `SSLErr` | TLS 握手失败 |
-| `NetError` | 其它传输层异常 |
-| `ProxyError` | 代理配置错误（预留给 C3） |
-
-## 4. 方法
-
-### 4.1 `ping` / `echo` / `crash`（W6 原有，保持兼容）
-
-| 方法 | params | result |
-|---|---|---|
-| `ping` | — | `"pong"` |
-| `echo` | 任意 object | 原样返回 |
-| `crash` | — | 无响应：进程以 `SystemExit(3)` 退出，用于验证崩溃检测与自动重启 |
-
-### 4.2 `net.request`（P4 新增）
-
-params：
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `method` | `GET` | GET/POST/PUT/DELETE/PATCH/HEAD |
-| `url` | 必填 | 仅 http/https |
-| `headers` | `{User-Agent: JMComic-C1-Bridge/1.0}` | 覆盖式合并 |
-| `body` | 无 | 字符串，或 object/array（自动 JSON 序列化并补 `Content-Type`） |
-| `timeout_ms` | `10000` | **总预算**，含重试；不是每次尝试各自超时 |
-| `retries` | `1` | 额外尝试次数；只在 `DnsError/TimeOut/ConnectErr/ResetErr` 上重试，4xx/5xx 不重试 |
-| `max_bytes` | `262144` | 响应体读取上限，超出置 `truncated` |
-| `include_body` | `true` | false 时结果不带 `body`（避免桥里塞大对象） |
-| `binary` | `false` | true 时用 `body_b64` 代替 `body` |
-| `proxy` | 无 | 显式代理；**不继承**环境变量，保证行为可复现 |
-
-result：
-
-| 字段 | 说明 |
-|---|---|
-| `status` | `Ok` 表示拿到了响应（含 4xx/5xx） |
-| `http_status` | HTTP 状态码；0 表示没拿到响应 |
-| `final_url` | 跟随重定向后的 URL |
-| `headers` | 响应头 |
-| `body` / `body_b64` | 响应体（受 `include_body`/`binary`/`max_bytes` 约束） |
-| `body_len` | 实际读到的字节数 |
-| `truncated` | 是否被 `max_bytes` 截断 |
-| `http_error` | true 表示 HTTP 状态码 ≥400（仍算 `ok: true`，因为"拿到了响应"） |
-| `elapsed_ms` | 端到端耗时（含重试） |
-| `attempts` | 实际尝试次数 |
-| `backend` | 当前恒为 `stdlib` |
-
-> 4xx/5xx 返回 `ok: true` 是刻意的：协议层把"网络不通"和"服务器说没有"分开，业务层才有机会读 403 的响应体做诊断。旧版把一切都塞进 `ok:false` 会让这两种情况无法区分。
-
-### 4.3 `net.status`
-
-result：`protocol_version / python / backend / pid / uptime_ms / rss_kb / stats{requests, failures, last_error}`。
-
-`rss_kb` 读 `/proc/self/statm`；读不到时返回 `-1`（不伪造 0）。
-
-### 4.4 `net.close`
-
-回 `{"closing": true}` 后进程 `break` 退出（退出码 0）。用于验证"优雅关闭"：C++ 侧应观察到 `IsRunning() == false` 且没有 `Crashed` 信号。
-
-## 5. 超时责任划分
-
-| 层 | 超时 | 语义 |
-|---|---|---|
-| Python `net_client` | `timeout_ms` | 总预算，按尝试次数均分（每次至少 200ms） |
-| C++ `NetRequest` | `timeoutMs` | 兜底：若 Python 没在预算内回话（卡死/崩溃），由 C++ 报 `request timeout method=net.request` |
-
-`NetRequest` 会把这个预算减去 500ms 作为 Python 侧 `timeout_ms`，**保证先由 Python 报出带错误码的超时**；C++ 侧超时意味着"子进程没回话"，是另一类故障。
-
-## 6. 进程生命周期
-
-| 场景 | 行为 |
-|---|---|
-| Python 抛未捕获异常 / `SystemExit(non-zero)` | `Crashed` 信号 + 自动重启（`QProcess::ExitStatus` 是 `NormalExit`，**只判 `CrashExit` 会漏掉这种最常见的形态**） |
-| 被信号杀死 | 同上 |
-| `Stop()` 主动停止 | 不触发 `Crashed`、不重启 |
-| `net.close` 正常退出 | 不触发 `Crashed`；`proc_` 置空 |
-| 重启 | 100ms 后重启一次，`errorOccurred` 与 `finished` 双触发有去抖 |
-
-## 7. 已知边界（不假装覆盖）
-
-1. **TLS 指纹**：`net_client` 只用 stdlib urllib，不做 `curl_cffi` 的浏览器指纹伪装。真实站点若做指纹校验，需要用 C3 的收编方案替换后端，届时只换 `net_client`，协议不变。
-2. **并发**：单通道一次一个请求；分页预取/并发下载需要时再扩展（届时改 `id` 关联为 `id→callback` 表）。
-3. **端口/流式**：不支持流式响应与断点续传，属 C3。
-
-## 8. 验证方式
+## 6. 验证
 
 | 层 | 命令 | 覆盖 |
 |---|---|---|
-| 协议级（无 Qt） | `python android/c1_shell/host_test_net_client.py` | 方法分发、错误码、重试次数、截断、优雅关闭 |
-| 进程级（真实 `PythonBridge`） | `bash android/c1_shell/host_tests/run_host_tests.sh` | 起停、ping/echo、net.request 200/404/超时、net.status、crash+重启、net.close |
-| 设备级 | `docs/c1_w7_report.md` 的 F9/F10 与 P4-5 用例 | 真机上一次真实请求 |
+| 桌面 | `bash android/c1_shell/host_tests/run_host_tests.sh` | 200 / 404 / 超时 / 截断 / POST / 拒连重试 / 非法 URL / 单通道（9 项） |
+| 设备 | `bash android/tools/c1_w7_regression.sh --apk <apk>` | 安装、启动、`net_selftest`、PSS、gfxinfo、两条门禁 |
+| 门禁 | `build_wsl.sh` 内置 | APK 含 `assets/cacert.pem`、`lib/<abi>/libssl.so`、`libcrypto.so`、`libplugins_tls_qopensslbackend_<abi>.so`；16KB 对齐；`libsr_qnn.so` 直链 |
+
+### 实测（2026-11-02）
+
+| 设备 | Android | SELinux | 结果 |
+|---|---|---|---|
+| `emulator-5554` | 15 | Permissive | `TotalTime 1222ms`；`CA bundled=118`；`net OK 200 17143B 601ms`；阅读器/设置自检均通过 |
+| `emulator-5556` | 17 (SDK 37) / 16KB | **Enforcing** | `CA bundled=118`；`net OK 200 17143B 1260ms` |
+
+同一份 APK 在 Enforcing 上不再出现 `execve: Permission denied`——这是移除 Python 子进程的
+直接收益。APK 体积 177MB → **82MB**（75.7MB + 两套 OpenSSL 别名共 6MB）。
+
+## 7. 已知边界（不假装覆盖）
+
+1. **TLS 指纹**：Qt/OpenSSL 的 ClientHello 与浏览器不同。目标站点若做 JA3/JA4 校验，
+   需要在 C3 阶段换成 curl-impersonate 一类后端；届时只替换 `net_client` 实现，接口不变。
+2. **HTTP/2、连接池、断点续传**：走 Qt 默认策略，未针对分页预取优化，属 C3。
+3. **并发**：单通道。列表页并行拉取前需要先扩接口（id→回调）。
+4. **代理**：当前随 Qt 的系统代理，显式代理参数留给 C3。
+
+## 8. 与 v1 桥的关系
+
+v1（`bridge.py` + `PythonBridge` + `net_client.py`）已随本次改造删除，代码在提交 `734cb9c`
+可达。保留的历史教训（对将来任何子进程组件都成立）：
+
+- 响应必须回带 `method`，否则调用方无法判断回来的是哪个方法；
+- 非 0 退出码也是"死了"（`QProcess` 报 `NormalExit`，只判 `CrashExit` 会漏掉最常见的崩溃）；
+- `Stop()` 里 `terminate()/waitForFinished()` 会同步派发 `finished`，先把 `proc_` 摘空再收拾。

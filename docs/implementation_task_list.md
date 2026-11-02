@@ -955,7 +955,10 @@ C1Shell  : py 3.14.8 rss=23084KB up=15748ms
 `SSLErr: CERTIFICATE_VERIFY_FAILED`。bundle 里自带 `certifi/cacert.pem`，由 `pyruntime.cpp` 把它设成
 `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` 后恢复正常。
 
-#### ⚠ 新风险 R11：Enforcing 设备上"私有目录 exec"被拒（影响 P4 全部真机用例）
+#### ⚠ 新风险 R11：Enforcing 设备上"私有目录 exec"被拒 —— **已由 0E-2 的方案消除**
+
+> 结论更新（2026-11-02 第三轮）：用户拍板移除 Python 运行时、网络改由 C++ 实现。
+> 该风险不再存在（进程内请求，不需要 exec 任何文件）。以下保留原始记录供追溯。
 
 同一份 APK 在两台 AVD 上结论相反：
 
@@ -1006,8 +1009,44 @@ bash android/c1_shell/host_tests/run_host_tests.sh    # 24/24 + 17/17，退出�
 bash android/tools/c1_w7_regression.sh --apk <apk>    # 真机到位后跑；无设备时 exit 3 并落盘阻塞证据
 ```
 
-## 0B. C1 决策简报（2026-11-02，待用户拍板）
+### 0E-2. C1 网络改由 C++ 实现，移除 Python 运行时（2026-11-02 第三轮，用户拍板）
 
+**决策**：放弃"Python 子进程桥"，把 C3 的网络收编提前到 C1，网络直接在 C++ 进程内做。
+**原因**：R11 已证实 W6 的私有目录 exec 方案在 Enforcing 设备（=所有量产机）上不可用。
+
+#### 变更
+
+| 项 | 之前（W6/P4 v1） | 现在（C1 v2） |
+|---|---|---|
+| 网络实现 | `bridge.py` + `PythonBridge` 子进程 | `net_client.{h,cpp}`，QNetworkAccessManager |
+| 运行时 | 96MB Python bundle + libpython + toolchain | 无 |
+| TLS | Python ssl + certifi | Qt OpenSSL 后端 + 随包 `libssl_3.so`/`libcrypto_3.so` |
+| 证书 | `SSL_CERT_FILE` 指向 bundle 内 pem | Mozilla CA 编进 Qt 资源（118 张），启动并入 |
+| APK | 177MB | **82MB** |
+| 依赖 SELinux | 需要 Permissive（真机不可用） | 不需要 |
+
+#### 状态
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| C++ 网络层 | ✅ | `net_client.{h,cpp}`；`docs/c1_net_layer.md` |
+| 桌面闭环 | ✅ | `host_tests/` 9/9 PASS（200/404/超时/截断/POST/拒连重试/非法 URL/单通道） |
+| Android 15 AVD | ✅ | `TotalTime 1222ms`；`net OK 200 17143B 601ms`；阅读器+设置自检通过 |
+| Android 17 / 16KB / Enforcing | ✅ | `net OK 200 17143B 1260ms`；无 exec 拒绝 |
+| Python 相关代码清理 | ✅ | 删除 `bridge.py`/`python_bridge.*`/`pyruntime.*`/`net_client.py`/`make_pybundle.py` |
+| 门禁 | ✅ | APK 必含 CA + 两套 OpenSSL + TLS 插件；20 库全对齐；直链仍生效 |
+| W7/W8 真机 | ⏳ 阻塞 | 仍缺物理设备（见 P0-1） |
+
+#### 本轮新增的 Android 硬约束（都实测过，别再踩）
+
+1. Qt 的 OSSL 后端在 Android 上只认 `libssl_3.so` / `libcrypto_3.so`；只放 `libssl.so`
+   → `Failed to load libssl/libcrypto.` → `TLS initialization failed`。
+2. TLS 后端插件不会被 androiddeployqt 自动打包，必须手动加进 `QT_ANDROID_EXTRA_LIBS`。
+3. CA 走 `assets:/` 读 236KB 要 8 秒，必须编进 Qt 资源（`:/assets/cacert.pem`）。
+4. `set -o pipefail` 下 `unzip -l "$APK" | grep -q` 会因 SIGPIPE 误判"包里没有"，
+   门禁要先落盘清单再 grep。
+
+## 0B. C1 决策简报（2026-11-02，待用户拍板）
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。
 
 ### 0B.1 C1 是什么（一句话）
