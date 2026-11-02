@@ -120,14 +120,21 @@ class ModelStore(object):
 
     # ---------- 网络 ----------
     def Probe(self, force=False):
-        """ 快速探活：只发 HEAD，3 秒超时；无 base_url 直接判 offline """
+        """ 快速探活：只发 HEAD，3 秒超时；无 base_url 直接判 offline
+
+        file:// 源（本地调试/自测）没有 HEAD，按"路径存在即可用"处理。
+        """
         if self._online is not None and not force:
             return self._online
         if not self.CanDownload():
             self._online = False
             return False
+        base = self.BaseUrl()
+        if base.startswith("file://"):
+            self._online = os.path.isdir(base[len("file://"):])
+            return self._online
         try:
-            req = urllib.request.Request(self.BaseUrl(), method="HEAD")
+            req = urllib.request.Request(base, method="HEAD")
             urllib.request.urlopen(req, timeout=3).close()
             self._online = True
         except Exception:
@@ -172,7 +179,7 @@ class ModelStore(object):
                 os.replace(part, final)
                 return final
             raise
-        mode = "ab" if done and resp.status == 206 else "wb"
+        mode = "ab" if done and getattr(resp, "status", None) == 206 else "wb"
         if mode == "wb":
             done = 0
         with open(part, mode) as f:

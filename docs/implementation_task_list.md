@@ -558,7 +558,13 @@ C 轨道用 CMake+Gradle，Qt 官方支持 Windows 作为 Android 构建宿主�
   三个 API，下载走 `ModelStore.Download`，完成后 `RefreshCatalog`；
 - 自检 `script/test_sr_model_table_a3a.py` 6 项全过（旧行为保持 / missing 可见 / 不可选 / badge / Reload）。
 
-**A3a 还剩**：行内"下载"按钮 + 进度条（把 `DownloadModel` 接到 UI 线程外）、真实 Release URL。
+**A3a 第三批（2026-11-02，已完成）**：点击未安装行 = 下载，行内百分比进度（`_DownloadWorker` QThread，
+worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道前置检查：无清单/无源/不可达分别给出
+"本包无清单"/"未配置下载源"/"网络不可用"；下载成功自动 `RefreshCatalog` 并选中该模型）。
+自检 `script/test_a3a_download_e2e.py` 用 **file:// 假源**跑通全链路：文件落地 + sha256 一致 +
+19 次进度回调 + badge "下载中 50%" + 两条拒绝分支。三套自检（model_store / 三态 / e2e）全绿。
+
+**A3a 还剩**：真实 Release URL（写入清单后换 base_url 即可，代码零改动）。
 当前 `base_url` 为空 → `CanDownload()=False`，UI 应置灰不可点（这是设计，不是缺陷）。
 
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）

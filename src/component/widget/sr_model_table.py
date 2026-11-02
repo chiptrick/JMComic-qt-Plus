@@ -31,7 +31,7 @@ setColumnHidden 掉，等于用信息缺失换宽度。
 """
 import os
 
-from PySide6.QtCore import QCoreApplication, QEvent, QRect, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QRect, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QStyledItemDelegate,
                                QTableWidget, QTableWidgetItem)
@@ -441,6 +441,33 @@ class SrModelDelegate(QStyledItemDelegate):
                            Qt.AlignRight | Qt.AlignVCenter)
 
 
+class _DownloadWorker(QThread):
+    """ 后台下载一个模型
+
+    线程纪律：worker 只碰 model_store（纯文件/网络），**绝不碰任何 widget**；
+    进度与结果一律走信号回 UI 线程，避免"在非 GUI 线程更新 badge"这类难查的崩溃。
+    """
+
+    progress = Signal(str, int, int)      # key, done, total
+    done = Signal(str, str)               # key, 本地路径
+    failed = Signal(str, str)             # key, 错误文案
+
+    def __init__(self, store, key, entry, parent=None):
+        QThread.__init__(self, parent)
+        self._store = store
+        self._key = key
+        self._entry = entry
+
+    def run(self):
+        try:
+            def cb(done, total):
+                self.progress.emit(self._key, int(done), int(total))
+            path = self._store.Download(self._entry, progress=cb)
+            self.done.emit(self._key, path or "")
+        except Exception as es:                      # noqa: BLE001 worker 边界统一兜住
+            self.failed.emit(self._key, str(es))
+
+
 class SrModelTable(QTableWidget):
     """ 模型列表：三列 + 分组条(吸顶) + 当前使用/已选高亮 """
 
@@ -463,6 +490,9 @@ class SrModelTable(QTableWidget):
         self._currentRow = -1
         self._catalog = None
         self._store = None          # 懒加载的 ModelStore（A3a：缺失模型可下载）
+        self._downloading = {}      # key -> (done, total)，仅 UI 线程读写
+        self._downloadError = {}    # key -> 错误文案（重试成功后清除）
+        self._workers = {}          # key -> _DownloadWorker（保引用，防被 GC）
         self._groupRows = []        # [(row, algo, count)]
         self._groupRowSet = set()
         self._groupInfo = {}        # 分组行 → (algo, count)
@@ -631,6 +661,12 @@ class SrModelTable(QTableWidget):
         if record is None:
             return "", False
         if getattr(record, "state", "installed") == "missing":
+            if record.key in self._downloading:
+                done, total = self._downloading[record.key]
+                pct = int(done * 100 / total) if total else 0
+                return _Tr("下载中 {}%".format(pct)), True
+            if record.key in self._downloadError:
+                return self._downloadError[record.key], False
             if record.size:
                 return _Tr("未安装 · {:.0f}MB".format(record.size / 1048576.0)), False
             return _Tr("未安装"), False
@@ -724,26 +760,88 @@ class SrModelTable(QTableWidget):
         record = self.RecordOf(fullName)
         return bool(record) and getattr(record, "state", "installed") == "missing"
 
+    def SetStore(self, store):
+        """ 注入模型仓库（测试/桌面用；正常路径走 Store() 懒加载） """
+        self._store = store if store is not None else False
+
+    def _EntryOf(self, record):
+        store = self.Store()
+        if store is None:
+            return None, None
+        for item in store.Manifest().get("models", []):
+            if (item.get("file") or "") == (record.file or ""):
+                return store, item
+        return store, None
+
+    def StartDownload(self, fullName):
+        """ 点未安装行 → 后台下载，行内显示百分比；完成后自动刷新并可选中
+
+        返回 True 表示已启动。任何拒绝原因都落到 _downloadError，由 badge 显示，
+        不弹模态框（列表里连点多个模型时模态框会打断操作）。
+        """
+        record = self.RecordOf(fullName)
+        if record is None or getattr(record, "state", "installed") != "missing":
+            return False
+        if fullName in self._downloading:
+            return False
+        store, entry = self._EntryOf(record)
+        if store is None:
+            self._downloadError[fullName] = _Tr("本包无清单")
+            self._RefreshRow(fullName)
+            return False
+        if not store.CanDownload():
+            self._downloadError[fullName] = _Tr("未配置下载源")
+            self._RefreshRow(fullName)
+            return False
+        if not store.Probe():
+            self._downloadError[fullName] = _Tr("网络不可用")
+            self._RefreshRow(fullName)
+            return False
+
+        worker = _DownloadWorker(store, fullName, entry, self)
+        worker.progress.connect(self._OnDownloadProgress)
+        worker.done.connect(self._OnDownloadDone)
+        worker.failed.connect(self._OnDownloadFailed)
+        worker.finished.connect(worker.deleteLater)
+        self._workers[fullName] = worker
+        self._downloadError.pop(fullName, None)
+        self._downloading[fullName] = (0, int(entry.get("size") or 0))
+        self._RefreshRow(fullName)
+        worker.start()
+        return True
+
+    def _OnDownloadProgress(self, key, done, total):
+        self._downloading[key] = (done, total)
+        self._RefreshRow(key)
+
+    def _OnDownloadDone(self, key, path):
+        self._downloading.pop(key, None)
+        self._downloadError.pop(key, None)
+        self._workers.pop(key, None)
+        self.RefreshCatalog()
+        # 下完就选上：用户点灰行本来就是为了用它
+        self.PickModel(key)
+
+    def _OnDownloadFailed(self, key, reason):
+        self._downloading.pop(key, None)
+        self._workers.pop(key, None)
+        self._downloadError[key] = reason or _Tr("下载失败")
+        self._RefreshRow(key)
+
     def DownloadModel(self, fullName, progress=None):
-        """ 下载一个缺失模型 → 校验 → 刷新目录（UI 自己负责线程与进度条）
+        """ 同步下载（脚本/测试用；UI 走 StartDownload 不阻塞主线程）
 
         失败抛 ModelOffline（model_store 保证只有这一种），调用方统一提示"网络不可用"。
-        成功后该行会从 missing 变 installed，可直接选中使用。
         """
         record = self.RecordOf(fullName)
         if record is None:
             raise ValueError("未知模型: {}".format(fullName))
         if getattr(record, "state", "installed") != "missing":
             return ""
-        store = self.Store()
+        store, entry = self._EntryOf(record)
         if store is None:
             from component.sr.model_store import ModelOffline
             raise ModelOffline("本包没有模型清单，无法下载")
-        entry = None
-        for item in store.Manifest().get("models", []):
-            if (item.get("file") or "") == (record.file or ""):
-                entry = item
-                break
         if entry is None:
             from component.sr.model_store import ModelOffline
             raise ModelOffline("清单里没有 {}".format(record.file or record.key))
@@ -777,8 +875,14 @@ class SrModelTable(QTableWidget):
 
     def _OnCellClicked(self, row, column=0):
         record = self._rowRecord.get(row)
-        if record is not None:
-            self.PickModel(record.key)
+        if record is None:
+            return
+        if getattr(record, "state", "installed") == "missing":
+            # 点灰行 = 下载（比额外塞一个按钮更符合"列表即入口"的交互，
+            # 也避免在自绘 delegate 里做可点击子控件）
+            self.StartDownload(record.key)
+            return
+        self.PickModel(record.key)
 
     def RowOfModel(self, fullName):
         for row, record in self._modelRows:
