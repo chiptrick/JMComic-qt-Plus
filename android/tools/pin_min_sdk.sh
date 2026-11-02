@@ -56,11 +56,14 @@ else
         SetKey "${spec}" "android.private_storage" "True"
         # 应用外部私有目录(下载目录要用，Android 10+ 无需权限)
         SetKey "${spec}" "android.allow_backup" "False"
-        if compgen -G "${MODEL_DIR}/*.onnx" >/dev/null; then
+        # A3a（0.88 起）：模型不再内置进 APK —— 199MB 的 .onnx 改为运行时从
+        # /storage/emulated/0/Android/data/<pkg>/models 读取（见 platform_mobile.GetAndroidModelDir），
+        # 缺失时由 UI 引导按需下载。需要旧行为（模型打进 assets）时显式设 JM_BUNDLE_MODELS=1。
+        if [ "${JM_BUNDLE_MODELS:-0}" = "1" ] && compgen -G "${MODEL_DIR}/*.onnx" >/dev/null; then
             SetKey "${spec}" "android.add_assets" "${MODEL_DIR}:models"
-            log "  已加入模型资产: ${MODEL_DIR} -> assets/models"
+            log "  [legacy] 已加入模型资产: ${MODEL_DIR} -> assets/models"
         else
-            warn "  sr_qnn/models 没有 onnx，跳过 add_assets(用 adb push 推送模型)"
+            log "  模型不进 APK（A3a）：运行时读外部目录，缺失由 UI 引导下载"
         fi
         # 原生库清单：buildozer **只认** android.add_libs_<abi>（targets/android.py
         # 里那张固定映射表），而 android.local_libs 不是 buildozer/p4a 认识任何一个键

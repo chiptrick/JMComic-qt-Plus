@@ -1,0 +1,258 @@
+{
+  "base_url": "",
+  "generated_at": "2026-11-02T12:59:43+0800",
+  "models": [
+    {
+      "denoise": 3,
+      "file": "waifu2x_cunet_up2x_denoise3.onnx",
+      "name": "WAIFU2X_ANIME_UP2X_DENOISE3X",
+      "scale": 2,
+      "sha256": "8c81c3a7bed261c36c725305382479d691cfbcf11bb27e800c12d71e5eb913bd",
+      "size": 5162007,
+      "tile": 192
+    },
+    {
+      "denoise": 2,
+      "file": "waifu2x_cunet_up2x_denoise2.onnx",
+      "name": "WAIFU2X_ANIME_UP2X_DENOISE2X",
+      "scale": 2,
+      "sha256": "d0e9548245851e3133f1cf71019370afc3aab8191c799bba3ea0ed82818925cc",
+      "size": 5162007,
+      "tile": 192
+    },
+    {
+      "denoise": 1,
+      "file": "waifu2x_cunet_up2x_denoise1.onnx",
+      "name": "WAIFU2X_ANIME_UP2X_DENOISE1X",
+      "scale": 2,
+      "sha256": "5a7fa4a8a0e3aa19e8c2b16c101f25c5ba8d647913ce9d1e5fa3763242aedbb5",
+      "size": 5162007,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "waifu2x_cunet_up2x_denoise0.onnx",
+      "name": "WAIFU2X_ANIME_UP2X_DENOISE0X",
+      "scale": 2,
+      "sha256": "f0e32b4f1241fc7e43ac9936573ed5ed33f04fa04db2104a01ef399220fc6d37",
+      "size": 5162007,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "waifu2x_cunet_up2x.onnx",
+      "name": "WAIFU2X_ANIME_UP2X",
+      "scale": 2,
+      "sha256": "28ed61a6583f93698f035db2659dd16f4290bfd82bc956d1592c8b173402a0ef",
+      "size": 5162007,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_se_up2x.onnx",
+      "name": "REALCUGAN_SE_UP2X",
+      "scale": 2,
+      "sha256": "a4d32371c130c553c3d86aa742fd6ba9a6f54efb38c14c0ae89b7bcd41dd8731",
+      "size": 5160649,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_se_up2x_conservative.onnx",
+      "name": "REALCUGAN_SE_UP2X_CONSERVATIVE",
+      "scale": 2,
+      "sha256": "72bd46c0e2d453b8f914c8c14c12289ac8749d4b4dba6ec1928853df1e885966",
+      "size": 5160649,
+      "tile": 192
+    },
+    {
+      "denoise": 3,
+      "file": "realcugan_se_up2x_denoise3.onnx",
+      "name": "REALCUGAN_SE_UP2X_DENOISE3X",
+      "scale": 2,
+      "sha256": "92e86f90d36c87e56a62fd38a53250d77aea475d8e6d2912c351756d1cb87956",
+      "size": 5160649,
+      "tile": 192
+    },
+    {
+      "denoise": 2,
+      "file": "realcugan_se_up2x_denoise2.onnx",
+      "name": "REALCUGAN_SE_UP2X_DENOISE2X",
+      "scale": 2,
+      "sha256": "b54955726396bfcd9708f1b90821da42e4a4f5de9f3461acc2cdca463bfbeb63",
+      "size": 5160649,
+      "tile": 192
+    },
+    {
+      "denoise": 1,
+      "file": "realcugan_se_up2x_denoise1.onnx",
+      "name": "REALCUGAN_SE_UP2X_DENOISE1X",
+      "scale": 2,
+      "sha256": "4a4fbff9453e207294f5ab192c60fa5916829ad293afcfb4188d5da9a281c339",
+      "size": 5160649,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_se_up3x.onnx",
+      "name": "REALCUGAN_SE_UP3X",
+      "scale": 3,
+      "sha256": "726f164ef4d062752ea5c845f6ac2f2f73ffa8eb6fffcdd4d55bd55c01f1af1b",
+      "size": 5167577,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_se_up3x_conservative.onnx",
+      "name": "REALCUGAN_SE_UP3X_CONSERVATIVE",
+      "scale": 3,
+      "sha256": "018e4b83b1f1d7237811fef90a673a172cb6e8aee6f59d51b57baac82fca2e44",
+      "size": 5167577,
+      "tile": 192
+    },
+    {
+      "denoise": 3,
+      "file": "realcugan_se_up3x_denoise3.onnx",
+      "name": "REALCUGAN_SE_UP3X_DENOISE3X",
+      "scale": 3,
+      "sha256": "bf7a57161b5966da3e4ef14a42607db2bc73a69f0ffb563f38bc5a62573fcf72",
+      "size": 5167577,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_se_up4x.onnx",
+      "name": "REALCUGAN_SE_UP4X",
+      "scale": 4,
+      "sha256": "e348056f8a15664f71d5dde0d79e7546d9f7dc6e77145c31010c7e1173bac00e",
+      "size": 5650726,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_se_up4x_conservative.onnx",
+      "name": "REALCUGAN_SE_UP4X_CONSERVATIVE",
+      "scale": 4,
+      "sha256": "ce675f701a9714fe241dcaf32edb42022da0116cb098705bdb72591ebe867938",
+      "size": 5650726,
+      "tile": 192
+    },
+    {
+      "denoise": 3,
+      "file": "realcugan_se_up4x_denoise3.onnx",
+      "name": "REALCUGAN_SE_UP4X_DENOISE3X",
+      "scale": 4,
+      "sha256": "474b3e7d02b27bac4f8d4b2cde0a013eb7cfcec0e6778ac1d8be7cbc9f92555a",
+      "size": 5650726,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_pro_up2x.onnx",
+      "name": "REALCUGAN_PRO_UP2X",
+      "scale": 2,
+      "sha256": "d22f669b2fad164abd31d45583aa2cfa52a4f1840c4af8a3ef98ccbde1cb610a",
+      "size": 5161267,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_pro_up2x_conservative.onnx",
+      "name": "REALCUGAN_PRO_UP2X_CONSERVATIVE",
+      "scale": 2,
+      "sha256": "6ca703add6fe17fb44c2319ea0094faa7cabf008339fa2231846e7a7e82fd52a",
+      "size": 5161267,
+      "tile": 192
+    },
+    {
+      "denoise": 3,
+      "file": "realcugan_pro_up2x_denoise3.onnx",
+      "name": "REALCUGAN_PRO_UP2X_DENOISE3X",
+      "scale": 2,
+      "sha256": "85f695d1236bf1ae3d7403cac2181d2f7758a834e163dae73622f8d213051ab5",
+      "size": 5161267,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_pro_up3x.onnx",
+      "name": "REALCUGAN_PRO_UP3X",
+      "scale": 3,
+      "sha256": "2cd8e0e400df87c3dfaa1f37a4a17f3ee59861def0499d8191dabb63d0b16c59",
+      "size": 5168195,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realcugan_pro_up3x_conservative.onnx",
+      "name": "REALCUGAN_PRO_UP3X_CONSERVATIVE",
+      "scale": 3,
+      "sha256": "47763da7a6ea0b090a68e90cc590fdd4e49f7a1289ee5d1c201c60ff96d163f6",
+      "size": 5168195,
+      "tile": 192
+    },
+    {
+      "denoise": 3,
+      "file": "realcugan_pro_up3x_denoise3.onnx",
+      "name": "REALCUGAN_PRO_UP3X_DENOISE3X",
+      "scale": 3,
+      "sha256": "3a9fc59436943d98a433354959cda846948412f925430f4810b910e97832e732",
+      "size": 5168195,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realesrgan_animevideo_v3_up2x.onnx",
+      "name": "REALESRGAN_ANIMAVIDEOV3_UP2X",
+      "scale": 2,
+      "sha256": "d7c77542a36df63ba86a4b6b1e6ae16b399a7c181a0af56782b7a810f23ff21c",
+      "size": 2496717,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realesrgan_animevideo_v3_up3x.onnx",
+      "name": "REALESRGAN_ANIMAVIDEOV3_UP3X",
+      "scale": 3,
+      "sha256": "f0e564a360bba23670b53a82c1f82bf0eeb7ba827d3a22837272af52ec62627e",
+      "size": 2496717,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realesrgan_animevideo_v3_up4x.onnx",
+      "name": "REALESRGAN_ANIMAVIDEOV3_UP4X",
+      "scale": 4,
+      "sha256": "815f38a478861b1012e9635af2009c9ca5a05f1b35794b351cadab204bafded9",
+      "size": 2496393,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realesrgan_x4plus_up4x.onnx",
+      "name": "REALESRGAN_X4PLUS_UP4X",
+      "scale": 4,
+      "sha256": "85cd2bfac77af5281e36f672af74f6b20c2d78163baadbfa4543448ced99d149",
+      "size": 67122935,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "realesrgan_x4plus_anime_up4x.onnx",
+      "name": "REALESRGAN_X4PLUSANIME_UP4X",
+      "scale": 4,
+      "sha256": "a63ec2da859c06966552a1042f812d1e302e437db8ab5e87af8fe81ea6bf6fca",
+      "size": 17959544,
+      "tile": 192
+    }
+  ],
+  "texts": [
+    {
+      "file": "models.txt",
+      "sha256": "d771d6946dc783c7c6c6c437f4c391633b22b3ee51674f41aa0c21567a29af7d",
+      "size": 5086
+    }
+  ],
+  "total_bytes": 207628881,
+  "version": 1
+}

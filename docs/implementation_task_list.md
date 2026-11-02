@@ -518,6 +518,25 @@ C 轨道用 CMake+Gradle，Qt 官方支持 Windows 作为 Android 构建宿主�
 
 ---
 
+### 更新 23（2026-11-02，A3a 第一批落地）：模型零内置 + 外部目录 + 清单校验 + 按需下载
+
+用户已拍板 **B 先行**（A3a 2~3 周，之后再启动 C1）。第一批改完并自检通过：
+
+| 改动 | 文件 | 要点 |
+|---|---|---|
+| 外部模型目录 | `src/tools/platform_mobile.py` | 新增 `GetExternalAppDir()`（`getExternalFilesDir(None)` 的父目录 = `/storage/emulated/0/Android/data/<pkg>`）；`GetAndroidModelDir()` 改为外部目录 `.../models`，取不到退回私有目录 |
+| 启动逻辑 | `android/main.py` `EnsureModels()` | **不再从 assets/private.tar 复制**；有则直接用、无则只建目录（env 仍设，下载器/用户投放共用一处）；老包升级时把私有目录 `waifu2x-models` 一次性迁移过来 |
+| 打包 | `android/tools/pin_min_sdk.sh` | `android.add_assets` 默认**不再注入**模型，仅 `JM_BUNDLE_MODELS=1` 时保留旧行为 |
+| 清单生成 | `script/gen_model_manifest.py` | 29 → **27 个模型 / 198.0MB**，含 size+sha256；同时输出 `gh release` 上传命令 |
+| 运行时仓库 | `src/component/sr/model_store.py` | 状态（installed/missing/**corrupt**）、sha256 校验、断点续传（Range+`.part`+原子改名）、`Probe()` 3s 探活、`ModelOffline` 单一异常；`../` 路径防护 |
+| 自检 | `script/test_model_store.py` | 10 项全过（缺失/已装/损坏/越界/续传/离线） |
+
+**顺带发现（数据质量）**：`models.txt` 有 4 条指向**不存在的文件**（`waifu2x_cunet_up1x_denoise0~3`），
+生成器已跳过并告警——这解释了"1x 只有部分降噪档可用"，A3a 第二批要在 UI 上如实标注。
+
+**A3a 剩余（第二批）**：① 超分入口按 `ModelStore.List()` 置灰/显示"未安装"，断网时只列已装；
+② 真实 GitHub Release URL 写入清单并做一次端到端下载验证；③ 与 arm64 包同步后测 APK 体积（预期 433→~230MB）。
+
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
 
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。

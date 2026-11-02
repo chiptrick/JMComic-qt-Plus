@@ -641,9 +641,37 @@ def InitAndroidEnv(app=None):
     return
 
 
+def GetExternalAppDir():
+    """ 应用专属外部目录: /storage/emulated/0/Android/data/<pkg>
+
+    Android 11+ 免任何存储权限，卸载应用时随之删除，用户也能用文件管理器直接丢文件进去
+    （A3a 起模型就放这里，不再打进 APK）。取不到返回空串。
+    """
+    d = _JniDir("external")          # getExternalFilesDir(None) -> …/Android/data/<pkg>/files
+    if d:
+        return os.path.dirname(d)
+    base = os.environ.get("EXTERNAL_STORAGE") or "/storage/emulated/0"
+    pkg = os.environ.get("ANDROID_PACKAGE_NAME") or "org.jmcomic.jmcomic"
+    guess = os.path.join(base, "Android", "data", pkg)
+    return guess if os.path.isdir(guess) else ""
+
+
 def GetAndroidModelDir():
-    """ waifu2x(NPU) 模型目录 """
-    return os.environ.get("JM_SR_MODELS") or os.path.join(GetAppDataDir(), "waifu2x-models")
+    """ waifu2x(NPU) 模型目录
+
+    A3a（0.88 起）模型不再内置进 APK：Android 上优先用应用专属外部目录
+    /storage/emulated/0/Android/data/<pkg>/models —— 体积 -199MB、免存储权限、
+    用户可直接投放模型；外部目录不可用时退回私有目录（老版本升级兜底）。
+    JM_SR_MODELS 环境变量优先级最高（EnsureModels 用它固定最终目录）。
+    """
+    env = os.environ.get("JM_SR_MODELS")
+    if env:
+        return env
+    if IsAndroid():
+        ext = GetExternalAppDir()
+        if ext:
+            return os.path.join(ext, "models")
+    return os.path.join(GetAppDataDir(), "waifu2x-models")
 
 
 # ##############################################################################

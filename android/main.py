@@ -196,50 +196,51 @@ def _CopyModels(src, target):
 
 
 def EnsureModels():
-    """ 让 sr_qnn 能读到 waifu2x 模型
+    """ 让 sr_qnn 能读到 waifu2x 模型（A3a：模型不再内置，改为外部目录 + 按需下载）
 
-    模型随 APK 的 private.tar 分发(p4a 解包到 APP_ROOT/sr_qnn/models/)，所以：
-        1. 只要解包目录里有模型就**原地使用** —— 它是随 APK 一起更新的，永远是最新的
-        2. 解包目录不可用时，才用应用私有目录的副本；但会用签名比对，**不一样就重新复制**
-           (旧逻辑只判断"有没有模型"，升级 APK 后换了模型也不会更新，超分会一直跑旧图)
-        3. 两者都没有时退回 APK assets
+    新逻辑（0.88 起，用户已拍板"零内置模型"）：
+        1. 目标目录 = platform_mobile.GetAndroidModelDir()：
+           Android 上是 /storage/emulated/0/Android/data/<pkg>/models（免权限、用户可投放）
+        2. 目录里**有**模型 → 直接用（可能是用户自己拷的，也可能是下载器装的）
+        3. 目录里**没有** → 只建目录、不复制、不报错：超分入口据此显示"未安装"并引导下载
+           （旧逻辑会从 assets/private.tar 兜底复制；A3a 之后 APK 里没有模型，这段必须失效，
+            否则会出现"目录永远填不满却又静默失败"的体验）
+        4. 老版本升级（私有目录 waifu2x-models 里已有模型）→ 一次性迁移到新目录，避免用户重新下载
     """
     try:
         from tools import platform_mobile
         target = platform_mobile.GetAndroidModelDir()
-        extracted = os.path.join(APP_ROOT, "sr_qnn", "models")
-        if _HasModels(extracted):
-            # 就地使用：sr_qnn 通过 platform_mobile.GetAndroidModelDir() 读这个环境变量
-            os.environ["JM_SR_MODELS"] = extracted
-            WriteDiag("models in place: {}".format(extracted))
-            if _HasModels(target) and _ModelSig(target) != _ModelSig(extracted):
-                WriteDiag("警告: {} 里的模型是旧版本(已改用在用 APK 内的那份)".format(target))
-            return
-        sources = [
-            extracted,
-            os.path.join(os.environ.get("ANDROID_ARGUMENT", ""), "models"),
-            os.path.join(APP_ROOT, "models"),
-        ]
-        src = ""
-        for path in sources:
-            if _HasModels(path):
-                src = path
-                break
+        legacy = os.path.join(platform_mobile.GetAppDataDir(), "waifu2x-models")
+
         if _HasModels(target):
-            if src and _ModelSig(src) != _ModelSig(target):
-                copied = _CopyModels(src, target)
-                WriteDiag("models 已更新: {} -> {} ({} files)".format(src, target, copied))
+            os.environ["JM_SR_MODELS"] = target
+            WriteDiag("models in place: {}".format(target))
             return
-        os.makedirs(target, exist_ok=True)
-        copied = 0
-        if src:
-            copied = _CopyModels(src, target)
-            WriteDiag("models copied: {} -> {} ({} files)".format(src, target, copied))
-        if not _HasModels(target):
-            copied = _CopyFromAssets(target)
-            WriteDiag("models from APK assets: {} files -> {}".format(copied, target))
-        if not _HasModels(target):
-            WriteDiag("EnsureModels: 没有可用的模型! 查找过: {} , assets:/models".format(sources))
+
+        # 老包升级：私有目录里有模型就搬过来（只搬一次，失败不影响启动）
+        if target != legacy and _HasModels(legacy):
+            try:
+                os.makedirs(target, exist_ok=True)
+                copied = _CopyModels(legacy, target)
+                WriteDiag("models migrated: {} -> {} ({} files)".format(legacy, target, copied))
+            except Exception as es:
+                WriteDiag("models migrate failed: {}".format(es))
+            if _HasModels(target):
+                os.environ["JM_SR_MODELS"] = target
+                return
+
+        # 目录照建（下载器与用户投放都靠它），但保持"无模型"状态
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as es:
+            WriteDiag("mkdir models failed: {} ({}), fallback to private".format(target, es))
+            target = legacy
+            try:
+                os.makedirs(target, exist_ok=True)
+            except OSError:
+                pass
+        os.environ["JM_SR_MODELS"] = target
+        WriteDiag("models dir ready but empty: {} -> 超分入口应显示“未安装”".format(target))
     except Exception as es:
         WriteDiag("EnsureModels failed: {}".format(es))
     return
