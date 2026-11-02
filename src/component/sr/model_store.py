@@ -56,13 +56,27 @@ class ModelStore(object):
                 self._doc = {"version": 0, "base_url": "", "models": [], "texts": []}
         return self._doc
 
+    def Providers(self):
+        """ 按顺序尝试的下载源列表（providers 优先；老的 base_url 兼容） """
+        doc = self.Manifest()
+        urls = [u for u in (doc.get("providers") or []) if u]
+        if not urls:
+            legacy = (doc.get("base_url") or "").strip()
+            urls = [legacy] if legacy else []
+        return [(u.rstrip("/") + "/") for u in urls]
+
     def BaseUrl(self):
-        base = (self.Manifest().get("base_url") or "").strip()
-        return (base.rstrip("/") + "/") if base else ""
+        """ 主源（第一个 provider）；没有就空串 """
+        urls = self.Providers()
+        return urls[0] if urls else ""
 
     def CanDownload(self):
-        """ 有下载源才允许"可下载"，否则 UI 一律置灰（清单/网络任一缺失都不下） """
-        return bool(self.BaseUrl())
+        """ 有下载源才允许"可下载"，否则 UI 一律置灰（清单/网络任一缺失都不下）
+
+        注意：官方仓库（nagadomi/waifu2x、xinntao/Real-ESRGAN、bilibili/ailab）**不算**下载源 ——
+        它们发的是 .pth/整合包，不是我们清单里的固定 shape ONNX（见 manifest.sources）。
+        """
+        return bool(self.Providers())
 
     def Path(self, entry):
         name = os.path.basename(entry.get("file") or "")
@@ -129,17 +143,21 @@ class ModelStore(object):
         if not self.CanDownload():
             self._online = False
             return False
-        base = self.BaseUrl()
-        if base.startswith("file://"):
-            self._online = os.path.isdir(base[len("file://"):])
-            return self._online
-        try:
-            req = urllib.request.Request(base, method="HEAD")
-            urllib.request.urlopen(req, timeout=3).close()
-            self._online = True
-        except Exception:
-            self._online = False
-        return self._online
+        for base in self.Providers():
+            if base.startswith("file://"):
+                if os.path.isdir(base[len("file://"):]):
+                    self._online = True
+                    return True
+                continue
+            try:
+                req = urllib.request.Request(base, method="HEAD")
+                urllib.request.urlopen(req, timeout=3).close()
+                self._online = True
+                return True
+            except Exception:
+                continue
+        self._online = False
+        return False
 
     def Download(self, entry, progress=None, retries=3):
         """ 断点续传下载单模型 → 校验 → 原子改名。
@@ -147,21 +165,28 @@ class ModelStore(object):
         progress(done, total) 每 16KB 调一次；返回本地路径。
         失败一律抛 ModelOffline（UI 只处理这一种异常）。
         """
-        url = self.BaseUrl() + os.path.basename(entry["file"])
-        if not self.CanDownload():
-            raise ModelOffline("未配置下载源（manifest.base_url 为空）")
+        providers = self.Providers()
+        if not providers:
+            raise ModelOffline("未配置下载源（manifest.providers 为空）")
         os.makedirs(self.root, exist_ok=True)
         final = self.Path(entry)
         part = final + ".part"
         total = int(entry.get("size") or 0)
 
         last_err = None
-        for attempt in range(retries):
-            try:
-                return self._DownloadOnce(url, part, final, total, progress)
-            except Exception as e:                    # noqa: BLE001 网络层错误种类太多
-                last_err = e
-                time.sleep(1 + attempt)                # 线性退避，不做指数爆炸
+        for base in providers:                       # 多源：主源失败自动换下一个
+            url = base + os.path.basename(entry["file"])
+            for attempt in range(retries):
+                try:
+                    return self._DownloadOnce(url, part, final, total, progress)
+                except urllib.error.HTTPError as e:
+                    last_err = e
+                    if 400 <= int(getattr(e, "code", 0) or 0) < 500:
+                        break                        # 4xx 换源没意义地重试，直接试下一个源
+                    time.sleep(1 + attempt)
+                except Exception as e:                # noqa: BLE001 网络层错误种类太多
+                    last_err = e
+                    time.sleep(1 + attempt)            # 线性退避，不做指数爆炸
         raise ModelOffline("下载失败 {}: {}".format(os.path.basename(entry["file"]), last_err))
 
     def _DownloadOnce(self, url, part, final, total, progress):

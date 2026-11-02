@@ -1,6 +1,6 @@
 {
   "base_url": "",
-  "generated_at": "2026-11-02T12:59:43+0800",
+  "generated_at": "2026-11-02T13:40:11+0800",
   "models": [
     {
       "denoise": 3,
@@ -246,6 +246,39 @@
       "tile": 192
     }
   ],
+  "providers": [],
+  "sources": [
+    {
+      "assets": "none",
+      "family": "waifu2x",
+      "license": "MIT",
+      "note": "我们的 cunet 系列由 waifu2x 权重导出并固化为 T=192",
+      "release_tag": "v0.13.2",
+      "repo": "https://github.com/nagadomi/waifu2x",
+      "usable_as_base_url": false,
+      "weights": "仓库内 download_models.sh 从外部拉取（非 release 资产）"
+    },
+    {
+      "assets": "v0.3.0 无资产；v0.2.5.0 提供 .pth",
+      "family": "real-esrgan",
+      "license": "BSD-3-Clause",
+      "note": "PyTorch 权重，需本地 torch.onnx.export 后才是可用的 ONNX",
+      "release_tag": "v0.3.0",
+      "repo": "https://github.com/xinntao/Real-ESRGAN",
+      "usable_as_base_url": false,
+      "weights": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"
+    },
+    {
+      "assets": "RealCUGAN_for_win10_torch1.10.0cu111_20220226.zip.001/.002（整合包）",
+      "family": "real-cugan",
+      "license": "MIT (见仓库 LICENSE)",
+      "note": "需要解包后取 .pth 再导出 ONNX",
+      "release_tag": "Real-CUGAN-add-low-memory-mode",
+      "repo": "https://github.com/bilibili/ailab",
+      "usable_as_base_url": false,
+      "weights": "权重在整合包 zip 内，无独立直链"
+    }
+  ],
   "texts": [
     {
       "file": "models.txt",
@@ -254,5 +287,5 @@
     }
   ],
   "total_bytes": 207628881,
-  "version": 1
+  "version": 2
 }

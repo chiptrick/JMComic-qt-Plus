@@ -99,6 +99,20 @@ def main():
     except ModelOffline:
         Check(True, "无下载源抛 ModelOffline（UI 只处理这一种）")
 
+    print("== 7. 多源 fallback：主源坏 → 自动换备源 ==")
+    import json as _json
+    mp2 = os.path.join(tmp, "manifest2.json")
+    doc2 = dict(manifest)
+    doc2["version"] = 2
+    doc2["base_url"] = "file://" + os.path.join(tmp, "nope") + "/"
+    doc2["providers"] = [doc2["base_url"], "file://" + remote + "/"]
+    with open(mp2, "w", encoding="utf-8") as f:
+        _json.dump(doc2, f)
+    st4 = ModelStore(root=os.path.join(tmp, "m4"), manifest_path=mp2)
+    Check(len(st4.Providers()) == 2, "Providers() 读到两个源")
+    got4 = st4.Download(doc2["models"][0])
+    Check(open(got4, "rb").read() == blob, "主源不可用时从备源下载成功")
+
     shutil.rmtree(tmp, ignore_errors=True)
     print()
     if FAIL:

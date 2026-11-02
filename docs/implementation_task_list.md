@@ -564,7 +564,32 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 自检 `script/test_a3a_download_e2e.py` 用 **file:// 假源**跑通全链路：文件落地 + sha256 一致 +
 19 次进度回调 + badge "下载中 50%" + 两条拒绝分支。三套自检（model_store / 三态 / e2e）全绿。
 
-**A3a 还剩**：真实 Release URL（写入清单后换 base_url 即可，代码零改动）。
+### 更新 25（2026-11-02）：三个官方模型仓库**不能**当 base_url —— 改为 provenance + 多源 fallback
+
+用户要求把 waifu2x / real-cugan / real-esrgan 官方仓库加入 base_url。逐个用 GitHub API 核实后：
+
+| 官方仓库 | 最新 Release 资产 | 判定 |
+|---|---|---|
+| `nagadomi/waifu2x` | v0.13.2 **无任何资产**（权重靠仓库内 `download_models.sh` 外取） | ❌ 不是下载源 |
+| `xinntao/Real-ESRGAN` | v0.3.0 无资产；v0.2.5.0 挂 **`.pth`**（PyTorch） | ❌ 格式不对 |
+| `bilibili/ailab`（Real-CUGAN 官方） | Windows 整合包 zip（853MB / 2.1GB+1.1GB 分卷），权重在包内 | ❌ 无独立直链 |
+
+它们发布的是**训练权重/整合包**，而清单里是本地导出的**固定 shape ONNX（T=192）**——文件名、体积、sha256
+都不同，直接当 base_url 只会 404 或哈希校验失败。因此改为两条落地措施：
+
+1. **清单 v2**：新增 `sources`（三家的 repo/license/tag/资产实况/是否可用作下载源，逐条注明"为什么不能"）
+   与 `providers`（按顺序尝试的下载源列表，`base_url` 保留为主源兼容旧读取方）；`gen_model_manifest.py`
+   支持 `--base-url` 重复传入生成 providers。
+2. **多源 fallback**：`ModelStore.Providers()` 按顺序尝试；`Download()` 逐源重试（4xx 立即换源、5xx/网络
+   错误按 1s/2s 退避）；`Probe()` 任一源可达即在线；`file://` 源按目录存在判定（自测用）。
+   自检新增用例：主源指向不存在目录、备源正常 → 下载成功（`test_model_store.py` 第 7 例）。
+
+**结论**：运行时下载仍必须指向我们自己的 Release（或任何存放**同一份文件**的镜像）；三个官方仓库
+以 `sources` 形式入库，供复现（`.pth → prepare_models.py → ONNX`）与致谢。若要走"从官方仓库直取"的路线，
+正确做法是加一条**权重转换链**（下载 `.pth` → `torch.onnx.export` 固定 shape → 重算 sha256），
+不是改 base_url —— 这一步等有真实需求再做。
+
+**A3a 还剩**：真实 Release URL（`--base-url` 传入即可，代码零改动）。
 当前 `base_url` 为空 → `CanDownload()=False`，UI 应置灰不可点（这是设计，不是缺陷）。
 
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
