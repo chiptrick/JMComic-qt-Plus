@@ -1,4 +1,7 @@
 #include "reader.h"
+#include <QElapsedTimer>
+
+#include "frame_probe.h"
 
 #include <QDir>
 #include <QEvent>
@@ -153,6 +156,9 @@ void ReaderView::ShowPage(int index)
 {
     if (index < 0 || index >= files_.size())
         return;
+    // 翻页耗时：解码 + 双页合成 + 缩放 + setPixmap，端到端计一次
+    QElapsedTimer turnTimer;
+    turnTimer.start();
     current_ = index;
     base_ = QImage(files_.at(index));
     second_ = (twoPage_ && index + 1 < files_.size())
@@ -166,6 +172,7 @@ void ReaderView::ShowPage(int index)
     }
     RenderImage();
     emit PageChanged(index + 1, files_.size(), files_.at(index));
+    FrameProbe::LogPageTurn(double(turnTimer.nsecsElapsed()) / 1e6);
 }
 
 void ReaderView::RenderImage()

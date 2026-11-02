@@ -20,6 +20,7 @@ param(
     [string]$QtRoot = 'C:\Qt\6.12.0',
     [string]$Ndk = '',
     [string]$ApiLevel = 'android-36',
+    [string]$BuildDir = '',
     [switch]$SkipGates
 )
 
@@ -31,7 +32,7 @@ function Fail($msg) { Write-Host "[fail] $msg" -ForegroundColor Red; exit 1 }
 
 $C1Dir = $PSScriptRoot
 $Repo = (Resolve-Path (Join-Path $C1Dir '..\..')).Path
-$Build = Join-Path $C1Dir "build-win\$Abi"
+if ($BuildDir) { $Build = $BuildDir } else { $Build = Join-Path $C1Dir "build-win\$Abi" }
 $QtAndroid = Join-Path $QtRoot ("android_" + ($Abi -replace '-', '_'))
 $QtHost = Join-Path $QtRoot 'mingw_64'
 $QtCmake = Join-Path $QtAndroid 'bin\qt-cmake.bat'
@@ -128,6 +129,14 @@ $Log2 = Join-Path $Build 'build-pass2.log'
 & cmake --build $Build *> $Log2
 if (Test-Path $Log2) { Get-Content $Log2 -Tail 20 | Out-Host }
 if ($LASTEXITCODE -ne 0) { Fail "build failed (exit $LASTEXITCODE)" }
+
+# Gradle daemon keeps the caller's stdout handle open: a caller that pipes this script
+# (`| Select-Object ...`) would wait forever even though the APK is done. Stop it here.
+$Gradlew = Join-Path $Build 'android-build\gradlew.bat'
+if (Test-Path $Gradlew) {
+    & $Gradlew --stop *> (Join-Path $Build 'gradle-stop.log')
+    Step "gradle daemon stopped"
+}
 
 $Apk = Join-Path $Build 'android-build\build\outputs\apk\debug\android-build-debug.apk'
 if (-not (Test-Path $Apk)) { Fail "no APK produced: $Apk" }

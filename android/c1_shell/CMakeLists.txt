@@ -19,6 +19,7 @@ qt_add_executable(c1shell
     reader.cpp
     settings_page.cpp
     net_client.cpp
+    frame_probe.cpp
 )
 
 # CA 证书编进二进制（qrc）。APK 的 assets 也留一份，但 Android 上 assets 路径引擎

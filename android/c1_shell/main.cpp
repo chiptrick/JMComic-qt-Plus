@@ -29,6 +29,7 @@
 #include "reader.h"
 #include "settings_page.h"
 #include "net_client.h"
+#include "frame_probe.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "C1Shell", __VA_ARGS__)
 
@@ -318,6 +319,12 @@ int main(int argc, char *argv[])
     LOGI("CA certificates: %d", caCount);
     ShellWindow win;
     win.show();
+
+    // 性能探针：存在 fps_log 标记时，阅读器会把每次翻页耗时汇总成 C1Fps 行。
+    // 不测 fps 的原因见 frame_probe.h 头注释（无连续动画，且 gfxinfo/SF 都取不到数）。
+    if (FrameProbe::Enabled())
+        LOGI("perf probe enabled: page-turn timing");
+
     win.MaybeRunSelfTest();
     return app.exec();
 }
