@@ -920,6 +920,92 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 
 W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放），并配 bench 对照口径。
 
+### 0E-1. C1 收口推进（2026-11-02 第二轮，按 `docs/c1_execution_plan.md`）
+
+**结论先说**：P0-1 未通过（无真机可见），P1/P2/P3 按方案 §7 R1 顺延；
+**P4（W6 真实网络接入）已闭环**，桌面两级测试全绿。
+
+#### 进度
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| P0-1 真机可见 | ❌ 阻塞 | `adb devices` 为空；MuMu 仅后台服务在跑，实例未启动 |
+| P0-3 唯一进度源 | ✅ | 本节即进度记录 |
+| P4-1 协议 v1 | ✅ | `docs/c1_bridge_protocol.md`；`bridge.py` 实现 net.request/net.status/net.close |
+| P4-2 请求层抽取 | ✅ | `android/c1_shell/net_client.py`（不依赖 Qt，复用 `Status` 词表） |
+| P4-3 C++ NetRequest | ✅ | `python_bridge.{h,cpp}` 新增 NetRequest/NetStatus/NetClose |
+| P4-4 桌面闭环 | ✅ | `host_tests/` 链接真实 `python_bridge.cpp`：**17/17 PASS**；协议级 **24/24 PASS** |
+| P4-5 设备侧闭环 | 🟡 模拟器已完成，真机待做 | Android 15 AVD：`net OK 200 17143B 257ms`、`net.status` 报 py 3.14.8 / rss 23MB |
+| P4-6 异常场景 | 🟡 桌面已完成 | 超时/崩溃重启/未知方法/坏 JSON 全有断言；断网与 NAT 场景待真机 |
+| W7 回归脚本 | ✅ 就绪 | `android/tools/c1_w7_regression.sh`（真机到位后一条命令取证） |
+| W7 执行 | ⏳ 阻塞 | 报告已按"未执行"落盘：`android/build_logs/c1_w7_20261102-201118/report.md` |
+
+#### P4 设备侧实测（x86_64 / Android 15 AVD，`emulator-5554`）
+
+```
+C1PyBridge: started .../files/pybin/libpythonbin.so .../files/bridge/bridge.py
+C1PyBridge: req id=1 method=net.request
+C1Shell  : net OK 200 17143B 257ms
+C1PyBridge: req id=2 method=net.status
+C1Shell  : py 3.14.8 rss=23084KB up=15748ms
+```
+
+冷启动 `TotalTime 654~1076ms`（3 次，AVD 数值不作真机指标）。顺带修掉一个只在设备上才暴露的缺陷：
+**Python 的 ssl 只认编译期 OpenSSL 证书路径**，Android 上没有 `/etc/ssl/certs`，于是任何 HTTPS 都是
+`SSLErr: CERTIFICATE_VERIFY_FAILED`。bundle 里自带 `certifi/cacert.pem`，由 `pyruntime.cpp` 把它设成
+`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE` 后恢复正常。
+
+#### ⚠ 新风险 R11：Enforcing 设备上"私有目录 exec"被拒（影响 P4 全部真机用例）
+
+同一份 APK 在两台 AVD 上结论相反：
+
+| 设备 | Android | SELinux | Python 子进程 |
+|---|---|---|---|
+| `emulator-5554` | 15 | **Permissive** | ✅ 起来并按预期工作 |
+| `emulator-5556`（16KB 镜像） | 17 (SDK 37) | **Enforcing** | ❌ `execve: Permission denied` |
+
+原因是 W6 的实现方式：把 `libpythonbin.so` 放进 `assets/`，运行时复制到
+`files/pybin/` 再 `chmod 755` + exec。Android 的 `app_data_file` 在 Enforcing 下不可执行，
+只有 `nativeLibraryDir`（`/data/app/.../lib/<abi>/`）允许 exec——这正是 p4a 官方做法。
+
+**含义**：W6 在 MuMu（Permissive）上的"Android 端真跑 ping"结论**不适用于任何真机**，
+因为量产设备一律 Enforcing。P4 的真机用例在修掉这一点之前不可能通过。
+
+**候选修法（需拍板，未擅自改）**：
+
+1. 把 Python 运行时改放进 jniLibs 并开启 `android:extractNativeLibs="true"`，从
+   `nativeLibraryDir` 直接 exec（与 p4a 一致）。代价：安装占用翻倍；16KB 门禁的
+   "包内未压缩存储" 前提要重新验证。
+2. 改为进程内嵌入 `libpython3.14.so`（dlopen + Py_Initialize），不再起子进程。代价：
+   与 P4 的"子进程隔离/崩溃重启"语义冲突，等于重做 W6 的故障模型。
+3. 接受"Python 轨道只在 Permissive 环境可用"，C1 的网络改由 C++ 实现（等价于把 C3 提前）。
+   代价：工作量最大，但一次性去掉 Python 运行时（APK 也可从 177MB 大幅下降）。
+
+> 建议优先验证 1：改动面最小，且与 p4a 已验证的做法一致；先在 `emulator-5556`（Enforcing）
+> 上把它跑通，再谈真机。
+
+#### 本轮修掉的既有缺陷（都属"之前结论站不住"的那一类）
+
+1. **响应不回带 `method`**：`main.cpp` 与旧 host_test 都按 `obj["method"]` 分支，而旧
+   `bridge.py` 只回 `id/ok/result|error` —— 两边分支永远不成立，"bridge pong" 与"桌面闭环
+   已验证"实际都没发生过。协议 v1 固定回带 `method`。
+2. **crash 永远检测不到**：`bridge.py` 用 `SystemExit(3)`，`QProcess` 报的是
+   `NormalExit`，而 `PythonBridge` 只认 `CrashExit`。真机上 Python 抛异常（最常见的死法）
+   不会触发自动重启，S3 用例从来没被真正覆盖。
+3. **`Stop()` 的 use-after-free**：`terminate()/waitForFinished()` 期间会同步派发
+   `finished`，旧代码在该回调里 `deleteLater()` 后，`Stop()` 继续使用 `proc_`。
+4. **`bridge.py` 从未进 APK**：`build_wsl.sh` 没打包它，`main.cpp` 遂退化成内联 echo 桩。
+   W6 那次"Android 端真跑 ping"跑的是桩代码。现已进 assets 并加包内门禁。
+5. **超时语义歧义**：`timeout_ms` 原按"每次尝试"生效，`retries=1` 时总耗时可达 2 倍预算，
+   导致 C++ 先超时、错误码丢失。现改为总预算按尝试均分。
+
+#### 验证命令
+
+```bash
+bash android/c1_shell/host_tests/run_host_tests.sh    # 24/24 + 17/17，退出码 0
+bash android/tools/c1_w7_regression.sh --apk <apk>    # 真机到位后跑；无设备时 exit 3 并落盘阻塞证据
+```
+
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
 
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。
