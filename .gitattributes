@@ -17,3 +17,5 @@ android/**/*.ps1  text eol=crlf
 android/sr_qnn/models/*.onnx binary
 android/*.apk binary
 android/*.aab binary
+*.pem -text
+*.pem binary
