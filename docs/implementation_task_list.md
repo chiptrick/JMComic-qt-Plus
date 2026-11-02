@@ -537,6 +537,30 @@ C 轨道用 CMake+Gradle，Qt 官方支持 Windows 作为 Android 构建宿主�
 **A3a 剩余（第二批）**：① 超分入口按 `ModelStore.List()` 置灰/显示"未安装"，断网时只列已装；
 ② 真实 GitHub Release URL 写入清单并做一次端到端下载验证；③ 与 arm64 包同步后测 APK 体积（预期 433→~230MB）。
 
+### 更新 24（2026-11-02）：arm64 按用户决策**暂停**；A3a 第二批（UI 三态）落地
+
+**① arm64 决策：暂停（用户选 B）**
+实测两轮后确认 arm64 的问题比"1 个 hash 名副本"大得多，且对 Android 17 无解（shiboken 在前）：
+- 旧包门禁：`lib/` **12 未对齐**、bundle 内 **102 未对齐**（Crypto 40 / PIL 5 / android 3 / CPython 扩展约 50）
+  → 根因是 arm64 的 private.tar（Python 运行时扩展）仍是旧 NDK 产物，需要 dist 全量重建；
+- 两轮构建失败的根因都不是代码：第一轮 `IncompleteRead`（代理截断，且当时两个构建并发抢 dist），
+  第二轮是**缓存里的 `openssl-3.3.1.tar.gz` 被上一轮截断弄坏**（`gzip: invalid compressed data`）。
+  已用 gh-proxy 重下并通过 `gzip -t`（18MB）；其余 13 个"损坏"是零字节 `.mark-*` 标记文件，非真包；
+- 结论：arm64 记为**已知问题、暂停**（Python 轨道 Android 16 可用；Android 17 被上游卡死，修了也起不来）。
+  C1 起来后 Python 轨道自然退役，不再投入。
+
+**② A3a 第二批（UI 三态）**
+`sr_model_table.py` 支持第三种状态 `missing`（清单里有、文件不在）：
+- `ProbeModels` 收集缺失模型（以前直接 `continue` 隐藏）；`BuildCatalog(detected, store)` 在**有清单**时
+  保留它们并带 size（`store=None` 时维持旧行为，避免显示"永远装不上的灰行"）；
+- 渲染：名称置灰、badge `未安装 · 12MB`、不参与"当前使用/已选"高亮；
+- **不可选**：`PickModel` 拒绝 missing 行（选了必然跑失败）；新增 `RecordOf/IsMissing/DownloadModel`
+  三个 API，下载走 `ModelStore.Download`，完成后 `RefreshCatalog`；
+- 自检 `script/test_sr_model_table_a3a.py` 6 项全过（旧行为保持 / missing 可见 / 不可选 / badge / Reload）。
+
+**A3a 还剩**：行内"下载"按钮 + 进度条（把 `DownloadModel` 接到 UI 线程外）、真实 Release URL。
+当前 `base_url` 为空 → `CanDownload()=False`，UI 应置灰不可点（这是设计，不是缺陷）。
+
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
 
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。

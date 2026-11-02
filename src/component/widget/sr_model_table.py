@@ -170,11 +170,17 @@ def _CustomTitles():
 
 # ------------------------------------------------------------------ 可用性探测
 class ModelRecord(object):
-    """ 列表里的一行（静态模型与自定义模型统一用这个） """
+    """ 列表里的一行（静态模型与自定义模型统一用这个）
 
-    __slots__ = ("key", "algo", "up", "denoise", "cost", "recommend", "title", "custom")
+    state: "installed"（文件在位，可选）/ "missing"（清单里有、文件不在，A3a 后按需下载）
+    size:  缺失时显示"未安装 · xxMB"用，0 表示未知
+    """
 
-    def __init__(self, key, algo, up, denoise, cost, recommend, title, custom=False):
+    __slots__ = ("key", "algo", "up", "denoise", "cost", "recommend", "title", "custom",
+                 "state", "size", "file")
+
+    def __init__(self, key, algo, up, denoise, cost, recommend, title, custom=False,
+                 state="installed", size=0, file=""):
         self.key = key              # 完整模型名 MODEL_XXX
         self.algo = algo            # 分组名（含「自定义模型」）
         self.up = up                # 放大倍数，未知为 0
@@ -183,17 +189,23 @@ class ModelRecord(object):
         self.recommend = recommend
         self.title = title          # 列表第一列显示的文字
         self.custom = custom
+        self.state = state          # installed / missing
+        self.size = size            # 缺失模型的下载体积（字节）
+        self.file = file            # onnx 文件名（下载/校验用）
 
 
 class Detected(object):
     """ 一次探测的结果 """
 
-    __slots__ = ("ok", "names", "customs")
+    __slots__ = ("ok", "names", "customs", "missing")
 
-    def __init__(self, ok=False, names=None, customs=None):
+    def __init__(self, ok=False, names=None, customs=None, missing=None):
         self.ok = ok
         self.names = names or set()
         self.customs = customs or []
+        # 清单里有、文件不在的模型：[{key, file, up, denoise}]
+        # A3a 之后这是常态（模型不随 APK 发），不能像以前那样直接隐藏
+        self.missing = missing or []
 
 
 def _ModelDir():
@@ -240,6 +252,7 @@ def ProbeModels():
     statics = set(FullModelName(m) for m in SrModels)
     names = set()
     customs = []
+    missing = []
 
     for name in engineNames:
         info = None
@@ -252,6 +265,14 @@ def ProbeModels():
             path = info[0] or ""
             # 有文件信息就一定要核对文件；核对不了（拿不到目录）时按"可用"处理
             if modelDir and path and not os.path.exists(os.path.join(modelDir, path)):
+                # A3a：文件不在 ≠ 模型不存在 —— 静态表里的记进 missing，由 UI 显示"未安装/可下载"
+                if name in statics:
+                    missing.append({
+                        "key": name,
+                        "file": path,
+                        "up": int(info[1] or 0),
+                        "denoise": int(info[2]) if info[2] is not None else -1,
+                    })
                 continue
             if name not in statics:
                 customs.append({
@@ -271,15 +292,28 @@ def ProbeModels():
         names.add(name)
 
     customs.sort(key=lambda item: item["key"])
-    return Detected(True, names, customs)
+    return Detected(True, names, customs, missing)
 
 
-def BuildCatalog(detected):
+def BuildCatalog(detected, store=None):
     """ 把静态表 + 探测结果拼成展示用的记录列表
 
     detected.ok 为 False 时**不隐藏任何模型**：这种情况下"检测"本身不可信，
     藏掉反而会让用户在没装引擎时看到一个空列表。
+
+    A3a 起多了第三种状态：**missing**（清单里有、文件不在）。它不隐藏，
+    而是带 size 显示成"未安装 · xxMB"，等 UI 提供下载入口。store 为 None 时
+    （老调用/桌面）保持旧行为：缺失即隐藏。
     """
+    missingMap = {m["key"]: m for m in getattr(detected, "missing", [])}
+    byFile = {}
+    if store is not None:
+        try:
+            for item in store.Manifest().get("models", []):
+                byFile[item.get("file") or ""] = item
+        except Exception:
+            byFile = {}
+
     records = []
     for algo in Algorithms:
         for model in SrModels:
@@ -287,6 +321,16 @@ def BuildCatalog(detected):
                 continue
             key = FullModelName(model)
             if detected.ok and key not in detected.names:
+                miss = missingMap.get(key)
+                if miss is None or store is None:
+                    # store=None 时保持旧行为（缺失即隐藏）：没有清单就没法下载，
+                    # 显示一个永远装不上的灰行只会让人困惑
+                    continue
+                ent = byFile.get(miss.get("file") or "", {})
+                records.append(ModelRecord(key, algo, model[2], model[3], model[4],
+                                           model[5], model[0], state="missing",
+                                           size=int(ent.get("size") or 0),
+                                           file=miss.get("file") or ""))
                 continue
             records.append(ModelRecord(key, algo, model[2], model[3], model[4],
                                        model[5], model[0]))
@@ -363,8 +407,11 @@ class SrModelDelegate(QStyledItemDelegate):
 
     def _PaintModel(self, painter, rect, table, column, record):
         highlight = table.AccentColor()
-        current = bool(table._currentName) and record.key == table._currentName
-        picked = (not current) and bool(table._pickedName) and record.key == table._pickedName
+        missing = getattr(record, "state", "installed") == "missing"
+        # 未安装的行不参与高亮：它可能是"设置里记着的当前模型"，但文件不在就不能算生效
+        current = (not missing) and bool(table._currentName) and record.key == table._currentName
+        picked = (not missing) and (not current) and bool(table._pickedName) \
+            and record.key == table._pickedName
         if current:
             painter.fillRect(rect, table.CurrentFillColor())
         elif picked:
@@ -376,7 +423,10 @@ class SrModelDelegate(QStyledItemDelegate):
 
         if column == 0:
             font = table.BoldNameFont() if current else table.NameFont()
-            color = highlight if current else table.TextColor()
+            if missing:
+                color = table.MutedColor()
+            else:
+                color = highlight if current else table.TextColor()
             self._DrawText(painter, rect, record.title, font, color,
                            Qt.AlignLeft | Qt.AlignVCenter)
         elif column == 1:
@@ -412,6 +462,7 @@ class SrModelTable(QTableWidget):
         self._pickedName = ""
         self._currentRow = -1
         self._catalog = None
+        self._store = None          # 懒加载的 ModelStore（A3a：缺失模型可下载）
         self._groupRows = []        # [(row, algo, count)]
         self._groupRowSet = set()
         self._groupInfo = {}        # 分组行 → (algo, count)
@@ -579,6 +630,10 @@ class SrModelTable(QTableWidget):
         """
         if record is None:
             return "", False
+        if getattr(record, "state", "installed") == "missing":
+            if record.size:
+                return _Tr("未安装 · {:.0f}MB".format(record.size / 1048576.0)), False
+            return _Tr("未安装"), False
         if bool(self._currentName) and record.key == self._currentName:
             return _Tr("当前使用"), True
         if bool(self._pickedName) and record.key == self._pickedName:
@@ -641,9 +696,16 @@ class SrModelTable(QTableWidget):
         return self._pickedName
 
     def PickModel(self, fullName):
-        """ 点选一个模型（不落设置，等「确定」） """
+        """ 点选一个模型（不落设置，等「确定」）
+
+        未安装（A3a 的 missing 行）不可选：选中它只会在跑超分时失败，
+        正确入口是行内的"下载"（见 DownloadModel）。
+        """
         fullName = fullName or ""
         if fullName and self.RowOfModel(fullName) < 0:
+            return False
+        record = self.RecordOf(fullName) if fullName else None
+        if record is not None and getattr(record, "state", "installed") == "missing":
             return False
         old = self._pickedName
         self._pickedName = fullName
@@ -651,6 +713,43 @@ class SrModelTable(QTableWidget):
             if name:
                 self._RefreshRow(name)
         return True
+
+    def RecordOf(self, fullName):
+        for record in self.Catalog():
+            if record.key == fullName:
+                return record
+        return None
+
+    def IsMissing(self, fullName):
+        record = self.RecordOf(fullName)
+        return bool(record) and getattr(record, "state", "installed") == "missing"
+
+    def DownloadModel(self, fullName, progress=None):
+        """ 下载一个缺失模型 → 校验 → 刷新目录（UI 自己负责线程与进度条）
+
+        失败抛 ModelOffline（model_store 保证只有这一种），调用方统一提示"网络不可用"。
+        成功后该行会从 missing 变 installed，可直接选中使用。
+        """
+        record = self.RecordOf(fullName)
+        if record is None:
+            raise ValueError("未知模型: {}".format(fullName))
+        if getattr(record, "state", "installed") != "missing":
+            return ""
+        store = self.Store()
+        if store is None:
+            from component.sr.model_store import ModelOffline
+            raise ModelOffline("本包没有模型清单，无法下载")
+        entry = None
+        for item in store.Manifest().get("models", []):
+            if (item.get("file") or "") == (record.file or ""):
+                entry = item
+                break
+        if entry is None:
+            from component.sr.model_store import ModelOffline
+            raise ModelOffline("清单里没有 {}".format(record.file or record.key))
+        path = store.Download(entry, progress=progress)
+        self.RefreshCatalog()
+        return path
 
     def _RowRect(self, row):
         """ 一行的视口矩形（看不见时返回空矩形，update 会自动忽略） """
@@ -733,12 +832,26 @@ class SrModelTable(QTableWidget):
             item.setTextAlignment(align[col] | Qt.AlignVCenter)
 
     # ------------------------------------------------------------------ 目录
+    def Store(self):
+        """ 模型仓库（懒加载）
+
+        manifest 缺失/加载失败时返回 None —— 列表仍可显示已装模型，只是不能下载
+        （A3a 之前的老包、或桌面端没带清单的情况）。
+        """
+        if self._store is None:
+            try:
+                from component.sr.model_store import ModelStore
+                self._store = ModelStore()
+            except Exception:
+                self._store = False
+        return self._store or None
+
     def Catalog(self, refresh=False):
         """ 当前可用模型（按需探测一次） """
         if self._catalog is None or refresh:
             detected = ProbeModels()
             self._detectedOk = detected.ok
-            self._catalog = BuildCatalog(detected)
+            self._catalog = BuildCatalog(detected, self.Store())
         return self._catalog
 
     def DetectionOk(self):
