@@ -617,6 +617,32 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 补齐需要 `.pth → torch.onnx.export(固定 T=192) → 重算 sha256` 的转换链，其中 `general-x4v3` 最有性价比
 （官方直链可下、体积小）。这条链需要 torch 环境（WSL 当前没有），等你确认再开工。
 
+### 更新 27（2026-11-02）：CUGAN「缺档」是误判（已全齐并完成对账）；swin_unet photo 判定不可用
+
+**① Real-CUGAN：没有缺失档位**
+下载官方 `RealCUGAN_for_win10_torch1.10.0cu111_20220226.zip`（1.86+1.05 GiB，aria2c 8 线程，约 3 分钟）并解包，
+`weights_v3/` 只有 **11 个 SE 权重**（up2x 五档、up3x/up4x 各 3 档）——**没有 pro**。核对
+`android/tools/models_stage/README.md` 后确认：官方口径就是 **SE 11 + PRO 6 = 17**，pro 由
+`nihui/realcugan-ncnn-vulkan` 的 ncnn 权重转换而来（`ncnn2torch_final.py`），我们已经全有。
+之前"denoise 中间档不全"的判断是**错的**：官方对 up3x/up4x 本就只出 denoise3x。
+
+**对账（新增 `android/tools/models_stage/verify_cugan_se.py`）**：用官方 SE 权重按导出数学前向，
+与仓库 ONNX 输出比对：
+- 5 个 up2x：**0.001~0.002/255**（逐位等价）；
+- 3x/4x：与官方 `forward()` 的差异恒为 **0.5/255**——那是官方 forward 末尾 `round/clamp` 到 uint8 的量化步长，
+  不是模型错误（同一 alpha=1 参数下 up2x 用纯浮点 wrapper 对比即 0.001/255，坐实这一点）。
+- 结论：**现有 17 个 CUGAN 模型确为官方权重导出，无缺失、无需补。**
+
+**② waifu2x photo（swin_unet）判定不可用**
+`deepghs/waifu2x_onnx` 的 `swin_unet/photo/*.onnx`（19MB）实测：
+- 输入 192 → 输出 **352**（不是 384）；规律为 `out = 2×(in−16)`（96→160、128→224、160→288、256→480），
+  即模型内部固定裁掉 16px。要得到 384 必须喂 **208**（tile+16），**需要改引擎贴图逻辑**；
+- CPU 推理 **0.73 s/tile**（19MB Swin 结构 + 3321 Constant/633 Shape/415 Slice 的动态图），
+  手机 CPU 上会到秒级，QNN 对这类算子支持存疑；
+- 结论：**不采用**。photo 行保持"未安装"（诚实态）；如需 photo，只能等上游放出 cunet photo 权重。
+
+**③ 清理**：临时文件从 11GB 降到 56MB（仅留 `weights_v3/` 11 个 pth + `upcunet_v3.py`）。
+
 **A3a 状态：代码与下载链路已闭合**；真机验证待做（进超分页 → 灰行点一下 → 进度 100% → 自动选中跑图）。
 当前 `base_url` 为空 → `CanDownload()=False`，UI 应置灰不可点（这是设计，不是缺陷）。
 
