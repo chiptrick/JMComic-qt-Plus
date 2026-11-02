@@ -589,7 +589,35 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 正确做法是加一条**权重转换链**（下载 `.pth` → `torch.onnx.export` 固定 shape → 重算 sha256），
 不是改 base_url —— 这一步等有真实需求再做。
 
-**A3a 还剩**：真实 Release URL（`--base-url` 传入即可，代码零改动）。
+### 更新 26（2026-11-02）：真实下载源接通（仓库目录双源）+ 模型覆盖核查
+
+**① 下载源（用户上传的仓库目录）**：`chiptrick/JMComic-qt-Android` 的 `android/sr_qnn/models`
+（不是 Release，是仓库目录）→ 用 raw + jsDelivr 两个 CDN 直链，清单 v2 的 providers：
+1. `https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/`（国内可达）
+2. `https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models/`（兜底）
+
+实测：
+- 三方比对 **31 个 .onnx / 217.7MB，名字与大小 100% 一致**（无漏传、无多余、无大小差异）；
+- 抽样 `realesrgan_animevideo_v3_up2x.onnx`：raw 与 jsDelivr 下载字节的 **sha256 均与本地一致**；
+- jsDelivr 单文件上限 20MB：`realesrgan_x4plus_up4x.onnx`（67MB）返回 **403**，其余 30 个正常 →
+  正好由多源 fallback 覆盖（4xx 立即换源）；
+- **真实网络端到端**（Windows 侧跑 model_store）：2,496,717B、6 次进度回调、sha256 一致、`[OK]`。
+- 顺带修了一个探活缺陷：原先 `Probe()` HEAD **目录** URL（raw 无目录索引、jsDelivr 目录页 403）会误判离线；
+  改为 HEAD **清单里最小的那个文件**，5s 超时。
+
+**② 模型覆盖核查（vs 官方仓库）**
+
+| 族 | 本地 | 官方可选 | 缺口 |
+|---|---|---|---|
+| Real-ESRGAN | 5（x4plus、x4plus_anime、animevideo_v3 ×2/3/4） | 7 | 缺 `general-x4v3`、`general-wdn-x4v3`（官方强推的小模型，仅 1.2MB，弱设备友好） |
+| waifu2x | 9（cunet anime 系 up1x/up2x × noise0-3） | cunet 16（anime+photo × 1x/2x × noise0-3） | 缺 **photo 风格 8 个**；`upconv_7` 旧系可不补 |
+| Real-CUGAN | 17（se 11 + pro 6） | se 30 + pro 20（denoise -1~3 × conservative 全档） | denoise 中间档不全（se up2x 有 d1~3，up3x/up4x 仅 d3；pro 仅 d3） |
+
+**是否补**：`models.txt` 与文件本身**无缺失**（41 条去重 31，全部有文件）；缺口是"官方有、我们没导出"。
+补齐需要 `.pth → torch.onnx.export(固定 T=192) → 重算 sha256` 的转换链，其中 `general-x4v3` 最有性价比
+（官方直链可下、体积小）。这条链需要 torch 环境（WSL 当前没有），等你确认再开工。
+
+**A3a 状态：代码与下载链路已闭合**；真机验证待做（进超分页 → 灰行点一下 → 进度 100% → 自动选中跑图）。
 当前 `base_url` 为空 → `CanDownload()=False`，UI 应置灰不可点（这是设计，不是缺陷）。
 
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）

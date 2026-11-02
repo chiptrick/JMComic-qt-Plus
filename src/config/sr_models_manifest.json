@@ -1,6 +1,6 @@
 {
-  "base_url": "",
-  "generated_at": "2026-11-02T13:40:11+0800",
+  "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",
+  "generated_at": "2026-11-02T13:53:21+0800",
   "models": [
     {
       "denoise": 3,
@@ -45,6 +45,42 @@
       "scale": 2,
       "sha256": "28ed61a6583f93698f035db2659dd16f4290bfd82bc956d1592c8b173402a0ef",
       "size": 5162007,
+      "tile": 192
+    },
+    {
+      "denoise": 3,
+      "file": "waifu2x_cunet_up1x_denoise3.onnx",
+      "name": "WAIFU2X_CUNET_UP1X_DENOISE3X",
+      "scale": 1,
+      "sha256": "c463c08d7a3edfded949718679cf86c98e0bc24e78a5dbd4f4356a10726c6ec2",
+      "size": 5156545,
+      "tile": 192
+    },
+    {
+      "denoise": 2,
+      "file": "waifu2x_cunet_up1x_denoise2.onnx",
+      "name": "WAIFU2X_CUNET_UP1X_DENOISE2X",
+      "scale": 1,
+      "sha256": "ef419bd95b276a73c872281d5b77585391c7da3f0c0bd6897996c1410b04a200",
+      "size": 5156545,
+      "tile": 192
+    },
+    {
+      "denoise": 1,
+      "file": "waifu2x_cunet_up1x_denoise1.onnx",
+      "name": "WAIFU2X_CUNET_UP1X_DENOISE1X",
+      "scale": 1,
+      "sha256": "2212621511aa318ada434a2ef98908204bcad6ffe8e37785147a6c2ddb285a5d",
+      "size": 5156545,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "waifu2x_cunet_up1x_denoise0.onnx",
+      "name": "WAIFU2X_CUNET_UP1X_DENOISE0X",
+      "scale": 1,
+      "sha256": "986be058aad9207ccd4d3ee0e3be05e3edaadf7f1e7b7754bcb9039c8c1bf446",
+      "size": 5156545,
       "tile": 192
     },
     {
@@ -246,7 +282,10 @@
       "tile": 192
     }
   ],
-  "providers": [],
+  "providers": [
+    "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",
+    "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models/"
+  ],
   "sources": [
     {
       "assets": "none",
@@ -286,6 +325,6 @@
       "size": 5086
     }
   ],
-  "total_bytes": 207628881,
+  "total_bytes": 228255061,
   "version": 2
 }

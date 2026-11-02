@@ -143,15 +143,22 @@ class ModelStore(object):
         if not self.CanDownload():
             self._online = False
             return False
+        # 探活不看目录（raw.githubusercontent 没有目录索引、jsDelivr 的目录页 403），
+        # 而是 HEAD 清单里**最小的那个文件**——它一定存在，且响应能代表该源可用。
+        probe_file = ""
+        models = self.Manifest().get("models") or []
+        if models:
+            probe_file = os.path.basename(min(models, key=lambda m: m.get("size") or 0)["file"])
         for base in self.Providers():
             if base.startswith("file://"):
                 if os.path.isdir(base[len("file://"):]):
                     self._online = True
                     return True
                 continue
+            url = base + probe_file if probe_file else base
             try:
-                req = urllib.request.Request(base, method="HEAD")
-                urllib.request.urlopen(req, timeout=3).close()
+                req = urllib.request.Request(url, method="HEAD")
+                urllib.request.urlopen(req, timeout=5).close()
                 self._online = True
                 return True
             except Exception:
