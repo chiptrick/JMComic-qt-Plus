@@ -729,6 +729,29 @@ Python 层 `sr_backend` 按能力选择：有 QNN → `libsr_qnn`；无 QNN 但�
 **已启动**：`android/tools/build_ncnn_android.sh`（ncnn tag `20240820`，`-DNCNN_VULKAN=ON`，NDK r30，
 arm64-v8a；源码需在宿主 clone 后传到 WSL，因为 WSL 到 github 不通）。
 
+**验证记录：MuMu 12 模拟器支持 Vulkan（2026-11-02 实测）**
+| 项 | 结果 |
+|---|---|
+| 系统 | `cmd gpu vkjson` → `deviceName: Adreno (TM) 740`、apiVersion 4206592 = **Vulkan 1.3.0** |
+| 驱动 | ICD `/vendor/lib64/hw/vulkan.kona.so`（MuMu 自带虚拟化 Adreno 驱动）；`nemud.vulkan_version=4211039`（宿主 1.4.351 透传） |
+| GLES | Adreno 740 / OpenGL ES 3.2 |
+| **功能（关键）** | x86_64 版 `libsr_vk.so` + `sr_vk_probe` 推进 MuMu：`srq_init -> 0`、`backend: vulkan=1 device=Adreno (TM) 740`、`[OK]` |
+| ncnn GPU 能力 | queueC=2[8] queueG=0[16] queueT=1[2]；fp16=1/0/0/1；int8=1/0/0/1；subgroup=32 |
+
+由此确认：**M2/M3/M4 的功能验证可以在 MuMu 上做**，真机只用于性能与驱动差异验证。两个实测约束：
+1. `-fopenmp` 是**动态**依赖 `libomp.so`（不随之推送就 `dlopen failed: library "libomp.so" not found`）——
+   发布时二选一：随包附带 libomp，或 ncnn 用 `-DNCNN_OPENMP=OFF` 重编（推荐后者，少一个 so）；
+2. 未 strip 的 `libsr_vk.so` = **68.3MB**，`llvm-strip --strip-unneeded` 后 **3.1MB（4%）**——
+   体积不是问题，构建脚本发布前必须 strip。
+
+**设备端探针**：`android/sr_qnn/cpp_vk/probe.cpp`（`dlopen` + 函数指针调真实 ABI，
+输出 init 结果/设备名/模型表数量），构建产物 `sr_vk_probe`，使用方式：
+```
+adb push libsr_vk.so sr_vk_probe /data/local/tmp/
+adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./sr_vk_probe ./libsr_vk.so"
+```
+> adb 推送到 `/data/local/tmp` 时必须 `MSYS_NO_PATHCONV=1`（否则 Git Bash 会把远端路径改写成 `C:/Program Files/Git/...`）。
+
 ## 0D. 临时运维措施（整个计划完成前有效）
 
 **GitHub CI 已全部禁用**（2026-11-02 15:37，用户要求：计划完成前暂停所有 CI）。

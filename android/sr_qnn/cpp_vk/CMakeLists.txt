@@ -55,3 +55,8 @@ set_target_properties(sr_vk PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     LINK_FLAGS "-Wl,-z,max-page-size=16384"      # 与 sr_qnn 一致：16KB 页对齐
 )
+
+# 设备端探针：dlopen libsr_vk.so 并真调 srq_init，证明 Vulkan 后端可用
+add_executable(sr_vk_probe probe.cpp)
+target_link_libraries(sr_vk_probe PRIVATE dl log)
+set_target_properties(sr_vk_probe PROPERTIES POSITION_INDEPENDENT_CODE ON)

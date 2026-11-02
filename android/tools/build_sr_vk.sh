@@ -37,6 +37,9 @@ ls -lh "$SO" 2>/dev/null || { echo "[fail] 未产出 libsr_vk.so"; exit 1; }
 echo "== 导出符号（应与 libsr_qnn 同名） =="
 "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" -D --defined-only "$SO" \
   | grep -E " T srq_" | awk '{print "  "$3}' | sort
+echo "== 探针 =="
+ls -lh "$OUT/sr_vk_probe" 2>/dev/null || echo "  [warn] 未构建 sr_vk_probe"
+
 echo "== 页对齐 =="
 "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -l "$SO" \
   | awk '/^ *LOAD/{print "  align="$NF}' | sort -u
