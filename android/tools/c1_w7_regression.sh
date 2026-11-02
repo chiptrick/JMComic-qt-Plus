@@ -14,6 +14,7 @@
 # 用法：
 #   bash android/tools/c1_w7_regression.sh --apk <path.apk>
 #   bash android/tools/c1_w7_regression.sh --apk <apk> --images <本地漫画目录> --runs 3
+#   PY_START_MS=211 bash ...            # 传入 Python 版同机冷启动中位，脚本直接给 PASS/FAIL
 set -uo pipefail
 export MSYS_NO_PATHCONV=1   # Git Bash 下别把 /data/... 变成 C:/...
 
@@ -155,7 +156,14 @@ for i in $(seq 1 "$RUNS"); do
 done
 MEDIAN=$(printf '%s\n' $START_TIMES | sort -n | awk '{a[NR]=$0} END{ if(NR==0){print "NA"} else if(NR%2){print a[(NR+1)/2]} else {print int((a[NR/2]+a[NR/2+1])/2)} }')
 FAILED_START=$("$ADB" -s "$DEV" shell pidof "$PKG" | tr -d '\r')
-row "冷启动 TotalTime" "${MEDIAN}ms（${START_TIMES# }）" "≤ Python 版同机中位" "$([ "$MEDIAN" != "NA" ] && [ -n "$FAILED_START" ] && echo "待对照" || echo "FAIL")"
+if [ -n "${PY_START_MS:-}" ] && [ "$MEDIAN" != "NA" ]; then
+  START_VERDICT=$([ "$MEDIAN" -le "$PY_START_MS" ] && echo PASS || echo FAIL)
+  START_TARGET="≤ ${PY_START_MS}ms（Python 版实测）"
+else
+  START_VERDICT=$([ "$MEDIAN" != "NA" ] && [ -n "$FAILED_START" ] && echo "待对照" || echo "FAIL")
+  START_TARGET="≤ Python 版同机中位"
+fi
+row "冷启动 TotalTime" "${MEDIAN}ms（${START_TIMES# }）" "$START_TARGET" "$START_VERDICT"
 say "冷启动中位: ${MEDIAN}ms"
 
 # ---- 3. 自检钩子（功能侧取证） ----
