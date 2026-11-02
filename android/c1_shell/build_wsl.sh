@@ -93,6 +93,10 @@ if [ -f "$SRC/pylibs/$ABI/libpybundle_fixed.so" ]; then
   done
   cp "$SRC/pylibs/$ABI/libpybundle_fixed.so" "$BUILD/android-build/assets/libpybundle.so" 2>/dev/null || true
 fi
+# P4：桥脚本一起进 assets（main.cpp 会复制到私有目录再执行）。
+# 少了这一步，C1 只能跑 main.cpp 里那段内联 echo 桩——"Android 端桥能跑"就变成假绿。
+mkdir -p "$BUILD/android-build/assets"
+cp "$SRC/bridge.py" "$SRC/net_client.py" "$BUILD/android-build/assets/"
 # wrapper 默认源经代理 TLS 失败 → 腾讯镜像
 sed -i 's|distributionUrl=.*|distributionUrl=https\\://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip|' \
   "$BUILD/android-build/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null || true
@@ -102,6 +106,16 @@ cmake --build "$BUILD"
 APK=$(find "$BUILD" -name '*.apk' | head -1)
 [ -n "$APK" ] || { echo "[fail] 未产出 APK"; exit 1; }
 echo "APK: $APK  ($(du -m "$APK" | cut -f1) MB)"
+
+# --- P4 门禁：桥脚本必须真的在包里（否则设备上只能跑内联桩） ---
+for f in bridge.py net_client.py; do
+  if unzip -l "$APK" 2>/dev/null | grep -q "assets/$f"; then
+    echo "[OK] APK assets 含 $f"
+  else
+    echo "[FAIL] APK 里没有 assets/$f —— 设备侧 net.* 一定不可用"
+    exit 1
+  fi
+done
 
 # --- C0-③ 的"直链"判据（linux 侧，比运行时更硬）：主程序自己的 .so 必须 NEEDED libsr_qnn.so ---
 APP_SO=$(find "$BUILD" -maxdepth 1 -name "libc1shell_*.so" | head -1)
@@ -122,4 +136,13 @@ fi
 # --- 门禁 ---
 PY="$HOME/jmcomic-build/venv311/bin/python"
 "$PY" "$REPO_WSL/android/tools/check_elf_page_align.py" "$APK"
-echo "bundle 门禁 N/A（C++ 空壳无 Python 运行时）"
+# 以前这里无条件写 "N/A（C++ 空壳无 Python 运行时）"，但 W6 之后包里确实带 bundle：
+# 无条件 N/A 等于给了一条永远不会红的门禁。有 bundle 就必须真跑。
+if unzip -l "$APK" 2>/dev/null | grep -q "assets/libpybundle.so"; then
+  # shiboken6 的 0x1000 是上游缺陷（文档 §0A 更新 15），且 C1 的 bridge.py 只 import stdlib，
+  # 从不 import PySide6 → 该 .so 不会被 dlopen。把它写成显式例外，而不是把整条门禁关掉。
+  "$PY" "$REPO_WSL/android/tools/check_pybundle_align.py" "$APK" "$ABI" \
+    --member assets/libpybundle.so --allow shiboken6
+else
+  echo "bundle 门禁 N/A（本包未含 Python runtime 的 libpybundle.so）"
+fi
