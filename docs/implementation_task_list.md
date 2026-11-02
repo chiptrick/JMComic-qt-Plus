@@ -822,6 +822,30 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 ```
 > 注意：workflow id 是仓库内固定值；若未来新增 workflow，需要单独禁用。
 
+## 0E. C1 进展（2026-11-02）
+
+**W1 已落一版（工程骨架与出包链路）**：新增 `android/c1_shell/`（Qt 6.12 C++ 壳工程），
+复用 C0 已踩通的构建链路与门禁：
+
+- `CMakeLists.txt`：`c1shell`，包名 `org.jmcomic.c1shell`，版本 `0.1-c1`；
+  保留 `libsr_qnn.so`/`libonnxruntime.so` 的 IMPORTED 直链（C0-③ 链路不退回 ctypes）；
+- `main.cpp`：最小壳 + 导航占位（`QStackedWidget` 两页 + Back/Open reader 按钮 +
+  sr_qnn 直链状态行）；W2~W5 分别长成本地阅读器/设置，W4 换完整返回栈/标题栏/侧栏；
+- `build_wsl.sh`：沿用 C0 的 Qt Android kit / NDK r30 / android-36 / Gradle 镜像等坑位处理，
+  构建后跑两层门禁：`llvm-readelf` 确认 DT_NEEDED 含 `libsr_qnn.so`，`check_elf_page_align.py`。
+
+实测（x86_64 / MuMu 12 / Android 15）：
+| 项 | 结果 |
+|---|---|
+| APK | 68MB（C++ 空壳，含 Qt 与两个直链库） |
+| 直链判据 | `[OK] libc1shell_x86_64.so DT_NEEDED 含 libsr_qnn.so` |
+| 16KB 门禁 | **对齐 13 / 未对齐 0 / 跳过 0** |
+| 安装启动 | `install -r` Success；`am start -W` TotalTime **915ms**；进程存活 |
+| 运行日志 | `C1Shell: sr_qnn in link map OK (base=0x7cb38f903000)` |
+
+说明：x86 模拟器首帧数值只作"链路通了"的证据，不代表真机指标（W7 才做同机对照）。
+W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放），并配 bench 对照口径。
+
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
 
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。
