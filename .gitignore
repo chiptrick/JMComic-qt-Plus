@@ -181,3 +181,7 @@ android/.p4a-src/
 # 基准留档：APK 本体不入库（只会误被 git add -A 拖进 805MB），
 # 长期保留的是 docs/bench_raw/**/README.md 里的 sha256 与来源。
 docs/bench_raw/**/*.apk
+
+# 量化低精度变体（PSNR<35dB，仅本地留存，不进交付）
+*_q16_lowq.onnx
+.Trash-0/

@@ -38,6 +38,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <list>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1895,6 +1896,63 @@ int srq_model_id(const char* name) {
 typedef const OrtApiBase* (*OrtGetApiBaseFn)(void);
 OrtGetApiBaseFn g_ortGetApiBase = nullptr;
 
+/* 量化版自动优先（A3a 后续）：
+ * 约定：同名加 `_q16.onnx` 后缀的 QDQ 模型（uint16 激活 + uint8 权重）优先于 float 版。
+ * 只在运行时**确实有 QNN EP** 时启用 —— CPU 上跑 QDQ 反而更慢，非高通机型必须保持 float。
+ * 关掉：JM_SR_Q16=0。列表与 UI 完全不变（同名不同文件），避免模型列表翻倍。 */
+std::list<std::string> g_q16Pool;   // 稳定地址：entry.file 指向这里
+
+static bool QnnProviderPresent() {
+    if (g_api == nullptr) {
+        return false;
+    }
+    char** names = nullptr;
+    int count = 0;
+    if (g_api->GetAvailableProviders(&names, &count) != nullptr) {
+        return false;
+    }
+    bool found = false;
+    for (int i = 0; i < count; ++i) {
+        if (names[i] != nullptr && std::string(names[i]).find("QNN") != std::string::npos) {
+            found = true;
+        }
+    }
+    g_api->ReleaseAvailableProviders(names, count);
+    return found;
+}
+
+static void ApplyQuantizedPreference() {
+    if (EnvStr("JM_SR_Q16") == "0") {   // EnvStr 返回 std::string，取不到时为空串
+        return;
+    }
+    if (!QnnProviderPresent()) {
+        if (g_debug) {
+            printf("[sr_qnn] 无 QNN EP：保持 float 模型（QDQ 在 CPU 上更慢）\n");
+        }
+        return;
+    }
+    int hit = 0;
+    for (auto& slot : g_models) {
+        std::string f = slot.entry.file;
+        if (f.size() <= 5 || f.compare(f.size() - 5, 5, ".onnx") != 0) {
+            continue;
+        }
+        if (f.find("_q16") != std::string::npos) {
+            continue;
+        }
+        std::string cand = f.substr(0, f.size() - 5) + "_q16.onnx";
+        if (!FileExists(JoinPath(g_modelDir, cand))) {
+            continue;
+        }
+        g_q16Pool.push_back(cand);
+        slot.entry.file = g_q16Pool.back().c_str();
+        ++hit;
+    }
+    if (g_debug) {
+        printf("[sr_qnn] 量化模型优先：%d 个（JM_SR_Q16=0 可关闭）\n", hit);
+    }
+}
+
 int srq_init(void) {
     if (g_inited) {
         return 0;
@@ -1948,6 +2006,7 @@ int srq_init(void) {
     if (!g_modelDir.empty()) {
         LoadModelOverride(g_modelDir);
     }
+    ApplyQuantizedPreference();
     g_inited = true;
     // 自动(Auto)线程数：原来固定 4，8 核机型白瞎一半算力 —— QNN 起不来时超分就是
     // 纯 CPU 跑，这里多给两个线程能直接体现到翻页速度上。用户在设置里显式指定时

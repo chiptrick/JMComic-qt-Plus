@@ -159,7 +159,8 @@ def Quantize(srcPath, outPath, calibDir, tile, actType="uint16", calibMethod="mi
                 from PIL import Image
                 image = Image.open(self.images[self.index % len(self.images)]).convert("RGB")
                 image = image.resize((tile, tile))
-                array = np.asarray(image, dtype=np.float32) / 255.0
+                # HWC→CHW：ONNX 输入是 NCHW，漏了这一步会让标定喂进 (1,192,192,3) 直接报维度错
+                array = np.asarray(image, dtype=np.float32).transpose(2, 0, 1) / 255.0
             else:
                 array = np.random.rand(3, tile, tile).astype(np.float32)
             return np.expand_dims(array, 0)

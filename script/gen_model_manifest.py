@@ -101,6 +101,8 @@ def main():
     ap.add_argument("--models", default="android/sr_qnn/models")
     ap.add_argument("--base-url", action="append", default=[],
                     help="可重复：运行时按顺序尝试的下载源；第一个为主源")
+    ap.add_argument("--quantized-suffix", default="_q16.onnx",
+                    help="量化版文件名后缀；存在则登记到 quantized 段（不占模型列表）")
     ap.add_argument("--out", default="src/config/sr_models_manifest.json")
     args = ap.parse_args()
 
@@ -133,14 +135,29 @@ def main():
     if os.path.isfile(mt):
         texts.append({"file": "models.txt", "size": os.path.getsize(mt), "sha256": sha256_of(mt)})
 
+    # 量化版：与 float 同名 + 后缀，登记为附带的"资产"（列表/UI 不变，引擎按约定自动优先）
+    quantized = []
+    for m in models:
+        base = m["file"]
+        if not base.endswith(".onnx"):
+            continue
+        qname = base[:-5] + args.quantized_suffix
+        qpath = os.path.join(args.models, qname)
+        if not os.path.isfile(qpath):
+            continue
+        quantized.append({"base": base, "file": qname,
+                          "size": os.path.getsize(qpath), "sha256": sha256_of(qpath)})
+
     doc = {
-        "version": 2,
+        "version": 3,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         # base_url = 主源（兼容旧读取方）；providers = 按顺序尝试的全部源
         "base_url": providers[0] if providers else "",
         "providers": providers,
         # 模型族出处（官方仓库）；它们**不能**当下载源，仅用于复现与致谢
         "sources": SOURCES,
+        "quantized": quantized,
+        "quantized_bytes": sum(q["size"] for q in quantized),
         "total_bytes": sum(m["size"] for m in models),
         "models": models,
         "texts": texts,
@@ -150,8 +167,9 @@ def main():
         json.dump(doc, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
 
-    print("写出 {}：{} 个模型，合计 {:.1f} MB".format(
-        args.out, len(models), doc["total_bytes"] / 1048576.0))
+    print("写出 {}：{} 个模型（{:.1f} MB）+ {} 个量化版（{:.1f} MB）".format(
+        args.out, len(models), doc["total_bytes"] / 1048576.0,
+        len(quantized), doc["quantized_bytes"] / 1048576.0))
     print("Release 上传（在模型目录执行）：")
     print("  gh release create models-v1 --title 'SR models v1' --notes 'waifu2x/realcugan ONNX (fixed-shape)'")
     for m in models:

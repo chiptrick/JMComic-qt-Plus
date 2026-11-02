@@ -681,6 +681,54 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 **A3a 状态：代码与下载链路已闭合**；真机验证待做（进超分页 → 灰行点一下 → 进度 100% → 自动选中跑图）。
 当前 `base_url` 为空 → `CanDownload()=False`，UI 应置灰不可点（这是设计，不是缺陷）。
 
+### 更新 29（2026-11-02）：39 个模型全部量化（q16），引擎按约定自动优先；32 个入库、7 个判为低精度
+
+**量化方案**：QDQ 静态量化，**uint16 激活 + uint8 权重**（QNN HTP 原生支持；体积约为 float 的 23%）。
+标定集 16 张 App 真实截图（含漫画封面/阅读页），minmax 标定；工具 `script/*quant*`（临时脚本）
++ 复用 `android/tools/prepare_models.py` 的量化逻辑。
+
+**结果（39/39 全部完成）**：
+- 交付 **32 个** q16 模型（PSNR ≥ 35dB，实测 35.3~52.9dB，平均 38.7dB），合计 **60.5MB**（float 262MB）；
+- **7 个判为低精度、不进交付**（改名 `_q16_lowq.onnx` 仅本地留存，避免在 NPU 上悄悄降质）：
+  `realcugan_pro_up2x`(34.98) / `realcugan_pro_up3x`(28.86) / `realcugan_pro_up3x_conservative`(29.94) /
+  `realesrgan_general_up4x`(27.17) / `realesrgan_general_wdn_up4x`(27.21) / `srmdnf_x2`(27.26) / `srmdnf_x3`(28.93)。
+- 顺带修掉 `prepare_models.py` 的一个真 bug：标定读取器把 HWC 直接喂给 NCHW 输入（会报维度错，之前从没跑通过量化）。
+
+**接入方式（列表/UI 不变）**：引擎启动时若**确实存在 QNN EP**，按文件名约定把 `<model>_q16.onnx` 优先于
+float 版（`ApplyQuantizedPreference`，`JM_SR_Q16=0` 可关）；**无 QNN 的机型保持 float**（QDQ 在 CPU 上更慢）。
+清单升到 **v3**，新增 `quantized` 段（base→q16 文件/size/sha256）+ `quantized_bytes`；
+`ModelStore` 增加 `Quantized()/QuantizedFor()/DownloadQuantized()`，自检新增 4 项（共 14 项全过）。
+C++ 已编译 + 宿主自检（`wsl_build_native.sh`）通过；`android/sr_qnn/__init__.py` 的 ModelNames 补齐
+general/SRMD 共 9 个名字（否则宿主断言"模型表数量"不过）。
+
+## 0C. 非高通机型 GPU 超分（Vulkan）实施方案
+
+**目标**：在 Adreno/Mali 等非高通机型上用 GPU 做超分，替代不可用的 QNN。
+
+**技术选型：ncnn（Vulkan 后端）**，理由：① Vulkan 覆盖广、在手机上成熟；② 我们需要的模型族官方就有
+ncnn 格式（`realcugan-ncnn-vulkan`、`srmd-ncnn-vulkan`），不用重新转换；③ 纯 C++ 静态库，能塞进一个 so。
+
+**架构**：新增 `libsr_vk.so`，**实现与 `sr_qnn.h` 完全相同的 C ABI**（`srq_init/srq_set_model_dir/`
+`srq_model_count/srq_model_name/srq_model_info/srq_model_id/srq_add/srq_load/srq_free_result` 等），
+Python 层 `sr_backend` 按能力选择：有 QNN → `libsr_qnn`；无 QNN 但有 Vulkan → `libsr_vk`；都没有 → 纯 CPU。
+
+**里程碑（按可验收产物切）**：
+| 阶段 | 产物 | 验收 |
+|---|---|---|
+| M1 | ncnn（arm64+Vulkan）静态库构建脚本 + 空壳 `libsr_vk.so` | `nm -D` 导出与 sr_qnn 同名的 12 个函数；宿主可 dlopen |
+| M2 | tile 管线移植（RGB float↔ncnn::Mat、Vulkan 设备选择、回读） | 用 `srmd_x2`(ncnn 官方模型) 在 PC/模拟器上产出与 ONNX 版 PSNR ≥ 35dB |
+| M3 | 模型打包与按需下载（ncnn param/bin，复用 ModelStore 思路） | 清单新增 `ncnn` 段；下载后能被引擎列出 |
+| M4 | 后端选择接入 Python + 设置页显示当前后端 | 高通机走 QNN、非高通走 Vulkan、两者都无时明确提示 |
+
+**风险/前置**：
+1. **需要一台非高通真机验证**（现有 V2463A 是高通；模拟器无 Vulkan GPU 加速）；
+2. APK 体积：ncnn+glslang/SPIRV 静态链约 +2~3MB；模型按需下载（SRMD ncnn 每个 ~6MB）；
+3. 首版只保证 `srmd_x{2,3,4}` + `realcugan_se_up2x` 四个模型（其余按需扩）；
+4. 性能预期：手机 Vulkan 上 CUGAN 单 192 tile 约 30~80ms（ncnn 社区实测区间），翻页可用。
+
+**已启动**：`android/tools/build_ncnn_android.sh`（ncnn tag `20240820`，`-DNCNN_VULKAN=ON`，NDK r30，
+arm64-v8a；源码需在宿主 clone 后传到 WSL，因为 WSL 到 github 不通）。
+
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
 
 > 前提：C0 三项已完成（§0A 更新 20/21/22）。O4 的"是否迁移"由此处的三选一决定，**未拍板前不动 C1 代码**。

@@ -1,6 +1,6 @@
 {
   "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",
-  "generated_at": "2026-11-02T14:50:03+0800",
+  "generated_at": "2026-11-02T15:14:59+0800",
   "models": [
     {
       "denoise": 3,
@@ -358,6 +358,201 @@
     "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",
     "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models/"
   ],
+  "quantized": [
+    {
+      "base": "waifu2x_cunet_up2x_denoise3.onnx",
+      "file": "waifu2x_cunet_up2x_denoise3_q16.onnx",
+      "sha256": "70c9800cfcbdd57b1eb986a9d9e825dc5ad4490d18d5daffd9226f9f55fd0510",
+      "size": 1385174
+    },
+    {
+      "base": "waifu2x_cunet_up2x_denoise2.onnx",
+      "file": "waifu2x_cunet_up2x_denoise2_q16.onnx",
+      "sha256": "6039773aa77599f71df44990aff1e047692d2853c36bf3b7b4474d588e9efb75",
+      "size": 1385172
+    },
+    {
+      "base": "waifu2x_cunet_up2x_denoise1.onnx",
+      "file": "waifu2x_cunet_up2x_denoise1_q16.onnx",
+      "sha256": "360490b35811116bae1e760898f8427e951100dcc726442fd2abc92088a382a2",
+      "size": 1385174
+    },
+    {
+      "base": "waifu2x_cunet_up2x_denoise0.onnx",
+      "file": "waifu2x_cunet_up2x_denoise0_q16.onnx",
+      "sha256": "8730770993129905b309d0725f2a439f50071f2afdf21e532cac10cc40b30d7e",
+      "size": 1385172
+    },
+    {
+      "base": "waifu2x_cunet_up2x.onnx",
+      "file": "waifu2x_cunet_up2x_q16.onnx",
+      "sha256": "951790f1d4b0edc99e15516fff09ac738b8ef0b305c8dc287d81797bca253e29",
+      "size": 1385174
+    },
+    {
+      "base": "waifu2x_cunet_up1x_denoise3.onnx",
+      "file": "waifu2x_cunet_up1x_denoise3_q16.onnx",
+      "sha256": "6ae6d44645e93683536b202af81087be3e72b7a0e10136dd7a978dbcc346732a",
+      "size": 1383596
+    },
+    {
+      "base": "waifu2x_cunet_up1x_denoise2.onnx",
+      "file": "waifu2x_cunet_up1x_denoise2_q16.onnx",
+      "sha256": "a6b1fc1cbfa5a36471e0ea6b1f7d2b75163dd656045e782ecb359c319e57d36a",
+      "size": 1383600
+    },
+    {
+      "base": "waifu2x_cunet_up1x_denoise1.onnx",
+      "file": "waifu2x_cunet_up1x_denoise1_q16.onnx",
+      "sha256": "2d5dd2e09878ff1a91dc7791568e28fc612ad3ef57f56df0e7394f10e3a6dffd",
+      "size": 1383596
+    },
+    {
+      "base": "waifu2x_cunet_up1x_denoise0.onnx",
+      "file": "waifu2x_cunet_up1x_denoise0_q16.onnx",
+      "sha256": "b4072cb8de28af3114b6ee9b404192f1e50d17eb1e60acec3cc5a725b97b2d05",
+      "size": 1383608
+    },
+    {
+      "base": "realcugan_se_up2x.onnx",
+      "file": "realcugan_se_up2x_q16.onnx",
+      "sha256": "4c5afa4e5c1b076a68cf0b24eb0c05ab849b126c10574d366b6859d4fade0aa8",
+      "size": 1381885
+    },
+    {
+      "base": "realcugan_se_up2x_conservative.onnx",
+      "file": "realcugan_se_up2x_conservative_q16.onnx",
+      "sha256": "a6fddb15a2a155456d0e9376ed1db1ff66fcf622f9f38a14bc3f96c5db301b88",
+      "size": 1381884
+    },
+    {
+      "base": "realcugan_se_up2x_denoise3.onnx",
+      "file": "realcugan_se_up2x_denoise3_q16.onnx",
+      "sha256": "d5e081adf4fb8a8e20e419f507c83a32731b5e67d90ccb4fe87dec6098de368b",
+      "size": 1381882
+    },
+    {
+      "base": "realcugan_se_up2x_denoise2.onnx",
+      "file": "realcugan_se_up2x_denoise2_q16.onnx",
+      "sha256": "147e1e5ffbb776aaff8aa0fa4653cda8fc42e10971a92ebd2a8e9ab41389f205",
+      "size": 1381882
+    },
+    {
+      "base": "realcugan_se_up2x_denoise1.onnx",
+      "file": "realcugan_se_up2x_denoise1_q16.onnx",
+      "sha256": "c0bf35f56b5ef6a4ac285160745ce8b12d7c22fcf407d8d277c075c7d8a5cf4b",
+      "size": 1381883
+    },
+    {
+      "base": "realcugan_se_up3x.onnx",
+      "file": "realcugan_se_up3x_q16.onnx",
+      "sha256": "9372b17de2fb57fd49b0b1adc188b292fe0be8cf472c6f50403211b35b2f52d4",
+      "size": 1383623
+    },
+    {
+      "base": "realcugan_se_up3x_conservative.onnx",
+      "file": "realcugan_se_up3x_conservative_q16.onnx",
+      "sha256": "9947e198853e088bc69c70030e1a14b8156cafa3bee8ea3bb1ddc61b9d10bc88",
+      "size": 1383623
+    },
+    {
+      "base": "realcugan_se_up3x_denoise3.onnx",
+      "file": "realcugan_se_up3x_denoise3_q16.onnx",
+      "sha256": "e8b9ab2fb903ae44883dfab81dfbe68f54f5f6c1fe97e4f00571889fdc0ac983",
+      "size": 1383624
+    },
+    {
+      "base": "realcugan_se_up4x.onnx",
+      "file": "realcugan_se_up4x_q16.onnx",
+      "sha256": "08fe45dbc590e9ddbcb9bd9aed5aeaef74abcf9e35fded3482cb0ad8aeae817b",
+      "size": 1508801
+    },
+    {
+      "base": "realcugan_se_up4x_conservative.onnx",
+      "file": "realcugan_se_up4x_conservative_q16.onnx",
+      "sha256": "f3fe16953bfbfd2ef4fe9d924f5d535bb96dfbe6a17ac34792b8d277b2862bca",
+      "size": 1508796
+    },
+    {
+      "base": "realcugan_se_up4x_denoise3.onnx",
+      "file": "realcugan_se_up4x_denoise3_q16.onnx",
+      "sha256": "776052f50eccb2b1220f0b64a3a652c4f7cfaebe6fdbfd90c622c94d036fb5e8",
+      "size": 1508801
+    },
+    {
+      "base": "realcugan_pro_up2x_conservative.onnx",
+      "file": "realcugan_pro_up2x_conservative_q16.onnx",
+      "sha256": "318f83f481ed1449a8e134383151e12bc65a263e028e2c9d9e7f5770cae932ea",
+      "size": 1384985
+    },
+    {
+      "base": "realcugan_pro_up2x_denoise3.onnx",
+      "file": "realcugan_pro_up2x_denoise3_q16.onnx",
+      "sha256": "0e39237e80641525498f13ccde7c18e7111ef50b78881becce134555295640b7",
+      "size": 1384984
+    },
+    {
+      "base": "realcugan_pro_up3x_denoise3.onnx",
+      "file": "realcugan_pro_up3x_denoise3_q16.onnx",
+      "sha256": "10d8105f5733ab6f11d2398440432dfaa36680bddb853c4ad1fe4b67e5123fa9",
+      "size": 1386727
+    },
+    {
+      "base": "realesrgan_animevideo_v3_up2x.onnx",
+      "file": "realesrgan_animevideo_v3_up2x_q16.onnx",
+      "sha256": "1a4aebbc925a71edea6c82d719c4f39e2509ca26e2312dfacb31dcfa65b76ff7",
+      "size": 676030
+    },
+    {
+      "base": "realesrgan_animevideo_v3_up3x.onnx",
+      "file": "realesrgan_animevideo_v3_up3x_q16.onnx",
+      "sha256": "98547289df60e7b57ddc7fff4a0495c6c2739d0f97a51e6bca71f76c27ba30f4",
+      "size": 676030
+    },
+    {
+      "base": "realesrgan_animevideo_v3_up4x.onnx",
+      "file": "realesrgan_animevideo_v3_up4x_q16.onnx",
+      "sha256": "ded3b0c58c2d5dd22b71c7fb5519603bd3bbbc6f37f5ba1e5806506f4195f41b",
+      "size": 675224
+    },
+    {
+      "base": "realesrgan_x4plus_up4x.onnx",
+      "file": "realesrgan_x4plus_up4x_q16.onnx",
+      "sha256": "b03b96b748310df6a79a474ed76309ed073e301c1701e34c1cf32b317a395ba8",
+      "size": 18136915
+    },
+    {
+      "base": "realesrgan_x4plus_anime_up4x.onnx",
+      "file": "realesrgan_x4plus_anime_up4x_q16.onnx",
+      "sha256": "91de5ea139c5c6717e0e34bcdb6143b68cb97a8cd39857756f5325e447de7051",
+      "size": 4851684
+    },
+    {
+      "base": "srmd_x2.onnx",
+      "file": "srmd_x2_q16.onnx",
+      "sha256": "8bd050a87057a74daee15c33a8537593d004813748e2103ce67f198882013605",
+      "size": 1538573
+    },
+    {
+      "base": "srmd_x3.onnx",
+      "file": "srmd_x3_q16.onnx",
+      "sha256": "5f76acc90b07537451d4e70d77595159d4ecbfdb9b77bb3d31a63dc06c279dc3",
+      "size": 1555917
+    },
+    {
+      "base": "srmd_x4.onnx",
+      "file": "srmd_x4_q16.onnx",
+      "sha256": "ac64dba5414c4c98ac718826bd443cab2edd45a80b413390c1487c5466360e84",
+      "size": 1580193
+    },
+    {
+      "base": "srmdnf_x4.onnx",
+      "file": "srmdnf_x4_q16.onnx",
+      "sha256": "b6d8f32e30aa96fa627aba2905a54adfb0f536591ff35e476fb766490dcf2466",
+      "size": 1577254
+    }
+  ],
+  "quantized_bytes": 63471466,
   "sources": [
     {
       "assets": "none",
@@ -398,5 +593,5 @@
     }
   ],
   "total_bytes": 274757156,
-  "version": 2
+  "version": 3
 }

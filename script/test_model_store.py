@@ -113,6 +113,27 @@ def main():
     got4 = st4.Download(doc2["models"][0])
     Check(open(got4, "rb").read() == blob, "主源不可用时从备源下载成功")
 
+    print("== 8. 量化版下载（manifest.quantized） ==")
+    mp3 = os.path.join(tmp, "manifest3.json")
+    qblob = b"quantized-weights" * 200
+    qsrc = os.path.join(remote, "a_q16.onnx")
+    with open(qsrc, "wb") as f:
+        f.write(qblob)
+    doc3 = dict(manifest)
+    doc3["version"] = 3
+    doc3["providers"] = ["file://" + remote + "/"]
+    doc3["quantized"] = [{"base": "a.onnx", "file": "a_q16.onnx", "size": len(qblob),
+                          "sha256": hashlib.sha256(qblob).hexdigest()}]
+    with open(mp3, "w", encoding="utf-8") as f:
+        _json.dump(doc3, f)
+    st5 = ModelStore(root=os.path.join(tmp, "m5"), manifest_path=mp3)
+    Check(st5.QuantizedFor("a.onnx") is not None, "QuantizedFor 命中")
+    Check(st5.QuantizedFor("b.onnx") is None, "未登记时返回 None")
+    qp = st5.DownloadQuantized("a.onnx")
+    Check(open(qp, "rb").read() == qblob, "量化版下载并校验通过")
+    Check(not any(item["installed"] and item["entry"]["file"] == "a_q16.onnx"
+                  for item in st5.List()), "量化版不进入模型列表")
+
     shutil.rmtree(tmp, ignore_errors=True)
     print()
     if FAIL:

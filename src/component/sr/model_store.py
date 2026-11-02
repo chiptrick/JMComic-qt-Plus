@@ -117,6 +117,28 @@ class ModelStore(object):
             return STATE_CORRUPT
         return STATE_INSTALLED
 
+    def Quantized(self):
+        """ 量化版模型（manifest.quantized）：与 float 同名 + `_q16` 后缀
+
+        引擎在 QNN EP 可用时按文件名约定自动优先它们（列表/UI 不变），
+        所以这里只负责"能不能下载"，不参与 List()。
+        """
+        return self.Manifest().get("quantized", []) or []
+
+    def QuantizedFor(self, base_file):
+        """ 查某个 float 模型对应的量化版条目；没有返回 None """
+        for item in self.Quantized():
+            if item.get("base") == base_file:
+                return item
+        return None
+
+    def DownloadQuantized(self, base_file, progress=None, retries=3):
+        """ 下载某个模型的量化版（体积约为 float 的 27%） """
+        entry = self.QuantizedFor(base_file)
+        if entry is None:
+            raise ModelOffline("清单里没有 {} 的量化版".format(base_file))
+        return self.Download(entry, progress=progress, retries=retries)
+
     def List(self):
         """ 返回 [{'entry': 原清单项, 'state': ..., 'installed': bool}]，UI 直接消费 """
         out = []
