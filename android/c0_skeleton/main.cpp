@@ -10,6 +10,7 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
+#include <link.h>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "C0Skeleton", __VA_ARGS__)
 
@@ -17,16 +18,43 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
 
-    // --- C0-③ 验证：libsr_qnn 随主程序 DT_NEEDED 加载，这里只确认其常驻 ---
+    // --- C0-③ 验证 ---
+    // 判据分两层，避免"同名库被别处装载"造成的假绿：
+    //   ① linux 侧（更强）：构建脚本用 llvm-readelf 确认 c0skeleton 自己的 .so
+    //      DT_NEEDED 里有 libsr_qnn.so —— 这才叫"直链"；
+    //   ② 设备侧（本函数）：用 dl_iterate_phdr 在**进程 link map** 里找到 libsr_qnn.so
+    //      并取出其基址；RTLD_NOLOAD 的 dlopen 只作补充（它不区分是谁加载的）。
+    struct SrqProbe {
+        bool found = false;
+        QString path;
+        void *base = nullptr;
+    } probe;
+
+    dl_iterate_phdr([](struct dl_phdr_info *info, size_t, void *data) -> int {
+        auto *p = static_cast<SrqProbe *>(data);
+        const char *name = info->dlpi_name ? info->dlpi_name : "";
+        if (QString::fromLocal8Bit(name).endsWith(QLatin1String("libsr_qnn.so"))) {
+            p->found = true;
+            p->path = QString::fromLocal8Bit(name);
+            p->base = reinterpret_cast<void *>(info->dlpi_addr);
+            return 1; // 已找到，停止遍历
+        }
+        return 0;
+    }, &probe);
+
     QString srqLine;
-    if (void *h = dlopen("libsr_qnn.so", RTLD_NOLOAD | RTLD_NOW)) {
-        srqLine = QStringLiteral("libsr_qnn.so loaded: YES (handle %1)").arg(reinterpret_cast<qintptr>(h), 0, 16);
-        LOGI("sr_qnn direct-link OK, handle=%p", h);
-        dlclose(h);
+    if (probe.found) {
+        srqLine = QStringLiteral("libsr_qnn.so in link map: YES (base %1)")
+                      .arg(reinterpret_cast<quintptr>(probe.base), 0, 16);
+        LOGI("sr_qnn in link map OK, base=%p path=%s", probe.base, qPrintable(probe.path));
     } else {
-        const char *e = dlerror();
-        srqLine = QStringLiteral("libsr_qnn.so loaded: NO (%1)").arg(QString::fromLocal8Bit(e ? e : "unknown"));
-        LOGI("sr_qnn direct-link FAIL: %s", e ? e : "unknown");
+        // ② 层没命中时再看 ① 是否被破坏（例如被 strip 掉 NEEDED / 未真正链接）
+        void *h = dlopen("libsr_qnn.so", RTLD_NOLOAD | RTLD_NOW);
+        srqLine = QStringLiteral("libsr_qnn.so in link map: NO (dlopen: %1)")
+                      .arg(h ? QStringLiteral("handle-only") : QStringLiteral("absent"));
+        LOGI("sr_qnn link map FAIL, dlopen=%p err=%s", h, h ? "-" : dlerror());
+        if (h)
+            dlclose(h);
     }
 
     QMainWindow win;

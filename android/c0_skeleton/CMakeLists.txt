@@ -23,6 +23,9 @@ set(SRQ_LIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libs/${ANDROID_ABI}"
     CACHE PATH "预编译 sr_qnn / onnxruntime 库目录")
 set(SRQ_LIB  "${SRQ_LIBS_DIR}/libsr_qnn.so")
 set(ORT_LIB  "${SRQ_LIBS_DIR}/libonnxruntime.so")
+# 缺库时必须让构建失败，而不是静默产出一个"门禁看起来更绿"的包（11/0/0 少了两个库，
+# 表面上比 13/0/0 还干净）——C0-③ 的判定全靠"链上了"，静默跳过等于把实验做废。
+option(SRQ_REQUIRED "缺少 sr_qnn/onnxruntime 库时直接报错（C0-③ 实验必须为 ON）" ON)
 
 if(EXISTS "${SRQ_LIB}" AND EXISTS "${ORT_LIB}")
     add_library(sr_qnn SHARED IMPORTED)
@@ -35,6 +38,9 @@ if(EXISTS "${SRQ_LIB}" AND EXISTS "${ORT_LIB}")
     set_target_properties(c0skeleton PROPERTIES
         QT_ANDROID_EXTRA_LIBS "${SRQ_LIB};${ORT_LIB}")
     message(STATUS "C0-③: linking ${SRQ_LIB}")
+elseif(SRQ_REQUIRED)
+    message(FATAL_ERROR "C0-③: 缺 ${SRQ_LIBS_DIR} 下的 libsr_qnn.so / libonnxruntime.so。"
+                        "直链验证必须真有库；如只想要 v1 骨架请显式 -DSRQ_REQUIRED=OFF。")
 else()
     message(WARNING "C0-③: sr_qnn/onnxruntime 库不在 ${SRQ_LIBS_DIR}，本次构建不含直链验证")
 endif()

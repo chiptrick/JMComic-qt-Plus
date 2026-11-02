@@ -73,6 +73,22 @@ APK=$(find "$BUILD" -name '*.apk' | head -1)
 [ -n "$APK" ] || { echo "[fail] 未产出 APK"; exit 1; }
 echo "APK: $APK  ($(du -m "$APK" | cut -f1) MB)"
 
+# --- C0-③ 的"直链"判据（linux 侧，比运行时更硬）：主程序自己的 .so 必须 NEEDED libsr_qnn.so ---
+APP_SO=$(find "$BUILD" -maxdepth 1 -name "libc0skeleton_*.so" | head -1)
+if [ -n "$APP_SO" ]; then
+  NEEDED=$("$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$APP_SO" 2>/dev/null | grep NEEDED)
+  if echo "$NEEDED" | grep -q "libsr_qnn.so"; then
+    echo "[OK] 直链生效：$(basename "$APP_SO") DT_NEEDED 含 libsr_qnn.so"
+    echo "$NEEDED" | grep -E "sr_qnn|onnxruntime" | sed 's/^/     /'
+  else
+    echo "[FAIL] $(basename "$APP_SO") 的 DT_NEEDED 里没有 libsr_qnn.so —— 直链没生效，别把门禁绿当结论"
+    exit 1
+  fi
+else
+  echo "[FAIL] 找不到 libc0skeleton_*.so，无法验证直链"
+  exit 1
+fi
+
 # --- 门禁 ---
 PY="$HOME/jmcomic-build/venv311/bin/python"
 "$PY" "$REPO_WSL/android/tools/check_elf_page_align.py" "$APK"
