@@ -623,7 +623,7 @@ void BuildBuiltinModels() {
         }
     }
     // real-esrgan
-    const char* esrganNames[5][2] = {
+    const char* esrganNames[7][2] = {
         {"REALESRGAN_ANIMAVIDEOV3_UP2X", "realesrgan_animevideo_v3_up2x.onnx"},
         {"REALESRGAN_ANIMAVIDEOV3_UP3X", "realesrgan_animevideo_v3_up3x.onnx"},
         {"REALESRGAN_ANIMAVIDEOV3_UP4X", "realesrgan_animevideo_v3_up4x.onnx"},
@@ -632,9 +632,22 @@ void BuildBuiltinModels() {
         {"REALESRGAN_GENERAL_UP4X", "realesrgan_general_up4x.onnx"},
         {"REALESRGAN_GENERAL_WDN_UP4X", "realesrgan_general_wdn_up4x.onnx"},
     };
-    const int esrganScales[5] = {2, 3, 4, 4, 4};
-    for (int i = 0; i < 5; ++i) {
+    const int esrganScales[7] = {2, 3, 4, 4, 4, 4, 4};
+    for (int i = 0; i < 7; ++i) {
         AddModel(esrganNames[i][0], esrganNames[i][1], esrganScales[i], 0, kTile);
+    }
+    // srmd：nihui/srmd-ncnn-vulkan 官方 ncnn 权重导出（已烘焙 15 常量通道；srmd 另带 noise 平面）
+    const char* srmdNames[6][2] = {
+        {"SRMD_UP2X", "srmd_x2.onnx"},
+        {"SRMD_UP3X", "srmd_x3.onnx"},
+        {"SRMD_UP4X", "srmd_x4.onnx"},
+        {"SRMDNF_UP2X", "srmdnf_x2.onnx"},
+        {"SRMDNF_UP3X", "srmdnf_x3.onnx"},
+        {"SRMDNF_UP4X", "srmdnf_x4.onnx"},
+    };
+    const int srmdScales[6] = {2, 3, 4, 2, 3, 4};
+    for (int i = 0; i < 6; ++i) {
+        AddModel(srmdNames[i][0], srmdNames[i][1], srmdScales[i], 0, kTile);
     }
     return;
 }

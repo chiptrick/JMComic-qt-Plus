@@ -643,6 +643,41 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 
 **③ 清理**：临时文件从 11GB 降到 56MB（仅留 `weights_v3/` 11 个 pth + `upcunet_v3.py`）。
 
+### 更新 28（2026-11-02）：新增 SRMD（ncnn 官方权重，6 个）并上机前验证；Anime4K 暂不落地（附原因）
+
+**① SRMD：已补齐 6 个模型（与 ncnn 运行时逐位一致）**
+来源 `nihui/srmd-ncnn-vulkan` 20220728 的 `models-srmd`（param+bin）。转换要点（实证，不是猜）：
+- 网络：`Input → Conv3x3(128,ReLU)×1 → Conv3x3(128,ReLU)×11 → Conv3x3(12) → PixelShuffle`，**无内部 crop**；
+- 输入不是 3 通道：`srmd_*` = **19 通道**（RGB + `degradation_vector[15]` 常量 + `noise/255` 平面），
+  `srmdnf_*` = **18 通道**（只有 15 个常量）；常量取自 `srmd_preproc.comp`，按 `noise=0` 烘焙；
+- 权重布局：**fp16（仅首数组带 tag），偏置 fp32**，尾部 48B 填充；首层 `6=weight_data_size` 可反推输入通道；
+- 后处理（`srmd_postproc.comp`）只做 ×255 裁剪，**没有残差基线** → 导出即成品。
+
+产出与验证（`script/export_srmd.py`，`--verify-ncnn` 用 ncnn 运行时做真值）：
+| 模型 | 输出 | 大小 | ORT vs torch | **ncnn vs torch** |
+|---|---|---|---|---|
+| srmd_x2/x3/x4 | 384/576/768 | 5.77~5.93MB | ≤0.002/255 | **≤0.001/255** |
+| srmdnf_x2/x3/x4 | 同上 | 同上 | ≤0.002/255 | **≤0.002/255** |
+
+三处注册（models.txt / C++ 内置表新增 `SRMD_UP2X..`、`SRMDNF_UP2X..` / UI 新增 `SRMD` 分组 6 行），
+清单 **39 个模型 / 262.0MB**，6 个 onnx + models.txt 已推到 `chiptrick/JMComic-qt-Android`（远端 39 个）。
+顺带修了 C++ 内置表的一个隐患：`esrganNames[5][2]` 数组在加了 general 两个条目后已超界（循环仍 `i<5`），
+现已改为 `[7][2]` 并循环 7 次。
+
+**② Anime4K：结论是"没有官方 ONNX"，且 shader 不能直接转**
+- 官方 `bloc97/Anime4K` v4.0.1 只发 **GLSL 着色器**（776KB zip），权重是 shader 里的 `mat4` 字面量；
+- v4 `Upscale_CNN_x2_M` 共 **9 个 pass**（1×conv3x3 3→4、4×conv3x3 4×3x3x8、1×conv1x1 56、Depth-to-Space），
+  特征扩展靠 `relu(x)/relu(-x)` 拼 8 通道；
+- **致命点**：最后一个 pass 是 `vec4(c0..c3) + MAIN_tex(MAIN_pos)` —— 残差基线是 mpv 对原纹理的**重采样**
+  （受 mpv 采样滤镜与坐标语义影响），不是纯数学运算，ONNX 里无法等价复现，只能近似（双三次）；
+- 社区已有导出（`kato-megumi/anime4kOnnx`）但那是 **v3.2 GAN 系**（`Anime4K_Upscale_GAN_x2_M` 等），
+  与 v4 的 CNN 系不是同一套权重，不能冒充"官方 Anime4K v4"。
+
+**如果要落地 Anime4K**，建议明确选一条：
+- (a) 近似移植 v4 `Upscale_CNN_x2_M`（残差用双三次），标注"近似"，约 1 天工作量，效果与 mpv 会有可见差异；
+- (b) 不做 —— 理由：Anime4K 的定位是实时视频放大，模型极小（几十 KB 权重）质量远低于 CUGAN/ESRGAN，
+  在静态漫画超分场景性价比低。
+
 **A3a 状态：代码与下载链路已闭合**；真机验证待做（进超分页 → 灰行点一下 → 进度 100% → 自动选中跑图）。
 当前 `base_url` 为空 → `CanDownload()=False`，UI 应置灰不可点（这是设计，不是缺陷）。
 

@@ -43,7 +43,7 @@ def _Tr(text):
 
 
 # 算法顺序：与旧表一致(Waifu2x → Real-CUGAN → Real-ESRGAN)，自定义模型永远在最后
-Algorithms = ("Waifu2x", "Real-CUGAN", "Real-ESRGAN")
+Algorithms = ("Waifu2x", "Real-CUGAN", "Real-ESRGAN", "SRMD")
 CustomGroup = "自定义模型"
 
 # 各算法/分组的分组色点
@@ -107,6 +107,12 @@ SrModels = (
     ("X4PLUSANIME_UP4X", "Real-ESRGAN", 4, -1, 400, False),
     ("GENERAL_UP4X", "Real-ESRGAN", 4, -1, 150, False),
     ("GENERAL_WDN_UP4X", "Real-ESRGAN", 4, -1, 150, False),
+    ("SRMD_UP2X", "SRMD", 2, -1, None, False),
+    ("SRMD_UP3X", "SRMD", 3, -1, None, False),
+    ("SRMD_UP4X", "SRMD", 4, -1, None, False),
+    ("SRMDNF_UP2X", "SRMD", 2, -1, None, False),
+    ("SRMDNF_UP3X", "SRMD", 3, -1, None, False),
+    ("SRMDNF_UP4X", "SRMD", 4, -1, None, False),
 )
 
 

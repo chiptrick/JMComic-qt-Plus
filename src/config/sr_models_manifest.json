@@ -1,6 +1,6 @@
 {
   "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/",
-  "generated_at": "2026-11-02T14:27:51+0800",
+  "generated_at": "2026-11-02T14:50:03+0800",
   "models": [
     {
       "denoise": 3,
@@ -298,6 +298,60 @@
       "sha256": "f41deae3973466f3ad27d175a81196f915fbc3a2a76b9ac09f4f63e6e0372c97",
       "size": 4866393,
       "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "srmd_x2.onnx",
+      "name": "SRMD_UP2X",
+      "scale": 2,
+      "sha256": "6a29a52bb42878d25b102207020bb57e7b798e428c489febede9ea43ad064b64",
+      "size": 6052490,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "srmd_x3.onnx",
+      "name": "SRMD_UP3X",
+      "scale": 3,
+      "sha256": "70b5efc0b405a3f967ac6470d723e9b8900eb1879bacf91c038980eddd855d6f",
+      "size": 6121670,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "srmd_x4.onnx",
+      "name": "SRMD_UP4X",
+      "scale": 4,
+      "sha256": "4ba621c9a6a9e6c4acdd2106225693041a291f8d65aa228fa688179e91f6ae76",
+      "size": 6218524,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "srmdnf_x2.onnx",
+      "name": "SRMDNF_UP2X",
+      "scale": 2,
+      "sha256": "e085711ce50352a308cd87e5c8daf6200be846c9e8ad5dcb569acacec344f66e",
+      "size": 6047137,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "srmdnf_x3.onnx",
+      "name": "SRMDNF_UP3X",
+      "scale": 3,
+      "sha256": "0ea5401a112dcae9abd66cdc4cc8a1c0b608c35ca37eb749b565704cb31069b4",
+      "size": 6116317,
+      "tile": 192
+    },
+    {
+      "denoise": 0,
+      "file": "srmdnf_x4.onnx",
+      "name": "SRMDNF_UP4X",
+      "scale": 4,
+      "sha256": "7e2b3f62ffd6d4e1f56229e12934af6b1f9b0c74073646dee97ae13c1afe23a2",
+      "size": 6213171,
+      "tile": 192
     }
   ],
   "providers": [
@@ -339,10 +393,10 @@
   "texts": [
     {
       "file": "models.txt",
-      "sha256": "ae62879ac696a8275647901b4949b1b5b464708fabbe6caee8a649a236929ae7",
-      "size": 4848
+      "sha256": "7e9a1e5ad03a9852148797ce61e7fa7846274601b7908144c372af39f7dcaf6c",
+      "size": 5334
     }
   ],
-  "total_bytes": 237987847,
+  "total_bytes": 274757156,
   "version": 2
 }
