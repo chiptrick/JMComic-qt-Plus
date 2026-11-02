@@ -1,19 +1,23 @@
-// C1-W1：Qt 6.12 C++ 壳工程骨架 —— 壳 + 导航占位。
+// C1-W2：Qt 6.12 C++ 壳 —— 导航 + 本地阅读器骨架。
 //
-// W1 的验收是"可出包 + 16KB 门禁 0 未对齐 + 同 C0 的空壳级启动"，
-// 这里只放最小的导航结构（页面栈 + 返回栈桩），不做阅读器/设置（W2~W5）。
-// 保留 C0-③ 的 libsr_qnn.so 直链验证：壳以后要直连超分后端，这条链路不能退回 ctypes。
+// W1：可出包 + 16KB 门禁 0 未对齐 + 同 C0 的空壳级启动；
+// W2：本地阅读器（打开本地目录 → 翻页 → 缩放），保持 libsr_qnn.so 直链不退回 ctypes。
 #include <QApplication>
+#include <QFile>
 #include <QLabel>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QStandardPaths>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 
 #include <android/log.h>
 #include <dlfcn.h>
 #include <link.h>
+
+#include "reader.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "C1Shell", __VA_ARGS__)
 
@@ -56,7 +60,7 @@ QString ProbeSrq()
     return line;
 }
 
-// 最小导航壳：W4 会替换成完整的返回栈/标题栏/侧栏；这里只保证"页面栈 + 返回"可用。
+// W4 会替换成完整的返回栈/标题栏/侧栏；这里只保证"页面栈 + 返回"可用。
 class ShellWindow : public QMainWindow
 {
 public:
@@ -68,36 +72,74 @@ public:
         auto *central = new QWidget(this);
         auto *root = new QVBoxLayout(central);
 
-        auto *title = new QLabel(QStringLiteral("C1 shell / W1"), central);
-        title->setAlignment(Qt::AlignCenter);
-        root->addWidget(title);
+        title_ = new QLabel(QStringLiteral("C1 shell / W2"), central);
+        title_->setAlignment(Qt::AlignCenter);
+        root->addWidget(title_);
 
         stack_ = new QStackedWidget(central);
         root->addWidget(stack_, 1);
 
-        // 两个占位页：后续分别长成本地阅读器(W2~W3)与设置(W5)
-        auto *home = new QLabel(QStringLiteral("Home page placeholder"), central);
-        home->setAlignment(Qt::AlignCenter);
+        // 首页：入口占位
+        auto *home = new QWidget(central);
+        auto *homeLay = new QVBoxLayout(home);
+        auto *openReader = new QPushButton(QStringLiteral("Open local reader"), home);
+        homeLay->addWidget(openReader);
+        homeLay->addStretch(1);
         stack_->addWidget(home);
 
-        auto *reader = new QLabel(QStringLiteral("Local reader placeholder"), central);
-        reader->setAlignment(Qt::AlignCenter);
-        stack_->addWidget(reader);
+        // 阅读页：W2 骨架（目录 → 图片列表 → 翻页/缩放）
+        reader_ = new ReaderView(central);
+        stack_->addWidget(reader_);
 
         auto *bar = new QHBoxLayout();
         auto *back = new QPushButton(QStringLiteral("Back"), central);
-        auto *next = new QPushButton(QStringLiteral("Open reader"), central);
+        auto *next = new QPushButton(QStringLiteral("Next page"), central);
         bar->addWidget(back);
         bar->addWidget(next);
         root->addLayout(bar);
 
-        auto *status = new QLabel(ProbeSrq(), central);
-        status->setAlignment(Qt::AlignCenter);
-        root->addWidget(status);
+        status_ = new QLabel(ProbeSrq(), central);
+        status_->setAlignment(Qt::AlignCenter);
+        root->addWidget(status_);
 
-        connect(next, &QPushButton::clicked, this, [this] { Push(1); });
+        connect(openReader, &QPushButton::clicked, this, [this] {
+            reader_->LoadDefaultOrPick();
+            Push(1);
+        });
+        connect(next, &QPushButton::clicked, this, [this] { reader_->NextPage(); });
         connect(back, &QPushButton::clicked, this, [this] { Pop(); });
+        connect(reader_, &ReaderView::PageChanged, this, [this](int cur, int total, const QString &path) {
+            if (total > 0)
+                title_->setText(QStringLiteral("Reader %1/%2").arg(cur).arg(total));
+            else
+                title_->setText(QStringLiteral("Reader (no pages)"));
+            if (!path.isEmpty())
+                LOGI("page %d/%d %s", cur, total, qPrintable(path));
+        });
+        connect(reader_, &ReaderView::StatusMessage, this, [this](const QString &text) {
+            status_->setText(text);
+            LOGI("%s", qPrintable(text));
+        });
+        connect(reader_, &ReaderView::SelfTestDone, this, [this] {
+            title_->setText(QStringLiteral("selftest done"));
+        });
         setCentralWidget(central);
+    }
+
+    // 冒烟入口：run-as 建一个 selftest 标记文件即可触发（只在标记存在时跑一次）
+    void MaybeRunSelfTest()
+    {
+        const QString marker = QStandardPaths::writableLocation(
+                                   QStandardPaths::AppLocalDataLocation)
+                               + QStringLiteral("/selftest");
+        if (!QFile::exists(marker)) {
+            LOGI("selftest marker absent: %s", qPrintable(marker));
+            return;
+        }
+        QFile::remove(marker);
+        LOGI("selftest marker found: %s", qPrintable(marker));
+        Push(1);
+        QTimer::singleShot(200, this, [this] { reader_->RunSelfTest(); });
     }
 
 private:
@@ -115,6 +157,9 @@ private:
     }
 
     QStackedWidget *stack_ = nullptr;
+    ReaderView *reader_ = nullptr;
+    QLabel *title_ = nullptr;
+    QLabel *status_ = nullptr;
 };
 
 }  // namespace
@@ -124,5 +169,6 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     ShellWindow win;
     win.show();
+    win.MaybeRunSelfTest();
     return app.exec();
 }

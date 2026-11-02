@@ -13,6 +13,7 @@ qt_standard_project_setup()
 
 qt_add_executable(c1shell
     main.cpp
+    reader.cpp
 )
 
 # --- C1：sr_qnn 直链 ---

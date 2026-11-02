@@ -844,6 +844,26 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 | 运行日志 | `C1Shell: sr_qnn in link map OK (base=0x7cb38f903000)` |
 
 说明：x86 模拟器首帧数值只作"链路通了"的证据，不代表真机指标（W7 才做同机对照）。
+**W2 已落一版（本地阅读器骨架）**：`android/c1_shell/reader.{h,cpp}` + `main.cpp` 接入。
+
+- 目录来源：`QFileDialog`（用户手选）> `AppLocalDataLocation/reader`（免存储权限，
+  冒烟用 `run-as` 投图）> `/sdcard/c1_shell`（用户手工投放）；只列 jpg/jpeg/png/webp/bmp/gif。
+- 显示：`QScrollArea` + 适宽默认；缩放系数是"相对适宽"的倍率（0.2~8.0），
+  窗口尺寸变化按当前倍率重渲染；左右方向键/±/0 翻页与缩放。
+- 冒烟自检钩子：app 私有目录存在 `selftest` 标记文件时自动执行
+  加载→翻页→回翻→缩放→复位→`selftest done`，全程走 `C1Reader` 日志，验完删标记。
+
+实测（x86_64 / MuMu 12 / Android 15）：
+| 项 | 结果 |
+|---|---|
+| APK | 67.5MB（带阅读器） |
+| 16KB 门禁 | 对齐 13 / 未对齐 0 |
+| 直链 | `DT_NEEDED 含 libsr_qnn.so` |
+| 自检日志 | `loaded 3 pages` → `page 2/3` → `page 3/3` → `page 2/3` → `zoom x1.25` → `zoom fit-width` → `selftest done pages=3` |
+
+> MuMu 的多 display 截屏对 Qt 窗口返回黑图（已知限制），W2 的"打开/翻页/缩放"验证
+> 用上述自检钩子的日志链路替代截图；真机侧 W3 再补手势与人工 checklist。
+
 W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放），并配 bench 对照口径。
 
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
