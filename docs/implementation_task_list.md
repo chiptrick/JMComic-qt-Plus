@@ -864,6 +864,21 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 > MuMu 的多 display 截屏对 Qt 窗口返回黑图（已知限制），W2 的"打开/翻页/缩放"验证
 > 用上述自检钩子的日志链路替代截图；真机侧 W3 再补手势与人工 checklist。
 
+**W3 已落一版（阅读器体验补齐的第一批）**：在 W2 之上加 双页/阅读方向/亮度/手势。
+
+- 双页(spread)：`ToggleTwoPage()`，`Next/Prev` 按 2 页步进；第二页不足时自动退化为单页；
+- 阅读方向：`ToggleDirection()` LTR/RTL；RTL 时**右键=上一页、左键=下一页**（日漫从右往左），
+  双页组合图视觉顺序也按 RTL 对调（右页先看）；
+- 亮度：`CycleBrightness()` 1.0→0.75→0.5→0.25 循环；实现是盖一层**不接鼠标的黑色 overlay**
+  （alpha=1−亮度），不申请任何系统背光权限；
+- 手势：viewport 上 `grabGesture(Qt::PinchGesture)` 捏合缩放；左右滑动（>80px 且横向主导）
+  翻页，方向跟随 RTL/LTR；
+- 快捷键：D=双页、R=方向、B=亮度，+/−/0 缩放，←/→ 按方向翻页；
+- 自检钩子扩展：`selftest done pages=3 twoPage=1 rtl=1 brightness=0.75`。
+
+实测（x86_64 / MuMu 12 / Android 15）：APK 67.5MB；16KB 对齐 13 / 未对齐 0；直链生效；
+自检日志：`two-page on` → `direction RTL` → `brightness 0.75` → `selftest done pages=3 twoPage=1 rtl=1 brightness=0.75`。
+
 W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放），并配 bench 对照口径。
 
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）

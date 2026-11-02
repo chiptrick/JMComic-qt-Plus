@@ -94,8 +94,14 @@ public:
         auto *bar = new QHBoxLayout();
         auto *back = new QPushButton(QStringLiteral("Back"), central);
         auto *next = new QPushButton(QStringLiteral("Next page"), central);
+        auto *twoPage = new QPushButton(QStringLiteral("2-up"), central);
+        auto *dirBtn = new QPushButton(QStringLiteral("RTL"), central);
+        auto *bright = new QPushButton(QStringLiteral("Dim"), central);
         bar->addWidget(back);
         bar->addWidget(next);
+        bar->addWidget(twoPage);
+        bar->addWidget(dirBtn);
+        bar->addWidget(bright);
         root->addLayout(bar);
 
         status_ = new QLabel(ProbeSrq(), central);
@@ -107,6 +113,9 @@ public:
             Push(1);
         });
         connect(next, &QPushButton::clicked, this, [this] { reader_->NextPage(); });
+        connect(twoPage, &QPushButton::clicked, this, [this] { reader_->ToggleTwoPage(); });
+        connect(dirBtn, &QPushButton::clicked, this, [this] { reader_->ToggleDirection(); });
+        connect(bright, &QPushButton::clicked, this, [this] { reader_->CycleBrightness(); });
         connect(back, &QPushButton::clicked, this, [this] { Pop(); });
         connect(reader_, &ReaderView::PageChanged, this, [this](int cur, int total, const QString &path) {
             if (total > 0)
