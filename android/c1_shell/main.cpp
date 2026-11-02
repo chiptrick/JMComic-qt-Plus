@@ -25,6 +25,7 @@
 #include "reader.h"
 #include "settings_page.h"
 #include "python_bridge.h"
+#include "pyruntime.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "C1Shell", __VA_ARGS__)
 
@@ -219,6 +220,14 @@ public:
             return;
         QFile::remove(marker);
         LOGI("python selftest marker found");
+#ifdef C1_HAVE_PY_RUNTIME
+        QString python;
+        QString err;
+        if (!PyRuntime::EnsureReady(&python, &err)) {
+            LOGI("python runtime not ready: %s", qPrintable(err));
+            return;
+        }
+#else
         QString python = qEnvironmentVariable("JM_C1_PYTHON");
         if (python.isEmpty())
             python = QStandardPaths::findExecutable(QStringLiteral("python3"));
@@ -226,6 +235,7 @@ public:
             LOGI("no python runtime; skip bridge selftest");
             return;
         }
+#endif
         QString script = qEnvironmentVariable("JM_C1_BRIDGE");
         if (script.isEmpty()) {
             const QStringList candidates = {
@@ -242,7 +252,31 @@ public:
             }
         }
         if (script.isEmpty()) {
-            LOGI("bridge.py not found; skip bridge selftest");
+            LOGI("bridge.py not found; use inline bridge code");
+            script = QStringLiteral(
+                "import sys, json\n"
+                "for line in sys.stdin:\n"
+                "    try:\n"
+                "        req = json.loads(line)\n"
+                "    except Exception:\n"
+                "        continue\n"
+                "    method = req.get('method')\n"
+                "    params = req.get('params') or {}\n"
+                "    if method == 'ping':\n"
+                "        res = {'ok': True, 'result': 'pong'}\n"
+                "    elif method == 'echo':\n"
+                "        res = {'ok': True, 'result': params}\n"
+                "    elif method == 'crash':\n"
+                "        sys.stdout.flush()\n"
+                "        raise SystemExit(3)\n"
+                "    else:\n"
+                "        res = {'ok': False, 'error': 'unknown method'}\n"
+                "    sys.stdout.write(json.dumps({'id': req.get('id'), **res}) + '\\n')\n"
+                "    sys.stdout.flush()\n");
+            if (bridge_->Start(python, {QStringLiteral("-c"), script}))
+                QTimer::singleShot(500, this, [this] {
+                    bridge_->SendRequest(QStringLiteral("ping"), {});
+                });
             return;
         }
         if (bridge_->Start(python, {script}))

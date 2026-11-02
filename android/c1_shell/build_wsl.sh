@@ -46,6 +46,26 @@ done
 mkdir -p "$(dirname "$SRC")"
 rsync -a --delete "$REPO_WSL/android/c1_shell/" "$SRC/"
 
+# --- W6：Python 运行时打包（从现有 p4a dist 复制；没有就跳过，CMake 会明确告警） ---
+# 这里不把 96MB bundle 提交进仓库：它属于构建产物，p4a 已经验证过一次。
+ABI="${ABI:-x86_64}"
+PY_DEST="$SRC/pylibs/$ABI"
+PY_SRC_GLOB=$(find "$HOME/jmcomic-build/keep-"* -path "*/dists/*/libs/$ABI/libpythonbin.so" 2>/dev/null | head -1 || true)
+if [ -n "$PY_SRC_GLOB" ] && [ -f "$PY_SRC_GLOB" ]; then
+  PY_SRC_DIR=$(dirname "$PY_SRC_GLOB")
+  mkdir -p "$PY_DEST"
+  for lib in libpythonbin.so libpython3.14.so libsqlite3.so libffi.so libcrypto.so libssl.so; do
+    cp "$PY_SRC_DIR/$lib" "$PY_DEST/" 2>/dev/null || true
+  done
+  # bundle 里目录 mode=644（无 x），应用用户解不开；重打包成 755
+  if [ ! -f "$PY_DEST/libpybundle_fixed.so" ]; then
+    python3 "$SRC/make_pybundle.py" "$PY_SRC_DIR/libpybundle.so" "$PY_DEST/libpybundle_fixed.so"
+  fi
+  echo "Python runtime libs -> $PY_DEST (from $PY_SRC_DIR)"
+else
+  echo "[warn] 没找到 p4a dist 里的 Python 运行时（$ABI），本次 APK 不会带 Python"
+fi
+
 # --- 配置 + 编译 + 出包 ---
 rm -rf "$BUILD"
 "$QT_ANDROID/bin/qt-cmake" -S "$SRC" -B "$BUILD" \
@@ -63,6 +83,16 @@ cmake --build "$BUILD" || true
 
 # Qt 默认 compileSdk=android-34，被 androidx.core:1.17.0 拒收（要求 >=36）
 sed -i 's/androidCompileSdkVersion=.*/androidCompileSdkVersion=android-36/' "$BUILD/android-build/gradle.properties" 2>/dev/null || true
+
+# W6：Python 运行时不靠 nativeLibraryDir（extractNativeLibs=false 时 .so 不落盘、没法 exec）。
+# 统一打进 assets/，运行时复制到应用私有目录再启动（见 pyruntime.cpp）。
+if [ -f "$SRC/pylibs/$ABI/libpybundle_fixed.so" ]; then
+  mkdir -p "$BUILD/android-build/assets"
+  for lib in libpythonbin.so libpython3.14.so libsqlite3.so libffi.so libcrypto.so libssl.so; do
+    cp "$SRC/pylibs/$ABI/$lib" "$BUILD/android-build/assets/$lib" 2>/dev/null || true
+  done
+  cp "$SRC/pylibs/$ABI/libpybundle_fixed.so" "$BUILD/android-build/assets/libpybundle.so" 2>/dev/null || true
+fi
 # wrapper 默认源经代理 TLS 失败 → 腾讯镜像
 sed -i 's|distributionUrl=.*|distributionUrl=https\\://mirrors.cloud.tencent.com/gradle/gradle-9.5.1-bin.zip|' \
   "$BUILD/android-build/gradle/wrapper/gradle-wrapper.properties" 2>/dev/null || true

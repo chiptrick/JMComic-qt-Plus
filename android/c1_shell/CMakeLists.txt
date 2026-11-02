@@ -16,6 +16,7 @@ qt_add_executable(c1shell
     reader.cpp
     settings_page.cpp
     python_bridge.cpp
+    pyruntime.cpp
 )
 
 # --- C1：sr_qnn 直链 ---
@@ -30,22 +31,53 @@ set(ORT_LIB  "${SRQ_LIBS_DIR}/libonnxruntime.so")
 # 表面上比 13/0/0 还干净）——C1 直链验证全靠"链上了"，静默跳过等于把实验做废。
 option(SRQ_REQUIRED "缺少 sr_qnn/onnxruntime 库时直接报错（C1 直链验证必须为 ON）" ON)
 
+set(C1_EXTRA_LIBS "")
 if(EXISTS "${SRQ_LIB}" AND EXISTS "${ORT_LIB}")
     add_library(sr_qnn SHARED IMPORTED)
     set_target_properties(sr_qnn PROPERTIES IMPORTED_LOCATION "${SRQ_LIB}")
     add_library(onnxruntime SHARED IMPORTED)
     set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${ORT_LIB}")
     target_link_libraries(c1shell PRIVATE sr_qnn onnxruntime)
-    # 让 Qt 的 CMake 部署把这两个非 Qt 依赖也打进 APK（部署器会跟踪 IMPORTED 依赖，
-    # 但 EXTRA_LIBS 是显式兜底，避免版本差异漏包）
-    set_target_properties(c1shell PROPERTIES
-        QT_ANDROID_EXTRA_LIBS "${SRQ_LIB};${ORT_LIB}")
+    list(APPEND C1_EXTRA_LIBS "${SRQ_LIB}" "${ORT_LIB}")
     message(STATUS "C1: linking ${SRQ_LIB}")
 elseif(SRQ_REQUIRED)
     message(FATAL_ERROR "C1: 缺 ${SRQ_LIBS_DIR} 下的 libsr_qnn.so / libonnxruntime.so。"
                         "直链验证必须真有库；如只想要 v1 骨架请显式 -DSRQ_REQUIRED=OFF。")
 else()
     message(WARNING "C1: sr_qnn/onnxruntime 库不在 ${SRQ_LIBS_DIR}，本次构建不含直链验证")
+endif()
+
+# --- C1-W6：Python 运行时（可选；缺了就是 W6 未完成，不会静默假装绿） ---
+# 由 build_wsl.sh 从现有 p4a dist 里拷进来：libpythonbin.so + libpython3.14.so +
+# sqlite/ffi/ssl/crypto + libpybundle.so(tar.gz 容器)。缺任何一个都不打包。
+set(PY_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/pylibs/${ANDROID_ABI}"
+    CACHE PATH "Python 运行时库目录（由 build_wsl.sh 填充）")
+set(PY_RUNTIME_LIBS
+    "${PY_RUNTIME_DIR}/libpythonbin.so"
+    "${PY_RUNTIME_DIR}/libpython3.14.so"
+    "${PY_RUNTIME_DIR}/libsqlite3.so"
+    "${PY_RUNTIME_DIR}/libffi.so"
+    "${PY_RUNTIME_DIR}/libcrypto.so"
+    "${PY_RUNTIME_DIR}/libssl.so")
+set(PY_RUNTIME_OK ON)
+foreach(lib IN LISTS PY_RUNTIME_LIBS)
+    if(NOT EXISTS "${lib}")
+        set(PY_RUNTIME_OK OFF)
+        message(STATUS "C1-W6: Python runtime lib missing: ${lib}")
+    endif()
+endforeach()
+if(PY_RUNTIME_OK AND EXISTS "${PY_RUNTIME_DIR}/libpybundle_fixed.so")
+    # Python 运行时统一走 assets/（build_wsl.sh 塞进去），运行时复制到私有目录再启动；
+    # 不进 QT_ANDROID_EXTRA_LIBS：extractNativeLibs=false 时 .so 不落盘、没法 exec。
+    target_compile_definitions(c1shell PRIVATE C1_HAVE_PY_RUNTIME=1)
+    message(STATUS "C1-W6: Python runtime staged in ${PY_RUNTIME_DIR}")
+else()
+    message(WARNING "C1-W6: Python runtime incomplete; APK will not contain Python subprocess runtime")
+endif()
+
+if(C1_EXTRA_LIBS)
+    set_target_properties(c1shell PROPERTIES
+        QT_ANDROID_EXTRA_LIBS "${C1_EXTRA_LIBS}")
 endif()
 
 set_target_properties(c1shell PROPERTIES

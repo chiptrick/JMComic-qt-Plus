@@ -900,6 +900,24 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 自检链路：`settings selftest OK` → `selftest done pages=3 twoPage=1 rtl=1 brightness=0.75`。
 桥协议在宿主端逐行验证（ping/echo 均返回 ok=true）。
 
+**W6 Android 端补齐（2026-11-02 晚）**：C1 APK 已带上可运行的 Python 运行时。
+
+- **来源**：复用现有 p4a 产物（`~/jmcomic-build/keep-x86_64/dists/JMComic/libs/x86_64/`）
+  的 `libpythonbin.so` + `libpython3.14.so` + `sqlite/ffi/ssl/crypto` + `libpybundle.so`；
+  `build_wsl.sh` 会自动找 `keep-*` 里的 p4a dist 拷进 `pylibs/<abi>/`，**没有就明确告警**。
+- **关键坑**：p4a 的 `libpybundle.so` 里目录 mode=644（无 x 位），应用用户用 tar 解包会
+  `can't mkdir: Permission denied`。新增 `make_pybundle.py` 重打包：目录 755、.so 755、
+  其它 644 —— 这一步不改，解包永远失败。
+- **打包位置**：这些库不进 `QT_ANDROID_EXTRA_LIBS`（`extractNativeLibs=false` 时 `.so`
+  不落盘、没法 exec），而是统一进 **assets/**，运行时由 `pyruntime.cpp` 复制到
+  `AppLocalDataLocation/pybin/` 并 `chmod 755`；bundle 解到 `pybundle/_python_bundle/`，
+  `PYTHONPATH` 指向 `stdlib.zip + modules + site-packages`。
+- **实测（x86_64 / MuMu 12 / Android 15）**：`python_selftest` 标记触发后，
+  `libpythonbin.so` 真的从 APK assets 解出来并跑起 JSON 桥：
+  `started .../pybin/libpythonbin.so /data/local/tmp/bridge.py` →
+  `req id=1 method=ping` → `bridge response id=1 ok=true`。
+  APK 176.1MB（含 96MB Python bundle），16KB 对齐 13 / 未对齐 0，直链仍生效。
+
 W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放），并配 bench 对照口径。
 
 ## 0B. C1 决策简报（2026-11-02，待用户拍板）
