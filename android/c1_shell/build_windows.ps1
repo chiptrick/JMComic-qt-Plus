@@ -93,15 +93,79 @@ Step "qt-cmake configure"
     "-DC1_TLS_PLUGIN=$TlsPlugin"
 if ($LASTEXITCODE -ne 0) { Fail "configure failed (exit $LASTEXITCODE)" }
 
+# Wrapper download can hang: pass 1 uses the services.gradle.org URL and pass 2 patches it
+# to the Tencent mirror, and the two URLs map to DIFFERENT hash dirs, so pass 1 would
+# re-download ~150MB. On a restricted network that download sits at 0 bytes for 30+ min
+# (observed: .part stuck at 0). Seed the already-installed gradle into both hash dirs so
+# the wrapper hits the local cache instead of downloading.
+function Seed-GradleDist {
+    $base = Join-Path $env:USERPROFILE '.gradle\wrapper\dists\gradle-9.5.1-bin'
+    if (-not (Test-Path $base)) { return }
+    $installed = Get-ChildItem $base -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName 'gradle-9.5.1\bin\gradle.bat') } |
+        Select-Object -First 1
+    if (-not $installed) { return }
+    # Two fixed hash dirs (gradle uses base36(md5(url)) as the dir name)
+    foreach ($h in @('bvvv0hnjcinfezlom7fy9dbyi', 'iq79hdu3mqx29lgffhp8bfmx')) {
+        $dst = Join-Path $base $h
+        $marker = Join-Path $dst 'gradle-9.5.1\bin\gradle.bat'
+        if (Test-Path $marker) { continue }
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        Copy-Item -Recurse -Force (Join-Path $installed.FullName 'gradle-9.5.1') $dst
+        New-Item -ItemType File -Force -Path (Join-Path $dst 'gradle-9.5.1-bin.zip.ok') | Out-Null
+        Step "gradle dist seeded -> $h"    }
+}
+
+Seed-GradleDist
+
 # First pass: generates gradle config. It may fail because Qt defaults compileSdk to 34
 # while androidx requires >= 36 - that is expected, we patch and rebuild below.
 # NOTE: build output goes to files, never to a pipe. The Gradle daemon inherits the
 # child's stdout handle, so piping the build into e.g. `| Select-Object` makes the outer
 # pipeline wait forever even after the APK is produced.
+# cmake --build on Windows can hang after Gradle succeeds: the daemon (java) inherits
+# the stdout handle of androiddeployqt/gradlew, and the direct child exits while the
+# daemon keeps the handle alive - `& cmake --build` then never returns (observed 30+ min
+# with BUILD SUCCESSFUL already in the log). Workaround: launch cmake detached, poll the
+# log for the success marker, then kill the wrapper; the APK is already on disk by then.
+function Invoke-BuildPass {
+    param([string]$LogFile, [int]$TimeoutSec = 1200)
+    # 用 cmd 重定向写日志 + ProcessStartInfo 手工拷环境：
+    #   * Start-Process 在 PATH/Path 大小写重复时会抛 "已添加项"(PS 5.1 老毛病)；
+    #   * 直接 & cmake 会因 gradle daemon 继承句柄而永远不返回(见下)。
+    # 轮询日志里的成功标记，见到就 taskkill /T 清掉包装进程树（APK 已落盘）。
+    $cmake = (Get-Command cmake).Source
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $env:ComSpec
+    $psi.Arguments = "/c cd /d `"$Build`" && `"$cmake`" --build . > `"$LogFile`" 2>&1"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    # 不拷贝环境：UseShellExecute=false 时子进程原样继承当前环境，
+    # 也就没有 Start-Process 的 PATH/Path 大小写重复问题。
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $marker = 'Android package built successfully'
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+        Start-Sleep -Seconds 5
+        if ((Test-Path $LogFile) -and (Get-Content $LogFile -Raw -ErrorAction SilentlyContinue) -match $marker) {
+            Start-Sleep -Seconds 3   # let androiddeployqt finish writing the APK
+            if (-not $p.HasExited) {
+                & cmd /c "taskkill /T /F /PID $($p.Id)" *> $null
+            }
+            Step "build pass done (marker seen, wrapper killed)"
+            return $true
+        }
+    }
+    if (-not $p.HasExited) {
+        & cmd /c "taskkill /T /F /PID $($p.Id)" *> $null
+    }
+    return $false
+}
+
 Step "build pass 1 (generate gradle config)"
 $Log1 = Join-Path $Build 'build-pass1.log'
-& cmake --build $Build *> $Log1
-if (Test-Path $Log1) { Get-Content $Log1 -Tail 15 | Out-Host }
+Invoke-BuildPass -LogFile $Log1 | Out-Null
+if (Test-Path $Log1) { Get-Content $Log1 -Tail 8 | Out-Host }
 
 $GradleProps = Join-Path $Build 'android-build\gradle.properties'
 if (Test-Path $GradleProps) {
@@ -126,8 +190,8 @@ if (Test-Path $WrapperProps) {
 
 Step "build pass 2 (compile + package)"
 $Log2 = Join-Path $Build 'build-pass2.log'
-& cmake --build $Build *> $Log2
-if (Test-Path $Log2) { Get-Content $Log2 -Tail 20 | Out-Host }
+Invoke-BuildPass -LogFile $Log2 | Out-Null
+if (Test-Path $Log2) { Get-Content $Log2 -Tail 8 | Out-Host }
 if ($LASTEXITCODE -ne 0) { Fail "build failed (exit $LASTEXITCODE)" }
 
 # Gradle daemon keeps the caller's stdout handle open: a caller that pipes this script

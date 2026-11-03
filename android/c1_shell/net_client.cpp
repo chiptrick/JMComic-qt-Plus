@@ -236,8 +236,11 @@ void NetClient::OnReplyFinished()
     r.httpStatus = httpStatus;
     r.truncated = truncated_;
 
-    // 被 maxBytes 截断时 abort 会带来 OperationCanceledError，但我们确实拿到了响应头与部分体
-    if (!abortedForLimit_ && reply->error() != QNetworkReply::NoError && httpStatus < 100) {
+    // 被 maxBytes 截断时 abort 会带来 OperationCanceledError，但我们确实拿到了响应头与部分体。
+    // 超时也一样会 abort，但**状态不同**：超时后到达的 finished 即使带着 200 头，
+    // body 也可能是空的（实测模拟器上响应头先到、体被 7.5s 预算掐掉）——
+    // 若不拦住，会把 "net OK 200 0B" 当成功交给上层，解密必然失败且难查。
+    if ((timedOut_ || (!abortedForLimit_ && reply->error() != QNetworkReply::NoError && httpStatus < 100))) {
         const QString code = ClassifyReply(reply->error(), timedOut_);
         r.errorCode = code;
         r.errorText = reply->errorString();

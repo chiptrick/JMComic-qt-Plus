@@ -31,6 +31,9 @@ public:
 
     // 返回实际加载的页数；0 表示该目录没有可用图片
     int LoadDir(const QString &dir);
+    // 在线阅读：图片已由 BrowsePage 下载/还原到本地，这里只负责显示。
+    // 与 LoadDir 的区别是"不按目录扫、不排序"，顺序就是传入顺序（页序必须稳定）。
+    int LoadFiles(const QStringList &files);
     // 冒烟/日常入口：默认目录有图就直接用，否则弹目录选择框
     void LoadDefaultOrPick();
     void OpenPicker();

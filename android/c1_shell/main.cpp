@@ -29,6 +29,8 @@
 #include "reader.h"
 #include "settings_page.h"
 #include "net_client.h"
+#include "jm_api.h"
+#include "browse_page.h"
 #include "frame_probe.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "C1Shell", __VA_ARGS__)
@@ -76,7 +78,7 @@ QString ProbeSrq()
 class ShellWindow : public QMainWindow
 {
 public:
-    enum Page { Home = 0, Reader = 1, Settings = 2 };
+    enum Page { Home = 0, Reader = 1, Settings = 2, Browse = 3 };
 
     ShellWindow()
     {
@@ -91,10 +93,12 @@ public:
         back_ = new QPushButton(QStringLiteral("Back"), central);
         homeBtn_ = new QPushButton(QStringLiteral("Home"), central);
         readerBtn_ = new QPushButton(QStringLiteral("Reader"), central);
+        browseBtn_ = new QPushButton(QStringLiteral("Browse"), central);
         settingsBtn_ = new QPushButton(QStringLiteral("Settings"), central);
         nav->addWidget(back_);
         nav->addWidget(homeBtn_);
         nav->addWidget(readerBtn_);
+        nav->addWidget(browseBtn_);
         nav->addWidget(settingsBtn_);
         root->addLayout(nav);
 
@@ -110,6 +114,9 @@ public:
         auto *homeLay = new QVBoxLayout(home);
         auto *openReader = new QPushButton(QStringLiteral("Open local reader"), home);
         homeLay->addWidget(openReader);
+        // C2/C3：在线搜索/详情/章节（不再经过 Python 子进程）
+        auto *openBrowse = new QPushButton(QStringLiteral("Browse online (JM API)"), home);
+        homeLay->addWidget(openBrowse);
         // P4-5：真机上一次真实网络请求的人工入口（自检钩子之外的第二条取证路径）
         auto *netBtn = new QPushButton(QStringLiteral("Net test (bridge)"), home);
         homeLay->addWidget(netBtn);
@@ -123,6 +130,12 @@ public:
         // ---- Settings ----
         settings_ = new SettingsPage(central);
         stack_->addWidget(settings_);
+
+        // ---- Browse（在线） ----
+        // net_ 必须先建：BrowsePage 的构造就把它交给 JmApi 用（JmApi 不持有它）。
+        net_ = new NetClient(central);
+        browse_ = new BrowsePage(net_, central);
+        stack_->addWidget(browse_);
 
         // ---- Reader 工具条 ----
         auto *bar = new QHBoxLayout();
@@ -140,13 +153,30 @@ public:
         status_->setAlignment(Qt::AlignCenter);
         root->addWidget(status_);
 
-        net_ = new NetClient(central);
+        // net_ 已在 Browse 段创建；这里只挂全局状态显示，不能重建（重建会让
+        // BrowsePage/JmApi 握着旧对象，请求发出去后永远等不到 Finished）。
         connect(net_, &NetClient::Finished, this, [this](const NetResult &r) {
             const QString line = r.Summary();
             status_->setText(line);
             LOGI("%s", qPrintable(line));
             if (r.ok)
                 SetTitle(QStringLiteral("net %1").arg(r.httpStatus));
+        });
+
+        connect(openBrowse, &QPushButton::clicked, this, [this] { Push(Page::Browse); });
+        connect(browseBtn_, &QPushButton::clicked, this, [this] { Push(Page::Browse); });
+        connect(browse_, &BrowsePage::StatusMessage, this, [this](const QString &text) {
+            status_->setText(text);
+        });
+        connect(browse_, &BrowsePage::OpenReaderRequested, this,
+                [this](const QStringList &files, const QString &title) {
+                    LOGI("open online reader: %s (%d pages)", qPrintable(title), int(files.size()));
+                    reader_->LoadFiles(files);
+                    Push(Page::Reader);
+                });
+        connect(browse_, &BrowsePage::SelfTestDone, this, [this](const QString &summary) {
+            LOGI("browse selftest done: %s", qPrintable(summary));
+            SetTitle(QStringLiteral("browse %1").arg(summary.left(40)));
         });
 
         connect(openReader, &QPushButton::clicked, this, [this] {
@@ -224,6 +254,24 @@ public:
             QTimer::singleShot(3200, this, [this] { settings_->RunSelfTest(); });
         }
         MaybeRunNetSelfTest();
+        MaybeRunBrowseSelfTest();
+    }
+
+    // C2/C3 自检：run-as 建 `browse_selftest` 标记 -> 搜索 -> 详情 -> 章节 -> 下前 N 页。
+    // 关键字与页数可用 JM_C1_BROWSE_Q / JM_C1_BROWSE_PAGES 覆盖（默认 test / 3）。
+    void MaybeRunBrowseSelfTest()
+    {
+        const QString marker = QStandardPaths::writableLocation(
+                                   QStandardPaths::AppLocalDataLocation)
+                               + QStringLiteral("/browse_selftest");
+        if (!QFile::exists(marker))
+            return;
+        QFile::remove(marker);
+        const QString query = qEnvironmentVariable("JM_C1_BROWSE_Q", QStringLiteral("test"));
+        const int pages = qEnvironmentVariableIntValue("JM_C1_BROWSE_PAGES");
+        LOGI("browse selftest marker found: q=%s pages=%d", qPrintable(query), pages);
+        Push(Page::Browse);
+        browse_->RunSelfTest(query, pages > 0 ? pages : 3);
     }
 
     // 一次真实请求，URL 可由 JM_C1_NET_URL 覆盖（默认取一个稳定的小页面）。
@@ -296,6 +344,9 @@ private:
         case Page::Settings:
             SetTitle(QStringLiteral("Settings"));
             break;
+        case Page::Browse:
+            SetTitle(QStringLiteral("Browse"));
+            break;
         default:
             SetTitle(QStringLiteral("Home"));
         }
@@ -323,12 +374,14 @@ private:
     QStackedWidget *stack_ = nullptr;
     ReaderView *reader_ = nullptr;
     SettingsPage *settings_ = nullptr;
+    BrowsePage *browse_ = nullptr;
     NetClient *net_ = nullptr;
     QLabel *title_ = nullptr;
     QLabel *status_ = nullptr;
     QPushButton *back_ = nullptr;
     QPushButton *homeBtn_ = nullptr;
     QPushButton *readerBtn_ = nullptr;
+    QPushButton *browseBtn_ = nullptr;
     QPushButton *settingsBtn_ = nullptr;
     QVector<int> history_;
 };

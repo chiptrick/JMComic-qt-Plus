@@ -918,6 +918,47 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
   `req id=1 method=ping` → `bridge response id=1 ok=true`。
   APK 176.1MB（含 96MB Python bundle），16KB 对齐 13 / 未对齐 0，直链仍生效。
 
+**阶段 C 主体完成（2026-11-03）：C2 业务切片 + C3 网络收编（C++，无 Python）**
+
+- **C3 加解密**：`jm_crypto.{h,cpp}` 纯 C++ 实现禁漫移动端全链路——token=md5(ts+secret)、
+  base64→AES-256-ECB→去 PKCS#7 的响应解密、图片切割数（268850/421926 三档）与横带重排。
+  AES 解密为内置实现（~200 行，GF(2^8) 移位乘法），**18 条向量全部由 openssl CLI 独立生成**
+  （不是拿被测实现自证），host_test_jm_crypto 全过。
+- **C3 API 客户端**：`jm_api.{h,cpp}`：/setting、/search、/album、/chapter、
+  /chapter_view_template（独立 secret）、/login、/favorite 全套；域名轮换（只对网络层失败换，
+  4xx/5xx 不换）、tokenparam 版本自适应（jm3_version）、AVS cookie；每次域名轮换后重取 ts
+  （解密必须用对应那次 ts）。`host_test_jm_api` 在宿主端直接打真实接口验证端到端。
+- **C2 业务切片**：`browse_page.{h,cpp}` 搜索→详情→章节→在线阅读整条链路；
+  `reader.h` 新增 `LoadFiles()`（在线页序固定加载）。图片处理三个坑全部落地：
+  webp 解码（见下）、按章节 id+文件名算切割数、单张失败跳过不终止整章。
+- **WebP 解码器内嵌**：Qt 6.12 的 android/mingw 包都不带 qwebp 插件（host 实测
+  supportedImageFormats 无 webp），且 JM 的 CDN 对 .jpg 后缀回 502、只发 webp——
+  内嵌 qtimageformats 6.12.0 的 libwebp 解码端（`3rdparty/libwebp`，BSD-3，仅 dec/dsp/utils，
+  去 encoder dsp 文件；cpu.h 去掉 qglobal.h 依赖）。`jm_webp.{h,cpp}` 提供 RGBA→QImage，
+  host_test_jm_webp 用 Pillow 无损向量逐像素比对全过。
+- **NetClient 竞态修复**：超时 abort 后到达的 finished 即使带 200 头也判失败
+  （实测"头到了体没到"会被当成 `net OK 200 0B` 交给上层，解密必挂且难查）；
+  API/图片超时放宽到 40s 总预算（模拟器/弱网 7.5s/次会把慢请求掐成假超时）。
+- **图片 CDN 轮换**：实测 cdn-msp.jmapiproxy1.cc 在部分网络整段不可达（jmapiproxy2 正常），
+  下载失败按 CDN 表轮换并重建 URL（每章一次）。
+- **构建脚本两处加固**（build_windows.ps1）：① gradle wrapper 预铺——pass1 用
+  services.gradle.org 的 URL 而 pass2 才改腾讯镜像，两个 URL 对应不同 hash 目录，
+  网络受限时 pass1 会 0 字节挂 30+ 分钟，现把已装 gradle 铺到两个 hash 目录；
+  ② Invoke-BuildPass 轮询——`& cmake --build` 会因 gradle daemon 继承句柄永远不返回
+  （日志已 BUILD SUCCESSFUL 但进程不退），改为 cmd 重定向写日志 + 轮询成功标记后清进程树。
+
+**设备端端到端实测（Pixel_9a AVD / Android 17 / 16KB 页 / x86_64）**：
+
+```
+setting ok, jm3_version=2.1.12 -> search 48 hits -> album 1487787 -> chapter pages=296
+-> scramble=220980 -> image 1..3/296 num=6/8/6 -> saved 001..003.png
+-> online ready: 3 pages -> C1Reader: loaded 3 online pages
+```
+
+还原后的页面经人工核验为完整连贯画面（无横带错位）。APK 87.2MB（无 Python 运行时），
+16KB 对齐 23 / 未对齐 0，`libsr_qnn.so` 直链保持生效。宿主端四套自检
+（crypto 18 向量 / netclient / live-api / webp 逐像素）全绿。
+
 W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放），并配 bench 对照口径。
 
 ### 0E-1. C1 收口推进（2026-11-02 第二轮，按 `docs/c1_execution_plan.md`）

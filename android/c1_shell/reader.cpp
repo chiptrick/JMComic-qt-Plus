@@ -134,6 +134,30 @@ int ReaderView::LoadDir(const QString &dir)
     return files_.size();
 }
 
+int ReaderView::LoadFiles(const QStringList &files)
+{
+    files_.clear();
+    for (const QString &path : files) {
+        if (!path.isEmpty() && QFileInfo::exists(path))
+            files_ << path;
+    }
+    current_ = files_.isEmpty() ? -1 : 0;
+    zoom_ = 1.0;
+    base_ = QImage();
+    second_ = QImage();
+    if (files_.isEmpty()) {
+        imageLabel_->setText(QStringLiteral("No pages"));
+        imageLabel_->setPixmap(QPixmap());
+        emit StatusMessage(QStringLiteral("reader: online list empty"));
+        emit PageChanged(0, 0, QString());
+        return 0;
+    }
+    LOGI("loaded %d online pages", files_.size());
+    emit StatusMessage(QStringLiteral("reader: %1 online pages").arg(files_.size()));
+    ShowPage(current_);
+    return files_.size();
+}
+
 void ReaderView::LoadDefaultOrPick()
 {
     const QString def = DefaultReaderDir();

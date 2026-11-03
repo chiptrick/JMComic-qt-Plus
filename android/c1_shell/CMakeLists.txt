@@ -5,7 +5,7 @@
 # 网络：C1 不再起 Python 子进程（原 W6/P4 方案），改由 net_client.cpp 在进程内发请求。
 # TLS 交给 Qt 的 OpenSSL 后端，所以要把 libssl/libcrypto 一起打进 APK（见 OPENSSL_DIR）。
 cmake_minimum_required(VERSION 3.22.1)
-project(C1Shell VERSION 0.2 LANGUAGES CXX)
+project(C1Shell VERSION 0.3 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,8 +19,24 @@ qt_add_executable(c1shell
     reader.cpp
     settings_page.cpp
     net_client.cpp
+    jm_crypto.cpp
+    jm_webp.cpp
+    jm_api.cpp
+    browse_page.cpp
     frame_probe.cpp
 )
+
+# --- WebP 解码（Qt 6.12 不带 qwebp 插件，而 JM 图片全是 webp） ---
+file(GLOB JM_WEBP_SOURCES
+    3rdparty/libwebp/src/dec/*.c
+    3rdparty/libwebp/src/dsp/*.c
+    3rdparty/libwebp/src/utils/*.c
+)
+add_library(jmwebp STATIC ${JM_WEBP_SOURCES})
+target_include_directories(jmwebp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/libwebp
+    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/libwebp/src)
+target_compile_options(jmwebp PRIVATE -w)   # 3rdparty 代码关警告，别淹没自家告警
+target_link_libraries(c1shell PRIVATE jmwebp)
 
 # CA 证书编进二进制（qrc）。APK 的 assets 也留一份，但 Android 上 assets 路径引擎
 # 并非在所有生命周期阶段都可用——资源是确定性最高的那条路。
@@ -117,8 +133,8 @@ set_target_properties(c1shell PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.jmcomic.c1shell"
     QT_ANDROID_MIN_SDK_VERSION 34
     QT_ANDROID_TARGET_SDK_VERSION 34
-    QT_ANDROID_VERSION_CODE 2
-    QT_ANDROID_VERSION_NAME "0.2-c1"
+    QT_ANDROID_VERSION_CODE 3
+    QT_ANDROID_VERSION_NAME "0.3-c1"
 )
 
 target_link_libraries(c1shell PRIVATE
