@@ -90,6 +90,10 @@ EOF
   exit 3
 fi
 
+# 模拟器不具备性能可比性（软件渲染 + x86 翻译），性能项只记录数值不判 PASS/FAIL。
+IS_EMU=$("$ADB" -s "$DEV" shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r')
+[ "$IS_EMU" = "1" ] && IS_EMU=1 || IS_EMU=0
+
 MODEL=$("$ADB" -s "$DEV" shell getprop ro.product.model | tr -d '\r')
 SDK=$("$ADB" -s "$DEV" shell getprop ro.build.version.sdk | tr -d '\r')
 REL=$("$ADB" -s "$DEV" shell getprop ro.build.version.release | tr -d '\r')
@@ -207,20 +211,29 @@ row "内存 PSS" "${PSS_MB}MB（${PSS:-NA}KB）" "≤450MB" "$([ "${PSS_MB:-0}" 
 # ---- 5. 帧耗时（应用内 frameSwapped 探针） ----
 # gfxinfo 只统计 HWUI 帧（Qt 自绘实测只报 1 帧）；SurfaceFlinger --latency 在本机型
 # 只回刷新周期不给帧行。唯一可信口径是应用自己打点：fps_log 标记启用 FrameProbe。
-# 同时放 selftest：它会把应用推到阅读页并自动翻 6 页，
-# 否则启动后停在首页，滑动不产生 page turn（实测踩过，p95 会一直是 NA）。
+# 同时放 selftest：它会把应用推到阅读页（否则启动后停在首页，滑动不产生翻页）。
+# 自检结束时会把双页/RTL/亮度复位到初始状态——否则停在"双页+第2页"，
+# 3 页文档两次滑动就到边界，后续滑动全被边界吞掉（p95 曾恒为 NA）。
 "$ADB" -s "$DEV" shell "run-as $PKG sh -c 'touch files/fps_log files/selftest'" >/dev/null 2>&1
 "$ADB" -s "$DEV" shell am force-stop "$PKG" >/dev/null 2>&1
 sleep 1
 start_app
 sleep 4                      # 等窗口稳定 + 探针挂上（首帧间隔不计）
 "$ADB" -s "$DEV" logcat -c >/dev/null 2>&1
-# 用滑动而不是方向键：真机上 KEYCODE_DPAD_* 不进阅读器（焦点不在 viewport），
-# 实测 keyevent 22 不产生任何 page turn；滑动会走手势路径（日志 `swipe dx=... -> next`）。
+# 用滑动而不是方向键：KEYCODE_DPAD_* 在阅读器没有焦点时不会翻页（见 §5 的焦点修复），
+# 滑动走手势路径（日志 `swipe dx=... -> next`）。
+# 坐标必须按实际分辨率算：曾经写死 x=1200，而屏幕宽只有 1080，
+# 越界的手势会被直接丢弃 → 一个 page turn 都不产生，p95 永远是 NA。
+SW=$("$ADB" -s "$DEV" shell wm size 2>/dev/null | tr -d '\r' | sed -n 's/.*: *\([0-9]*\)x\([0-9]*\).*/\1/p')
+SH=$("$ADB" -s "$DEV" shell wm size 2>/dev/null | tr -d '\r' | sed -n 's/.*: *\([0-9]*\)x\([0-9]*\).*/\2/p')
+SW=${SW:-1080}; SH=${SH:-2340}
+SY=$((SH * 62 / 100))
+SX_A=$((SW * 82 / 100)); SX_B=$((SW * 18 / 100))
+say "滑动坐标：x ${SX_A}<->${SX_B}，y ${SY}（屏幕 ${SW}x${SH}）"
 for i in $(seq 1 10); do
-  "$ADB" -s "$DEV" shell input swipe 1200 1600 300 1600 120 >/dev/null 2>&1
+  "$ADB" -s "$DEV" shell input swipe "$SX_A" "$SY" "$SX_B" "$SY" 120 >/dev/null 2>&1
   sleep 0.3
-  "$ADB" -s "$DEV" shell input swipe 300 1600 1200 1600 120 >/dev/null 2>&1
+  "$ADB" -s "$DEV" shell input swipe "$SX_B" "$SY" "$SX_A" "$SY" 120 >/dev/null 2>&1
   sleep 0.3
 done
 sleep 4                      # 等 3s 汇总窗口落盘
@@ -239,10 +252,17 @@ EOF
 FPS95=$(printf '%s' "$FPSLINE" | sed -n 's/.*fps95=\([0-9]*\).*/\1/p')
 P95MS=$(printf '%s' "$FPSLINE" | sed -n 's/.*p95=\([0-9.]*\)ms.*/\1/p')
 if [ -n "${P95MS:-}" ]; then
-  # 判据换算：p95 帧间隔 ≤ 1000/110 ≈ 9.09ms 即等价达标
-  OK=$(awk -v ms="$P95MS" 'BEGIN{ print (ms > 0 && ms <= 9.09) ? "PASS" : "FAIL" }')
-  row "翻页耗时 p95" "${P95MS}ms（≈$(awk -v ms="$P95MS" 'BEGIN{printf "%.0f", 1000/ms}')fps 等价，n=$(printf '%s' "$FPSLINE" | sed -n 's/.*n=\([0-9]*\).*/\1/p')）" \
-      "≤9.09ms（≈110fps）" "$OK"
+  N=$(printf '%s' "$FPSLINE" | sed -n 's/.*n=\([0-9]*\).*/\1/p')
+  FPS_EQ=$(awk -v ms="$P95MS" 'BEGIN{printf "%.0f", 1000/ms}')
+  if [ "$IS_EMU" = "1" ]; then
+    # 模拟器是软件渲染 + x86 翻译，绝对值没有验收意义；真机基线见 W7 §4。
+    row "翻页耗时 p95" "${P95MS}ms（≈${FPS_EQ}fps 等价，n=$N）模拟器不判定" \
+        "≤9.09ms（真机）" "SKIP"
+  else
+    OK=$(awk -v ms="$P95MS" 'BEGIN{ print (ms > 0 && ms <= 9.09) ? "PASS" : "FAIL" }')
+    row "翻页耗时 p95" "${P95MS}ms（≈${FPS_EQ}fps 等价，n=$N）" \
+        "≤9.09ms（≈110fps）" "$OK"
+  fi
 else
   row "翻页耗时 p95" "NA（未采到 C1Fps 行）" "≤9.09ms" "UNKNOWN"
 fi

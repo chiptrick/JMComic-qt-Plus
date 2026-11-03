@@ -188,6 +188,24 @@ class Device:
         self.sh(f"input tap {x} {y}")
         time.sleep(wait)
 
+    def screen(self):
+        """(宽, 高)。滑动坐标按它算，换分辨率不用改脚本。"""
+        if not hasattr(self, "_screen"):
+            _, out, _ = self.sh("wm size")
+            m = re.search(r"(\d+)x(\d+)", out)
+            self._screen = (int(m.group(1)), int(m.group(2))) if m else (1080, 2340)
+        return self._screen
+
+    def swipe_page(self, forward=True, ms=120, wait=0.5):
+        """整页横向滑动。forward=True 表示"向右滑"（Rel.x>0）。"""
+        w, h = self.screen()
+        y = h * 62 // 100
+        xa, xb = w * 82 // 100, w * 18 // 100
+        if forward:
+            self.swipe(xa, y, xb, y, ms=ms, wait=wait)      # 左滑
+        else:
+            self.swipe(xb, y, xa, y, ms=ms, wait=wait)      # 右滑
+
     def swipe(self, x1, y1, x2, y2, ms=120, wait=0.5):
         self.sh(f"input swipe {x1} {y1} {x2} {y2} {ms}")
         time.sleep(wait)
@@ -395,14 +413,14 @@ class Checks:
         dev.key(22); steps.append(("LTR 右键", dev.title()))
         dev.key(22); steps.append(("LTR 右键", dev.title()))
         dev.key(21); steps.append(("LTR 左键", dev.title()))
-        dev.swipe(200, 1200, 900, 1200); steps.append(("LTR 右滑", dev.title()))
-        dev.swipe(900, 1200, 200, 1200); steps.append(("LTR 左滑", dev.title()))
+        dev.swipe_page(False); steps.append(("LTR 右滑", dev.title()))
+        dev.swipe_page(True); steps.append(("LTR 左滑", dev.title()))
 
         dev.tap("RTL"); steps.append(("切 RTL", dev.title()))
         dev.key(22); steps.append(("RTL 右键", dev.title()))
         dev.key(21); steps.append(("RTL 左键", dev.title()))
-        dev.swipe(200, 1200, 900, 1200); steps.append(("RTL 右滑", dev.title()))
-        dev.swipe(900, 1200, 200, 1200); steps.append(("RTL 左滑", dev.title()))
+        dev.swipe_page(False); steps.append(("RTL 右滑", dev.title()))
+        dev.swipe_page(True); steps.append(("RTL 左滑", dev.title()))
         dev.tap("RTL")  # 复位 LTR
         shot = self.shot("F4_rtl")
 

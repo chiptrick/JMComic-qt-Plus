@@ -418,8 +418,18 @@ void ReaderView::RunSelfTest()
     QTimer::singleShot(2100, this, [this] { ToggleDirection(); });
     QTimer::singleShot(2400, this, [this] { CycleBrightness(); });
     QTimer::singleShot(2700, this, [this] {
+        // 先按"自检刚跑完的状态"记日志（W7 用它判定双页/方向/亮度都生效）
         LOGI("selftest done pages=%d twoPage=%d rtl=%d brightness=%.2f",
              files_.size(), int(twoPage_), int(direction_ == Direction::RTL), brightness_);
+        // 再复位，避免污染后续测量：自检结束时停在"双页+RTL+第2页"，
+        // 3 页文档在双页模式下两次就到了边界，之后无论怎么滑都不翻页 ——
+        // 帧率采样时段曾因此一个样本都采不到（p95 恒为 NA）。
+        twoPage_ = false;
+        direction_ = Direction::LTR;
+        SetBrightness(1.0);
+        if (!files_.isEmpty())
+            ShowPage(0);
+        LOGI("selftest reset twoPage=0 rtl=0 brightness=1.00");
         emit SelfTestDone();
     });
 }
