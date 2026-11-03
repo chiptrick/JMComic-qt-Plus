@@ -150,30 +150,45 @@ public:
         });
 
         connect(openReader, &QPushButton::clicked, this, [this] {
-            reader_->LoadDefaultOrPick();
             Push(Page::Reader);
+            reader_->LoadDefaultOrPick();
         });
         connect(netBtn, &QPushButton::clicked, this, [this] {
             RunNetProbe();
         });
-        connect(next, &QPushButton::clicked, this, [this] { reader_->NextPage(); });
-        connect(twoPage, &QPushButton::clicked, this, [this] { reader_->ToggleTwoPage(); });
-        connect(dirBtn, &QPushButton::clicked, this, [this] { reader_->ToggleDirection(); });
-        connect(bright, &QPushButton::clicked, this, [this] { reader_->CycleBrightness(); });
+        // 点完工具条要把焦点还给阅读器：否则焦点停在被点的按钮上，
+        // 之后的左右键/加减号全部失效（用蓝牙键盘时会立刻遇到）。
+        // 这是 W7 的 F4 用例抓到的真实缺陷，不是测试问题。
+        auto keepReaderFocus = [this] { reader_->setFocus(Qt::OtherFocusReason); };
+        connect(next, &QPushButton::clicked, this, [this, keepReaderFocus] {
+            reader_->NextPage();
+            keepReaderFocus();
+        });
+        connect(twoPage, &QPushButton::clicked, this, [this, keepReaderFocus] {
+            reader_->ToggleTwoPage();
+            keepReaderFocus();
+        });
+        connect(dirBtn, &QPushButton::clicked, this, [this, keepReaderFocus] {
+            reader_->ToggleDirection();
+            keepReaderFocus();
+        });
+        connect(bright, &QPushButton::clicked, this, [this, keepReaderFocus] {
+            reader_->CycleBrightness();
+            keepReaderFocus();
+        });
 
         connect(homeBtn_, &QPushButton::clicked, this, [this] { Push(Page::Home); });
         connect(readerBtn_, &QPushButton::clicked, this, [this] {
-            reader_->LoadDefaultOrPick();
             Push(Page::Reader);
+            reader_->LoadDefaultOrPick();
         });
         connect(settingsBtn_, &QPushButton::clicked, this, [this] { Push(Page::Settings); });
         connect(back_, &QPushButton::clicked, this, [this] { Pop(); });
 
         connect(reader_, &ReaderView::PageChanged, this, [this](int cur, int total, const QString &path) {
-            if (total > 0)
-                SetTitle(QStringLiteral("Reader %1/%2").arg(cur).arg(total));
-            else
-                SetTitle(QStringLiteral("Reader (no pages)"));
+            // 只在阅读器是当前页时才改标题，否则会把 Home/Settings 的标题覆盖掉
+            if (stack_->currentIndex() == Page::Reader)
+                SetReaderTitle();
             if (!path.isEmpty())
                 LOGI("page %d/%d %s", cur, total, qPrintable(path));
         });
@@ -249,6 +264,10 @@ private:
             history_.append(stack_->currentIndex());
             stack_->setCurrentIndex(index);
         }
+        // 键盘焦点跟着页面走：否则焦点会留在顶栏按钮上（实测是 Home 按钮），
+        // 方向键/加减号全部被按钮链吞掉，阅读器的 keyPressEvent 永远收不到。
+        if (index == Page::Reader)
+            reader_->setFocus(Qt::OtherFocusReason);
         UpdateTitle();
         UpdateNavEnabled();
     }
@@ -269,7 +288,10 @@ private:
     {
         switch (stack_->currentIndex()) {
         case Page::Reader:
-            SetTitle(QStringLiteral("Reader"));
+            // 必须带上页码：Push/Pop 会调用本函数，若这里写死 "Reader"，
+            // 就会把 PageChanged 刚设好的 "Reader 3/12" 顶掉 —— 表现为
+            // "进阅读器看不到第几页，翻一次页才出现"（W7 的 F2 判据抓到的真缺陷）。
+            SetReaderTitle();
             break;
         case Page::Settings:
             SetTitle(QStringLiteral("Settings"));
@@ -282,6 +304,15 @@ private:
     void SetTitle(const QString &text)
     {
         title_->setText(text);
+    }
+
+    // 阅读器标题的唯一来源：总页数与当前页都从 ReaderView 取，不依赖信号时序。
+    void SetReaderTitle()
+    {
+        const int total = reader_ ? reader_->PageCount() : 0;
+        const int cur = reader_ ? reader_->CurrentPage() : 0;
+        SetTitle(total > 0 ? QStringLiteral("Reader %1/%2").arg(cur).arg(total)
+                           : QStringLiteral("Reader (no pages)"));
     }
 
     void UpdateNavEnabled()

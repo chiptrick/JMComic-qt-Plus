@@ -46,6 +46,11 @@ public:
     void CycleBrightness();          // 1.0 -> 0.75 -> 0.5 -> 0.25 -> 1.0
     void SetBrightness(double v);    // 0..1，1=不变暗
 
+    // 标题栏要显示 "Reader n/m"，因此外壳需要能查到当前页与总页数。
+    // 只暴露只读视图，不把 files_/current_ 的所有权外泄。
+    int PageCount() const { return files_.size(); }
+    int CurrentPage() const { return current_ >= 0 ? current_ + 1 : 0; }
+
 signals:
     void PageChanged(int current, int total, const QString &path);
     void StatusMessage(const QString &text);
