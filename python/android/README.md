@@ -1,0 +1,2127 @@
+# JMComic Android 移植说明
+
+> **目录说明（2026-11 重构）**：本文件里的 `android/…` 现在指 `python/android/…`，
+> `src/…` 指 `python/src/…`；脚本内部的相对路径已按新结构验证（根路径仍落在 `python/`）。
+
+把桌面端(Python + PySide6 + sr_vulkan)的 JMComic 移植到 Android 手机：
+**竖屏可用的界面 + 高通 NPU 加速的超分(waifu2x) + 最低 Android 14 (API 34)**。
+
+> 桌面端行为**完全不变**：所有移动端适配都由 `tools/platform_mobile.py`、
+> `tools/mobile_ui.py`、`tools/sr_backend.py` 在 `IsAndroid()` 为真时才生效。
+
+---
+
+## 1. 技术选型
+
+| 关注点 | 方案 | 原因 |
+| --- | --- | --- |
+| Python + Qt 上 Android | 官方 `pyside6-android-deploy`（内部走 buildozer / python-for-android + aarch64 wheel） | 复用现有 700+ 个 Python 文件与全部 Qt Widgets 界面，不用重写 |
+| 竖屏界面 | 运行时适配层（导航抽屉 / 最小尺寸放宽 / 详情页上下堆叠 / 触摸滚动） | 不复制一套 UI，也不影响桌面端 |
+| 超分(waifu2x) | `sr_qnn`：ONNX Runtime **QNN Execution Provider** → Hexagon NPU (HTP) | 微软官方 Android QNN 包(`onnxruntime-android-qnn`)，头文件/库都现成；模型可量化 |
+| 与现有代码接合 | `sr_qnn` 提供与 `sr_vulkan` **同构**的 API，并在 `sys.modules` 里注册成 `sr_vulkan` | `task_waifu2x.py` / `main_view.py` / `tool.py` 等原有调用点一行都不用改 |
+| 存储 | 应用私有目录（内部：配置/数据/日志）+ 应用外部私有目录（下载）+ 应用外部缓存目录（缓存） | Android 14 上**不需要任何存储权限**，也不用处理分区存储；缓存放外部是为了用户能手动清理 |
+| 网络 | 原生 `curl_cffi`（官方 android wheel，解包进 site-packages）；缺失时退回纯 python 垫片 | 保留桌面端的 Cloudflare 绕过能力（TLS 指纹伪装 + HTTP/3 + ECH），同时保证没编原生库也能跑 |
+
+不支持/不需要：Android 14 以下兼容（`minSdk 34`）、系统托盘、无边框窗口、单实例 socket、子进程崩溃探测。
+
+---
+
+## 2. 目录结构
+
+```
+android/
+├── main.py                  # 打包入口(pyside6-android-deploy 要求叫 main.py)
+├── pysidedeploy.spec        # 部署配置(Qt 模块/插件、wheel、local_libs)
+├── build_android.sh         # 一键构建：默认同时构建 arm64-v8a + x86_64 两个 APK
+├── build_arm64.sh           # 单架构构建：arm64-v8a(真机)，实际调 build_android.sh --abi arm64-v8a
+├── build_x86_64.sh          # 单架构构建：x86_64(模拟器)，实际调 build_android.sh --abi x86_64
+├── build_apk_from_windows.ps1   # Windows 一键(PowerShell -> WSL)，默认两种架构
+├── build_arm64.ps1          # Windows 单架构一键：arm64-v8a(经 WSL)
+├── build_x86_64.ps1         # Windows 单架构一键：x86_64(经 WSL)
+├── README.md                # 本文档
+├── app_src/                 # 构建时由 build_android.sh 从 ../src 复制(不入库)
+├── libs/arm64-v8a/          # 原生库产物：libsr_qnn.so / libonnxruntime.so / QNN 库(不入库)
+├── libs/x86_64/             # x86_64(模拟器)原生库产物(不入库)
+├── dist/                    # APK 产物：JMComic-<版本>-<abi>-debug.apk(不入库)
+├── build_logs/              # 每个架构一份完整构建日志 build-<abi>.log(不入库)
+├── logs/                    # Windows 一键脚本的编排日志 build_apk_<时间戳>.log(不入库)
+├── wheels/                  # PySide6 / shiboken6 的 android wheel(不入库)
+├── sr_qnn/                  # 高通 NPU 超分后端
+│   ├── __init__.py          # ctypes 封装，sr_vulkan 同构接口 + MODEL_* 常量
+│   ├── cpp/                 # libsr_qnn.so 源码(ONNX Runtime C API + QNN EP)
+│   │   ├── sr_qnn.h / sr_qnn.cpp / CMakeLists.txt
+│   └── models/              # models.txt 清单 + 31 个 onnx(waifu2x 9 / CUGAN 17 / ESRGAN 5，随 APK 分发)
+├── recipes/curl_cffi/       # python-for-android recipe(编译 curl-impersonate)
+├── shims/curl_cffi/         # 纯 python 垫片(原生库缺失时的降级方案)
+├── tools/prepare_models.py  # 把动态 shape 的 onnx 转成 NPU 可用的固定 shape
+└── tools/models_stage/      # 31 个模型的导出/静态化/对账工具链(官方 PyTorch 权重 -> onnx)
+```
+
+---
+
+## 3. 竖屏界面适配（不影响主要功能）
+
+实现位置：`src/tools/mobile_ui.py`（`Apply(mainView)` 在 `MainView.__init__` 末尾调用一次）。
+它只持有会话级可变状态并对外保持 `mobile_ui.X` 门面（`__getattr__` 惰性转发），
+具体实现按关注点拆到同目录的 `mobile_ui_*.py`：`mobile_ui_base.py`(常量/无状态工具)、
+`mobile_ui_hooks.py`(生命周期挂钩)、`mobile_ui_window.py`(顶层窗口守卫+返回键)、
+`mobile_ui_drawer.py`、`mobile_ui_layout.py`、`mobile_ui_reader.py`、`mobile_ui_grid.py`、
+`mobile_ui_touch.py`、`mobile_ui_diag.py`。主窗口里的挂钩都是 `IsAndroid()` 守卫：
+
+| 问题 | 处理 | 位置 |
+| --- | --- | --- |
+| 左侧导航栏固定 240px，竖屏把内容挤没 | 导航栏改成**浮动抽屉**：从横向布局里摘出来挂到 `subMainWindow`，宽度 = 屏宽 82%(≤300px)，默认隐藏，点“菜单”或右边手势切换后自动收起 | `SetupDrawer` / `CloseDrawer` |
+| 各界面写死的最小宽度（如周表下拉 400px、SR 选择框 500px、代理框 450px） | 递归把 `minimumWidth > 屏宽-24` 的控件放宽（只降不升），对话框在 `Show` 事件里自动处理 | `RelaxMinSizes` / `_MobileFilter` |
+| 详情页封面与信息左右并排，竖屏太挤 | 运行时把 `verticalLayout_2`(信息列) 从横向布局移到 grid 的下一行 → 上下堆叠，封面居中 | `StackBookInfo` |
+| 设置页 `[左侧导航列, 内容区]` 左右并排，384px 下内容区只剩 ~230px，里面 `80+150+108` 的行全部显示不全 | 竖屏把外层布局改成**上下**、导航列改成**顶部横排**（`QBoxLayout.setDirection`，不重建布局也不动信号）；导航按钮清掉图标/说明并改用 `QSizePolicy.Ignored`，否则 `qSmartMinSize` 会按 sizeHint 要求 664px | `StackSideNavs`（通用，设置页 + 分流设置页都吃这一条）/ `StackSettingNav`（设置页补充） |
+| 图片超分页 `[图像预览, 参数面板(max 300px)]` 左右并排，竖屏下预览只剩 80 多像素 | 竖屏改成预览在上(占大部分高度)、参数面板在下(整宽、限高可滚) | `StackSrTool` / `UpdateSrToolHeight` |
+| 工具栏那一类**单行超宽**行(详情页的收藏/下载/评论按钮、收藏/历史/本地收藏/分类/周榜的分页栏)右侧控件被裁掉 | 顺序装箱拆成多行：控件全保留、顺序不变，每行都放得下（`QLayout.minimumSize()` 是判定依据，天然幂等，可反复调用） | `WrapWideRows` |
+| 帮助页那种一整段说明文字的 QLabel，单行最小宽度 500+px | 对"本身放不下"的标签打开 `wordWrap` 折行；对长路径/长 URL 这种没有换行机会的文本检测到降不下来就还原 | `EnableLabelWrap` |
+| 帮助页版本信息是 3 列 QGridLayout，列宽相加 524px | 压成单列(每个控件一行)；压完还放不下就**原样还原**，绝不帮倒忙 | `FlattenWideGrids` |
+| 手指不能拖动滚动 | 给所有 `QAbstractScrollArea` 挂 `QScroller` 触摸手势 + 逐像素滚动（看图控件本身除外，它有自己的一套拖动逻辑，见下） | `EnableTouchScroll` |
+| **滑动页面时会误改设置**：Qt 把没人认领的触控当场合成鼠标事件投给手指下的子控件，抬起时子控件把"滑动"当成了点击。下拉框/数值框更严重——它们在 **press** 时就弹列表/加减数值 | 触控路由`_TouchRouter`**认领整个触控序列**(接受 TouchBegin，Qt 不再合成任何鼠标)：位移超过阈值/多指判定为滚动(什么都不激活，滚动交给 QScroller)；小于阈值判定点按，走控件**自己的公开入口**激活(`click()`/`showPopup()`/`stepBy()`/`setCurrentIndex()`/`clicked` 信号)。滑块/滚动条不插手(Qt 原生合成照常)，文本输入框走 `"input"` 通道(同样不认领、不吞事件，抬手后若发现没聚焦就兜底聚焦+落光标+弹输入法，见 `mobile_ui_touch._FocusInput`)。弹窗(Qt::Popup)里的操作不拦 | `_TouchRouter` / `InstallTouchGuard` |
+| 顶部分页按钮溢出 | 窄屏降低按钮字号、允许压缩 | `CompactTabBar` |
+| **改设置/输入就崩溃(SIGABRT)**：设置页每改一项都会弹一次"保存成功"提示条(`MsgLabel` 是独立顶层窗口)、切页签弹加载框，这些 `show()` 都是在**输入事件处理过程中**同步执行的，Qt 会在 `QWindowPrivate::setVisible` 里同步 flush 窗口系统事件 → 立刻 Expose → 立刻 paint → `QAndroidPlatformOpenGLWindow::eglSurface()` 重入 → `'Failed to acquire deadlock protector for ...'` → abort | 把顶层窗口的 `show/hide/close` 统一改成"延后到当前事件处理结束"(0ms 定时器)再执行：`QWidget.show/hide/close` 在 Python 侧套一层，只对顶层窗口生效（主窗口除外）。注意 `QEvent.Show` 是 `show_sys()` **之后**才发的，在事件过滤器里拦它来不及，必须拦在"调用 show()"这一层 | `InstallShowDeferral` / `DeferCall` |
+| **看图界面无法滚动 + 菜单超出屏幕**：`ReadFrame.ScaleFrame` 写死 `qtTool.setGeometry(w-400, 0, 400, h)`，384px 屏上是 `x=-16`；看图区只有滚轮逻辑，触摸上既没滚轮也没有拖动实现 | 菜单改为占满看图区整宽；整套看图触控都在 `QTouchEvent` 上实现(零合成鼠标)：1 指拖动喂给和滚轮同一条路径(`ReadScroll.scrollValue`)并复用页尾自动翻页，1 指点按直接走三分区动作，2 指缩放"预览视图变换+抬手重排" | `SetupReadTool` / `ApplyReadToolGeometry` / `_ReaderTouch` |
+| **返回键**：菜单收不起来；看图退不出去；根页面上什么都不做，事件继续下传导致 Activity 被 finish，而 Python 主线程已退出 → 前台留一个**白屏** | 统一在 `HandleBackKey` 里按优先级处理并 accept 事件、吞掉抬起事件（400ms 去抖）：弹出窗口 → 看图菜单 → 顶层对话框 → 抽屉 → 退出看图 → 回退页面 → **根页面退到后台**(最小化，不再白屏) | `HandleBackKey` / `MinimizeToDesktop` / `main_view.keyPressEvent` |
+| **首页一行只放得下 1 本漫画**：封面按桌面写死 250x340 | 竖屏按屏宽反算封面宽，并用 `QListWidget` 的**真实几何**自校正到"一行 2 个"（只按 sizeHint 估算会被 item 自身的边距骗过去；改完 sizeHint 还必须显式 `setGridSize` + 强制重排） | `GridCoverWidth` / `ApplyGridCoverSize` / `RefreshItemSizeHints` / `ComicItemWidget.ResizeCover` |
+| **首页"分区"切过去还是一行 1 个**：分区页是 `QTabWidget` 的**隐藏**标签页，而 Qt 只给当前页排几何 —— 隐藏页里的列表视口宽是"没布局过"的假值(真机 790px)，用它算出来的封面宽/栅格都偏大 | 只拿**可见**列表量视口宽（隐藏列表不再把全局封面宽带偏）；并给 `QTabWidget` 接 `currentChanged`，换页后按新页的真实视口宽重排一次（封面宽没变时也补一次 `setGridSize`） | `MeasureGridAvail` / `_GridOverflow` / `ReflowGridCoverForPage` / `InstallTabReflowHook` |
+| **首页顶部的分区标签条无法滑动**：`QTabBar` **没有**公开的滚动偏移 API(`scrollOffset` 是私有成员)，拖动也不认(没有拖动滚动的实现)；唯一能按像素滚动它的入口是 `QTabBar::wheelEvent` 里"设备带 `PixelScroll` 能力就按像素滚"那条分支，而平台自带的鼠标/触摸设备都没这个能力 | 手势/跟手/惯性全在 `_TabSwipe` 自己的触控序列上算(1:1 跟手，松手按最后一段位移估速度并指数衰减)；唯一能按像素滚动它的入口仍是 `QTabBar::wheelEvent` 那条分支 —— 自造带 `PixelScroll` 的 `QPointingDevice` 走滚轮分支，属内部致动、不是把触控映射成鼠标。**这里挂过 QScroller 但被拿掉了**：`QScrollPrepareEvent`/`QScrollEvent` 这套协议只有 `QAbstractScrollArea` 实现了，挂到 QTabBar 上攒出的 scroller 从来不会被引擎认领(Linux CI 与宿主 Windows 都是 `Inactive`)，一点惯性都没有。press 一律扣住(否则横划会顺带切分区)，点按才走 `setCurrentIndex` 激活；自检不通时退化为只点按 | `_TabSwipe` / `_TouchRouter`("tabbar" 模式) / `TabBarOffset` |
+| **首页除"最新上传"以外的分区完全不能滑动**：分区页是网络回来后由 `IndexView.InitBack` 逐个 `AddTab()` 建出来的，而 `EnableTouchScroll` 只在窗口 `Apply`/`OnShown` 跑过一遍 —— 那会儿这些页还不存在 -> 分区列表**从来没被 `QScroller` 接管**(`_jmTouchScroll=False`)，手指在上面划纹丝不动（"滑动防误触"也一起没生效，滑动还会误点中封面） | **建立即接管**：App 级过滤器 `_ScrollWatcher` 听 `QEvent.ChildAdded`/`ChildPolished`，新出现的滚动区域攒起来用 0ms 定时器推到**下一轮事件循环**再扫（`ChildAdded` 是构造函数里发给父控件的，当场判不可靠）；`_TouchGuard.OnPress` 里再加一层兜底 `_AdoptScrollArea`：手指按上去时向上找最近的滚动区域，没接管过就地补装（放在判定模式之前：同一次按下就算进滑动区） | `_ScrollWatcher` / `_AdoptScrollArea` / `InstallScrollWatcher` / `EnableTouchScroll` |
+| **导入本地漫画 / 导入本地图片卡死** | Android 上不再用 `QFileDialog`（它会创建一个回不来的顶层窗口 + 嵌套模态循环），改为**主窗口内的子控件选择器** + 嵌套 `QEventLoop`（不创建任何顶层窗口）；桌面端原样转发 `QFileDialog` | `tools/mobile_file_dialog.py` |
+| **任何未捕获的 python 异常 = 闪退**：`sys.excepthook` 里弹出的 `QErrorMessage` 同样是独立顶层窗口，异常一发生就撞上面同一个 `eglSurface()` 死锁保护器 abort（回调/解析/网络里任何一个漏网异常都会被放大成整进程退出）；异常若来自工作线程，还会变成"在非 GUI 线程里建 QWidget" | Android 下运行期错误框改成主窗口内的**子控件提示条**(`MsgLabel.ShowErrorEx`)，非主线程只记日志（`Log.Error` 已经写过完整回溯，adb 能拉到）；桌面端行为不变，仍弹原来的 `QErrorMessage` | `qt_error.showError2` / `ShowAndroidError` |
+| **开启 HTTP3/ECH 后 CDN 请求大量失败**：`CurlHttpVersion.V3` 走 UDP，封掉 UDP 443 的网络里 QUIC 握手一直不返回、libcurl 自带的 fallback 只在"握手失败"时才触发(一直等不到就只剩超时)，**每个请求都白等一轮**；ECH 配置每 15 分钟从 `cloudflare-ech.com` 轮换一次，过期时服务端回 `ECH_REJECTED`，TLS 握手直接失败 | 失败后**降级并记住**：`DowngradeTlsOptions` 关掉 HTTP/3 / ECH 重试一次(`ECH_REJECTED` 先关 ECH)，`Http3EchFallback` 记住后让**后续请求直接走 HTTP/2 + 普通 SNI**；垫片下 `IsAdvancedTlsSupported()=False` 自动跳过(Android 行为不变)；重存"代理设置"即重置再试 | `req.DowngradeTlsOptions` / `req.Http3EchFallback` / `Server._Send` / `DownloadBookHandler` |
+| 系统托盘不存在 | Android 下不创建 `QSystemTrayIcon`，关闭窗口即退出 | `platform_mobile.SupportSystemTray` |
+| 旋转屏幕 | 窗口尺寸变化时重算宽度上限、抽屉几何、滚动区域，并重跑一次拆行/折行/封面尺寸 | `mobile_ui.OnShown` / `OnResize` |
+
+功能层面**没有做减法**：下载、看图、搜索、收藏、评论、NAS、批量超分、设置等入口都在抽屉里，
+只有桌面专属的系统托盘/无边框标题栏/单实例被去掉。
+
+排版重排只**移动**控件、不改信号连接，测试里有一条硬约束：
+重排前后每个页面的控件数量必须完全一致（`[ok] 竖屏重排没有丢失任何控件`）。
+
+### 3.1 接口响应解密（AES）在 `bootstrap=qt` 下必须补 `ctypes.util`
+
+禁漫所有接口的响应体都是 AES 密文，`jmcomic.JmCryptoTool.decode_resp_data` 解不开就
+**登录报错、首页也报错**。真机上它必然失败，原因是两层叠加：
+
+1. python-for-android 的 `python3` recipe 把标准库 `Lib/ctypes/util.py` 整个替换成
+   `from android._ctypes_library_finder import find_library`；
+2. 而 p4a 的 `android` 包顶层就是 `from android._android import *`，`_android.so` 依赖
+   **SDL2/webview bootstrap** 里的 JNI 符号 `WebView_AndroidGetJNIEnv` ——
+   `bootstrap=qt` 下没有这个符号，`dlopen` 必然失败：
+   `ImportError: dlopen failed: cannot locate symbol "WebView_AndroidGetJNIEnv"`。
+   （该 finder 自己也要 `from jnius import autoclass`，而 pyjnius 没打进 APK。）
+
+pycryptodome 在 `sys.flags.optimize == 2` 时会**主动**放弃 cffi 后端回落到 ctypes 后端
+（p4a 的 Qt bootstrap 在 `PythonActivity.java` 里硬编码了
+`setEnvironmentVariable("PYTHONOPTIMIZE", "2")`），回落路径第一行就是
+`from ctypes.util import find_library` → 于是 `Crypto.Cipher.AES` 永远导入失败。
+
+修法（`platform_mobile.InstallCtypesLibraryFinder()`，由 `android/main.py` 在
+`SetupPath()` 里调用）：往 `sys.modules` 里放一个**纯 python 的 `android` 垫片**，
+提供不依赖 pyjnius 的 `find_library`，真实 android 包目录仍挂在 `__path__` 上。
+这样 `ctypes.util` 那句被 p4a 替换过的 import 能成功，而 `_android.so` 根本不会被 dlopen。
+
+pycryptodome 真正的原生库是用**绝对路径**加载的
+（`load_pycryptodome_raw_lib()` 走 `pycryptodome_filename()`，路径里含 `.`，
+`load_lib()` 因此不会再调用 `find_library`），所以只需要那句 import 不炸。
+
+真机取证（`android_startup.log` 的 diagnostics 块）：
+
+```
+ctypes find_library: OK (from tools.platform_mobile)
+  find_library('c') = /system/lib64/libc.so
+  find_library('crypto') = /data/app/.../lib/arm64/libcrypto.so
+ctypes.util: OK (find_library=ctypes.util)
+pycryptodome: backend=cffi AES=<module 'Crypto.Cipher.AES' ...>
+jmcomic decode_resp_data: True ('{"code":200,"data":[]}')
+```
+
+主机侧回归（用子进程复现"android 包导入即失败"）：
+`android/tools/host_test_crypto_android.py`。
+
+### 3.2 还有第二层：`PYTHONOPTIMIZE=2` 让 ctypes 后端在 Android 上必死
+
+只修 `ctypes.util` 还不够。p4a 的 Qt bootstrap 在 `PythonActivity.java` 里硬编码了
+
+```java
+setEnvironmentVariable("PYTHONOPTIMIZE", "2");   // => sys.flags.optimize == 2
+```
+
+而 pycryptodome 在 optimize==2 时会**主动放弃 cffi 后端**
+（`raise ImportError("CFFI with optimize=2 fails due to pycparser bug.")`），
+回落到 ctypes 后端；ctypes 后端要 `ctypes.pythonapi.PyObject_GetBuffer`，
+在 Android 上解析不到 —— libpython 是 `RTLD_LOCAL` 载入的，`dlopen(NULL)` 看不到
+Python C API 符号，于是：
+
+```
+Crypto/Util/_raw_api.py: _PyObject_GetBuffer = ctypes.pythonapi.PyObject_GetBuffer
+AttributeError: undefined symbol: PyObject_GetBuffer
+```
+
+**所以必须让 optimize != 2。** 改成 `1`（`-O`）而不是 `0`：
+`-O` 同样会去掉 `assert`（和原来行为一致，代码里 193 个 assert 不会突然生效），
+但**保留 docstring**，cffi/pycparser 因此可用。
+
+由 `android/tools/wsl_patch_optimize.sh` 在 buildozer 之前打补丁（改所有副本：
+venv311 里的 pythonforandroid、p4a 检出、`.buildozer/.../bootstrap_builds`、
+以及 Gradle 真正编译的 `dists/*/src/main/java/.../PythonActivity.java`），
+`wsl_build_apk.sh` / `wsl_repack_apk.sh` 都会调用并校验，改不动就直接失败退出。
+
+宿主机实测（cffi 2.0.0 + pycparser 2.14，与 APK 里完全相同）：
+
+```
+python -OO android/tools/probe_cffi_backend.py  -> backend=ctypes   # 真机原来就是这条
+python -O  android/tools/probe_cffi_backend.py  -> backend=cffi     # 改完这条，AES 可用
+```
+
+顺带确认过 `stdlib.zip` 用的是 legacy 命名（`module.pyc`，588 项），
+zipimport 不区分 optimize 级别，所以改 `PYTHONOPTIMIZE` 不会丢标准库
+（`android/tools/inspect_pybundle.py` 可复查）。
+
+### 3.3 QFileDialog 在 Android 上会卡死 → 换成应用内选择器
+
+真机(vivo V2463A / Android 16)反馈：**导入本地漫画、图片超分导入本地图片会卡死**。
+根因是这些调用点用了 `QFileDialog.getExistingDirectory / getOpenFileName /
+getSaveFileName`：Qt 在 Android 上没有原生对话框，会新建一个**顶层窗口**并在里面跑
+**嵌套模态事件循环**，实测再也不返回调用点。
+
+修法是 `src/tools/mobile_file_dialog.py`：`IsAndroid()` 为真时不再创建任何顶层窗口，
+而是在**主窗口内部**放一个覆盖控件(parent 到主窗口、铺满、`raise_()`)，再用嵌套
+`QEventLoop` 等用户操作 —— 原有同步阻塞调用点只换函数名即可。三条硬约束：
+
+| 约束 | 做法 |
+| --- | --- |
+| 桌面端行为一个字都不能变 | `IsAndroid()` 为假时**原样转发**给对应的 `QFileDialog` 静态方法，返回值形状一致(`getExistingDirectory` 是 `str`，另两个是 `(文件名, 过滤器)` 元组，取消时分别是 `""` 与 `()`) |
+| 竖屏 384px 宽 | 全部整宽、一行一个控件；路径用 `QFontMetrics.elidedText` 中间省略；`确定/上级/取消` 每个约 110px |
+| 绝不能卡死 | 列目录一律 `os.scandir` + `try/except`，失败只显示红字"无法访问该目录: ..."并停在原地；`Key_Back`/`Esc` = 取消；所有出口(确定/取消/关窗)都 `loop.quit()`，外层再兜一层异常保护 |
+
+顺带处理了 Android 存储权限的现实：APK 没有 `READ_MEDIA_IMAGES` /
+`MANAGE_EXTERNAL_STORAGE`，targetSdk 34 下 `/storage/emulated/0` 的绝大多数目录
+`os.scandir` 会抛 `PermissionError`。所以覆盖控件顶部有一行固定提示("读取手机存储
+需要「所有文件访问权限」")，快捷入口(应用目录/私有目录/存储/下载/图片)里**读不了的
+直接置灰**，而不是点进去报错。
+
+> **2026-10-18 更新**：这个应用内选择器现在是**降级通道**。手机上选文件/选目录
+> 默认走 SAF（系统选择器，不需要任何存储权限），只有桥不可用时才回落到这里，
+> 而且存储权限已经从 manifest 删掉 —— 详见 §3.11。
+
+改了这些调用点：`local_read_view`(3 处，导入本地漫画)、`waifu2x_tool_view`(2 处)、
+`setting_view`、`download_dir_view`、`nas_add_view`、`batch_sr_tool_view`、
+`read_view`(2 处)。
+
+主机回归(不需要手机)：`android/tools/host_test_file_dialog.py`，覆盖桌面委托、
+目录/文件排序、过滤器、进入子目录与上级、三种模式的确定/取消、返回键、
+权限失败降级、以及**真的跑一次嵌套事件循环**确认不卡死：
+
+```bash
+QT_QPA_PLATFORM=offscreen python android/tools/host_test_file_dialog.py
+```
+
+### 3.4 第二轮真机反馈（2026-09-30，10 条）的根因与修法
+
+| # | 现象 | 根因（实证） | 修法 |
+| --- | --- | --- | --- |
+| 1 | 在下拉菜单选项框/数值选项框**附近**滑动会误触它们 | Qt 把触摸合成的鼠标事件直接投给手指下的子控件；`QComboBox` 在 **press** 就弹列表，`QAbstractSpinBox` 在 press 就开始加减并**自动重复**（只认 release 来停，所以"吃掉 release"反而让它一直加） | 守卫改成"扣住 press + 点按重放"：位移超过 16px 就丢弃这次 press（控件完全不知情），小于阈值才把 press+release 原样重放。重放期间必须关掉守卫自己，否则无限递归 |
+| 2 | 分流设置仍为双排排版 | 分流设置就是 `login_new.tab_4`，结构同样是 `[竖排标题列, scrollArea_3]`，之前只改了设置页 | 抽成通用规则 `StackSideNavs`：任何"外层横向布局 = [只有标题按钮的导航列] + [QAbstractScrollArea]"都改成上下 |
+| 3 | 改设置/输入就**崩溃** | 真机 SIGABRT：`'Failed to acquire deadlock protector for QAndroidPlatformOpenGLWindow::eglSurface().'`。这是 **Android + Qt6.11 上"第二个顶层窗口"的渲染问题**：只要新建一个顶层窗口并开始渲染，第一层窗口的 EGL surface 还持有时，新窗口的 RHI backing store 创建(`QBackingStoreRhiSupport::create → QRhi::create → QOpenGLContext::makeCurrent → eglSurface`)就会撞上那个全局死锁保护器并直接 `qFatal`。第一版栈是"输入事件里同步 show"，第二版栈是"延后 show 时在 `sendPostedEvents` 里 show"——**延后是没用的**，因为窗口照样要建、要渲染 | 把"本该是顶层窗口"的东西全部改成**主窗口里的子控件覆盖层**(`MakeChildOverlay`)：提示条 `MsgLabel`(每次改设置都弹)、加载框 `LoadingDialog`(每次切页都弹)、以及 `BaseMaskDialog` 基类(登录/收藏夹/模型选择/目录选择/DoH/NAS/Sign…全部继承它)。子控件和主窗口共用同一个平台窗口，彻底不走这条渲染路径。另外仍保留"顶层窗口 show/hide/close 延后"这道兜底 |
+| 4 | 看图界面里图片无法正常解密 | `TaskQImage.Run()` 的 `finally: emit(taskId, newQ)`：异常时 `newQ` 是**上一张图**(第一轮则是 `UnboundLocalError` 直接把工作线程弄死)，于是页面拿到错图/再也不出图；`if not info.data: return` 同样会终结线程 | 每轮 `newQ = None`、空数据 `continue`、只有真正解出非空 `QImage` 才回调；解码失败记 `len(data)+前 8 字节`；`TaskMulti` 的队列等待加超时(20s/60s)并把 worker 数夹到 `max(1, min(MultiNum, 8))`；`SegmentationPicture` 任何异常都**返回原始字节**而不是 `None` |
+| 6 | 看图界面和它的菜单都滚不动，菜单宽度超出屏幕 | `ReadFrame.ScaleFrame` 写死 `qtTool.setGeometry(w-400,0,400,h)`，384px 屏上是 `x=-16`；看图区只有 `wheelEvent`，触摸设备既没有滚轮也没有拖动实现 | 菜单改为占满看图区整宽；新增 `_ReaderDrag`：拖动位移直接走和滚轮同一条 `ReadScroll.scrollValue` 路径(含页尾自动翻页)，点按完全不碰 |
+| 7/8 | 菜单收不起来 / 看图退不出去 | 返回键只在 `keyReleaseEvent` 处理，优先级里没有"菜单"这一档 | `HandleBackKey` 统一优先级：弹出窗口 → 看图菜单 → 顶层对话框 → 抽屉 → 退出看图 → 回退页面 → 根页面；`keyPressEvent` 里处理并 accept，400ms 去抖吞掉抬起事件 |
+| 9 | 主页返回不是回桌面，而是白屏 | 真机实测根因**不是**返回逻辑，而是 Qt 的"最小化"在 Android 上只隐藏了 Qt 窗口：`showMinimized()` 之后 `dumpsys activity` 里 Activity 仍是 `topResumedActivity`、窗口 `mViewVisibility=VISIBLE`，而 Qt 已经不再绘制 —— Android 那边还停在前台却没有任何内容，就是白屏。真正的 `moveTaskToBack(true)` 这个包调不到：`jnius.so` 在真机上 dlopen 失败(`cannot locate symbol "WebView_AndroidGetJNIEnv"`，bootstrap=qt 没有那个符号)，PySide6 6.11 也没有绑定 `QJniObject` | 根页面返回改为**保持窗口可见** + 一次提示，绝不隐藏/最小化窗口(不留白屏)；要回桌面用系统手势/Home(Android 标准做法)。顶栏另加一个看得见的**返回按钮**，走同一条 `HandleBackKey` |
+| 7/8/9 | 返回键到底有没有到 Qt | `device_keys` 诊断(把应用收到的按键/窗口事件写日志)实测：Android 16 + Qt 6.11 上返回键**能**到，`back: root-page` / `close-read-tool` / `close-reader` 都真的被触发过 | 保留按键处理；`key diag` / `window diag` 记录按键与窗口生命周期，便于复现"白屏"前后的窗口序列 |
+| 9 | 主页返回不是回桌面，而是白屏 | 根页面上什么都不做 → 事件下传 → Activity 被 finish，而 Python 侧 `app.exec()` 已返回、主线程退出，Activity 留在前台就是个白屏 | 根页面返回改为 `showMinimized()` 退到后台（无 pyjnius/无 `QJniObject`，调不到 `moveTaskToBack`，所以用 Qt 的最小化，真机结果由自检记录） |
+| 10 | 主页每行只放得下 1 本漫画 | `ComicItemWidget` 按桌面写死 250x340，384px 屏上一行只放 1 个 | 竖屏按屏宽反算封面宽 + 用 `QListWidget` 真实 `sizeHint` 自校正到"一行 2 个"；改完 sizeHint 还要 `setGridSize` + 强制重排，否则视图不重新装箱 |
+| 11 | 导入本地漫画/导入本地图片卡死 | `QFileDialog`(见 §3.3) + **APK 里根本没有存储权限**（只有 INTERNET/WAKE_LOCK/WRITE_EXTERNAL_STORAGE，Android 11+ 起后者已失效），targetSdk 34 下 `/storage/emulated/0` 基本不可读 | 换应用内选择器；`patch_buildozer_spec.py` 与 `patch_android_manifest.py` 补 `READ_EXTERNAL_STORAGE` / `READ_MEDIA_IMAGES` / `MANAGE_EXTERNAL_STORAGE`（后者需用户在系统设置里手动授予"所有文件访问权限"，APK 里没 `libjnius.so`、PySide6 也没绑定 `QJniObject`，无法在应用内弹权限申请） |
+
+真机取证靠应用自检 + `adb input`（设备上没有 OCR，`uiautomator` 也读不到 Qt Widgets 的树）：
+`device_verify`(首页/排版)、`ui_touch_selftest`(设置页触摸目标物理坐标)、`device_reader`
+(看图界面：离线解密往返 + 菜单/滚动几何 + 返回键序列)。判定脚本
+`android/tools/verify_on_device.ps1` 会把 touch guard 的
+`presses/drags/suppressed/replayed` 计数、下拉框/数值框的**值**、看图区的
+`v/h` 滚动值与菜单可见性、以及 `back:` 动作逐条判定。
+
+#### 真机实测结果（vivo V2463A / Android 16 / arm64，2026-10-06 那版 APK）
+
+```
+sys.flags.optimize: 1
+pycryptodome: backend=cffi AES=<module 'Crypto.Cipher.AES' ...>
+jmcomic decode_resp_data: True ('{"code":200,"data":[]}')
+接口解密统计: ok=10 fail=0                     # 10 个真实加密响应全部解开(登录/首页不再报错)
+---- 图片解密自检(离线) ----
+  QImage 解码: 原图=True 60x384 / 解密后=True 60x384 不同像素=0
+  解密自检: PASS
+  TaskQImage.ConverQImage: True 60x384 -> PASS  # 走应用真实链路
+---- 首页网格自检(真机视口) ----
+  真机列表: 控件 348x610, 视口 330x598
+  反算封面宽: 视口 330px - 余量 36px -> 封面 147px (2 列)
+首页网格: 封面宽 147px 控件宽 159px 栅格=159x318 / 可用 330px -> 每行 2 个(前 30 行 [2, 2, 2, ...])
+  首页网格自检: PASS (一行 2 个, 期望 2)
+---- 文件选择器自检(真机) ----
+  选择器: isWindow=False 父控件=MainView 当前目录=/storage/emulated/0/Android/data/org.jmcomic.jmcomic/files
+  不可读目录: 已降级处理(没有抛异常)
+  选择器自检: PASS                       # 不开顶层窗口 + 能列目录 + 读不了的目录不卡死
+reader tool: 面板=(0,0,384x787) 看图区=384x787 -> 整宽(在屏内)
+reader 滚动: 菜单滚动区=已接管滚动 看图区(ReadGraphicsView)=拖动滚动已接管
+window guard: ... 子控件覆盖层=6                # 6 个"本该是顶层窗口"的控件已改成主窗口子控件
+touch guard: presses=40 drags=19 suppressed=19 replayed=2   # 真实手指: 19 次误触被挡下, 2 次点按被重放
+reader t= 37s ... back=1 lastBack=close-read-tool    # 返回键先收看图菜单
+reader t= 45s ... back=2 lastBack=root-page          # 再退到根页面(不隐藏窗口 -> 不白屏)
+```
+
+装完整轮后 `logcat -b crash` 是**空**的（旧包在设置页改几个选项就会刷一条
+`Failed to acquire deadlock protector ... eglSurface()` 的 SIGABRT）。
+
+> 装包注意：vivo 的"安装确认"弹窗会把 `adb install` 挡成
+> `INSTALL_FAILED_ABORTED: User rejected permissions`(息屏/锁屏时必现)。
+> 需要先 `input keyevent KEYCODE_WAKEUP` + `wm dismiss-keyguard`，并在手机上点"允许/继续安装"。
+
+> 改 `android/tools/*.ps1` 之后必须跑一次 `android/tools/fix_ps_bom.ps1`：
+> Windows PowerShell 5.1 在没有 BOM 时按 ANSI(GBK) 读脚本，中文会变成乱码并直接解析失败。
+
+### 3.5 第三轮真机反馈：图片分割异常、图像错位
+
+**现象**：真机看图时页面被"切成一条条"、带子错位。
+
+**真机日志**（`files/state/jmcomic-qt/logs/20261006.log`，21:40）：
+
+```
+tool.py[line:1070] ERROR: SegmentationPicture failed, epsId:1479594 scrambleId:220980
+    len:1091216 err:cannot identify image file <_io.BytesIO object at 0x71e5de54e0>
+tool.py[line:188]  (GetPictureSize 里 Image.open 的 traceback，每次都刷)
+```
+
+**根因：不是分割算法，是 Android 上 Pillow 没有 webp 解码器。**
+JM 下发的图是 webp（日志里 URL 就是
+`https://cdn-msp.jmapiproxy1.cc/media/photos/1479594/00001.webp`），而 APK 里的
+Pillow 是 p4a 编出来的：
+`PIL/_imaging.so` 在、**`PIL/_webp.so` 不在**（包里只有 `_webp.pyi`，见
+`android/tools/probe_pillow_android.sh`）。于是
+
+- `SegmentationPicture`（图片分割合成）第一句 `Image.open` 就抛
+  `cannot identify image file` → 兜底 `return imgData`，把**被打乱的原图**直接交给界面，
+  用户看到的就是"分割异常、错位"；
+- `GetPictureSize` 同样抛异常 → `mat` 兜底成 `"jpg"`（所以缓存文件名是 `1.jpg`、
+  内容却是 webp）、`isAni` 恒为 `False`。
+
+**离线取证**（`android/tools/probe_cached_page.py` + `probe_seam_score.py`）：
+把真机缓存下来的那一页（1091216 字节）拉到宿主，桌面 Pillow 解出 `WEBP 2100x3018`；
+`epsId=1479594 scrambleId=220980 pictureName=00001 → num=12`（`3018 % 12 = 6`）；
+本仓库的分割算法与官方 `jmcomic` 的 `JmImageTool.decode_and_save` **逐像素完全相同
+（不同像素=0）**，还原结果是一张完整封面（未还原那张能直接看到 12 条带子错位，
+`android/build_logs/page_raw.png` vs `page_repo_decoded.png`）。所以问题在 Android 的
+编解码器，不在分割算法。
+
+**修法**（`src/tools/tool.py`、`src/task/task_qimage.py`）
+
+1. 新增一套 **Qt 图像栈**的分割实现：`SegmentQImage` / `SegmentationQImage` /
+   `SegmentationPictureQt` / `SegmentationPictureToDiskQt`。Qt 的 qwebp 插件本来就在
+   APK 里（`libplugins_imageformats_qwebp_arm64-v8a.so`，看图界面一直靠它显示）：
+   **Android 上优先用 Qt**，桌面端仍以 Pillow 为主，Pillow 抛异常时 Qt 也兜底；
+   需要编码时按源格式编码（webp→WEBP，有损格式给 quality 95）。
+2. 看图线程直接在 **QImage 域**还原（`TaskQImage._SegmentQImage`，统计里 `Qt分割=`
+   计数），省掉"还原→编码→再解码"的一次来回；页面原始字节永远不被改写。
+3. `GetPictureSize` / `GetAnimationFormat` 加 Qt 兜底（Android 上先问 Qt）：
+   格式/尺寸/是否动图不再因为 Pillow 缺解码器而失真。
+
+**为什么之前的自检没抓到**（同样修掉了）
+
+- 旧自检的样本是 `height = 48 * num`，也就是 `rem = 0`。**`rem = 0` 时这个变换恰好是
+  对合**（还原两次回到原图），而真机那页是 `3018 % 12 = 6`；`rem != 0` 时二次还原会
+  彻底错位。而且旧自检是"自己造样本 → 自己还原"，属于循环论证。
+- 新自检 `mobile_ui.DecryptSelfTest()` 改成**与独立实现的官方算法逐像素比对**：
+  合成样本 `rem=5`、`encode/decode` 互逆校验、`SegmentationQImage`(看图那条)、
+  `SegmentationPicture`(bytes)、落盘路径、以及 `TaskQImage` 真线程回调；
+  再挑一张**真机缓存里的真 webp** 做同样的比对（`图片分割自检(真机样本 webp)`）。
+- 宿主 `host_test_image_pipeline.py` 补了同样的用例，包括**把 Pillow 打坏的仿真**
+  （`PIL.Image.open` 直接抛 `UnidentifiedImageError`）：Android 分支与桌面兜底分支
+  都必须由 Qt 还原出正确的图、而不是原样返回打乱的字节。
+
+**宿主实测**（`wsl_run_smoke.sh` 第 5 道门）：
+
+```
+--- 1d. 真机样本(webp) ---
+PASS  真机样本: Qt 还原(看图线程那条) == 官方算法(逐像素 (2100, 3018))
+PASS  真机样本: bytes 路径结果≈官方算法(有损重编码, 平均差 0.9) 且远好于未还原(75.8)
+ALL 58 IMAGE PIPELINE CHECKS PASSED
+```
+
+> `rem != 0` 时**绝不能**对同一张图做两次还原；`SegmentationPicture` 的输入永远是
+> 服务端原始字节（`read_view` 里的 `p.data` / `info.data` 不被改写）。
+
+#### 真机实测结果（vivo V2463A / Android 16 / arm64，2026-10-06 23:08 那版 APK）
+
+```
+Pillow 11.3.0: jpg=True webp=False zlib=True PIL/_webp.so=缺失     # 设备侧确认根因(webp 解不了)
+图片分割自检(合成, rem=5): PASS                                     # 与独立实现的官方算法逐像素一致
+真机样本: 29.webp (131422 字节, 书 1479694 章节 1 页 29)
+真机样本解码: Pillow=失败 (UnidentifiedImageError) Qt=True 960x1280
+解密自检: PASS
+
+图片解码: 任务=6 成功=6 失败=0 空图=0 Qt分割=6 bytes分割=0        # 看图真的每页都走 Qt
+---- 真机看图页分割对账(真数据) ----
+  真机看图页: 页=0 epsId=1478519 scrambleId=220980 pictureName=00001 num=8 960x1356 107784 字节
+  真机看图页还原: 与官方算法 可比=True 不同像素=0 / 未还原平均差=63.0
+  真机看图页分割: PASS
+```
+
+最后这段是**最硬的证据**：用的是看图界面**当前正在显示的那一页**（服务端原始字节）+
+它**自己算出来的** `saveParams`，还原结果与独立实现的官方算法**逐像素完全相同**
+（未还原的那份平均差 63.0 —— 确实是被打乱的原图）。
+
+同一套操作下，旧包（22:08 那版）的应用日志里是**一串**
+`SegmentationPicture failed ... cannot identify image file`；
+新包里这条命中 **0 次**，`logcat -b crash` 也是空的 —— 那条失败链已经彻底断开。
+
+复现命令：`android/tools/run_device_reader_selftest.ps1`（重新打标记、启动、等自检落盘并回读），
+或整轮 `android/tools/verify_on_device.ps1`。
+
+> 注意：老包"下载到手机/导出"时也是走 `SegmentationPicture`/`SegmentationPictureToDisk`，
+> 所以**旧版本下载目录里已经存下来的图本身就是被打乱的**（还原失败后原样写盘）。
+> 升级后这些旧文件不会自动修好：需要重新下载，或删掉重下。
+
+### 3.6 第四轮真机反馈：首页双列"打开时不生效，进设置页再返回才对"
+
+**现象**：冷启动进首页，漫画是一行 1 个；进一次设置页再返回首页，才变成一行 2 个。
+
+**根因**（时序，不是算法）：封面宽度是**全局缓存 + 自校正**的（`mobile_ui` 里的
+`_gridCoverFinal` / `_gridCoverAvail` / `_gridAvail`），而首页的漫画是网络回来后
+**一条条 `AddBookItem`** 建出来的：
+
+1. `MainView.__init__` 里就跑 `mobile_ui.Apply()` → `ApplyGridCoverSize`。那一刻窗口还是
+   `.ui` 的设计尺寸（远宽于手机），列表也还没被布局（`ComicListWidget.__init__` 里写死了
+   `resize(800, 600)`）——**空列表**就把封面宽 freeze 成了 `GridCoverMax`(240px)。
+   ```python
+   # GridCoverWidth() 的算法：(可用宽 - 余量) / 2，再夹到 [96, 240]
+   (780 - 36) / 2 = 372  ->  夹到 240px        # 真机真的是 240，不是 165
+   ```
+2. 窗口随后被 Android 拉成竖屏 384px，但 `OnResize` 只在 `_limit` **变化**时才重排；
+   而 `_limit = max(240, min(320, 宽-24))` 在宽 ≥ 344 时恒等于 320 —— **缩窗口走不到那一支**，
+   所以没有任何时机纠正上面那个 240。
+3. 网络回来的漫画按 240px 建控件（`ComicItemWidget._CoverSize` 读的就是 `GridCoverWidth`），
+   240 + 边距 > 视口/2 → 一行 1 个。
+4. 用户切页 → `InstallReflowHook` 的 `currentChanged` → `ApplyGridCoverSize(那一页)`：
+   这时视口是真的 366px ≠ 缓存的 780px → 缓存作废重算 → 165px → 一行 2 个。
+   **这就是"进设置页再返回才对"**。
+
+**修法**（四层，互相兜底）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `mobile_ui.MeasureGridAvail` | 视口宽度按**页面宽度**夹住（列表不可能比页面还宽）。设计尺寸/未布局的 800px 混进竖屏的入口在这里被掐掉 |
+| `mobile_ui.ScheduleGridCoverSize` | 新增去抖重排（80ms）：加完一批漫画就对一次"一行 2 个"。`ApplyGridCoverSize` 内部有 `_jmGridSized == width` 短路，所以重复调用只处理新 item，翻页加载没有额外开销 |
+| `comic_list_widget.AddBookItem` / `AddBookByLocal` | 每加一个封面就 `ScheduleGridCoverSize(self)`；非 Android 下直接返回，桌面端不受影响 |
+| `mobile_ui.OnResize` | `_limit` 没变也要排一次重排（覆盖"设计尺寸 → 手机宽度"这种缩放） |
+| `comic_item_widget.ResizeCover` | 变小时先 `setMaximumWidth(16777215)` 松绑：`RefreshItemSizeHints` 会用 `setFixedWidth` 把 item 钉在栅格宽上，不松绑的话 `adjustSize()` 缩不回去，封面小了控件还是旧宽 → 仍然一行 1 个 |
+
+顺带把一个测试自身的坑修了：§③ 断言的是"快照一致性"（自校正出的封面宽要原样缓存给
+后加的 item），而新加的去抖重排可能在断言前测量**另一个宽度的列表**并改写全局缓存，
+所以 §③ 开头先 `_StopPendingGrid()` 固定快照（真机上所有列表同宽，不存在这种情况）。
+
+#### 真机实测（vivo V2463A / Android 16，新包启动那一次）
+
+```
+00:27:07,248  mobile ui adapted, limit:320
+00:27:07,268  ui: shown: 863x633 windowState=WindowMaximized          # 启动时窗口真的是 863px 宽(设计尺寸)
+00:27:07,273  portrait: 列表视口 384px -> 618px，重算封面宽             # 旧代码就是在这里把封面宽 freeze 成 240
+00:27:07,584  portrait: 列表视口 618px -> 372px，重算封面宽             # 窗口被拉成竖屏：_limit 没变也重排(修复④)
+00:27:12,628  ui: page -> IndexView[首页] (index 0)
+00:27:12,772  portrait: 列表视口 372px -> 338px，重算封面宽
+00:27:18,178  portrait: 列表视口 338px -> 330px，重算封面宽             # 没有切页，是"加完封面"排的重排(修复②)
+00:27:18,201  portrait: 80 个封面改为一行 2 个(封面宽 147px)           # ★ 首屏 80 个封面直接就是一行 2 个
+```
+
+关键是最后两行：**中间没有任何 `page ->`**，也就是用户还停在首页，80 个封面就已经被
+改成一行 2 个了 —— 修复前这条只能在切页之后才出现（旧包日志里对应的是
+`首页网格: 封面宽 151px 控件宽 163px 栅格=-1x-1 / 可用 330px -> 每行 1 个(前 60 行 [1,1,…])`）。
+
+主机侧回归用例（`android/tools/smoke_test_android.py` §③.5，offscreen 不联网，已进 `wsl_run_smoke.sh`）
+走的是**真实的 `ComicListWidget.AddBookItem`**：先按设计宽度给空列表 freeze 一次，再按真机视口
+建两个 item，然后只等去抖重排：
+
+```
+[ok] 复现首屏: 空列表在设计宽度下就把封面宽冻结成 165px(视口按页面宽 366px 夹住)
+     -> 首屏 item 183px 超出可用宽/2 共 23px(一行 1 个)          # 先复现出旧行为
+[ok] 首屏自动收敛(无需切页): 封面 165 -> 138px / item 156px <= 可用 312px 的一半 -> 一行 2 个
+```
+
+---
+
+### 3.7 第五/六轮真机反馈：首页上方"分区"无法滑动 + 除"最新上传"外其它分区都没有双页
+
+**现象**：
+
+1. 首页顶部的分区标签条手指横划没有任何反应（只有两端那个 16px 的小箭头能点）。
+2. 冷启动进首页时只有"最新上传"是**一行 2 个**，切到其它分区仍是一行 1 个；
+   进一次设置页再返回首页，那些分区才变成一行 2 个。
+
+**根因**（两个独立问题）：
+
+1. **分区列表量到的是"假视口宽"**。分区页是 `IndexView.AddTab()` 往 `QTabWidget` 里加的
+   标签页（`QWidget` 容器 + `ComicListWidget`），而 Qt **只给当前页排几何**：隐藏页里的
+   `ComicListWidget` 视口宽是"没布局过"的值（真机实测 790px，被页宽上限 366px 夹住），
+   而它真实宽度只有 330px。`MeasureGridAvail` 拿这个假视口宽反算封面宽 → 分区里的封面
+   按**偏大的尺寸**建好；`RefreshItemSizeHints` 又按同一个假视口 `setGridSize` 出一个偏大的
+   栅格（> 视口/2）→ 用户真的切过去时就是一行 1 个。
+   而"进设置页再返回"会走 `InstallReflowHook` 重排**整个首页**（那时列表已可见，量到的是
+   真实宽度）→ 所以看起来是"过一会儿自己好了"。
+2. **标签条不能横划**：`QTabBar` 只有两端那两个 16x32 的滚动箭头 —— 它**没有**公开的
+   滚动偏移 API（`scrollOffset` 是私有成员），拖动也不认（`mouseMoveEvent` 里没有拖动
+   滚动的实现），滚轮事件在没有"像素滚动能力"的设备上还会被当成"切标签"。384px 的屏上
+   首页有 10+ 个分区、标签总宽 700+px，那两个小箭头根本点不过来。
+
+**修法**：
+
+| 位置 | 改动 |
+| --- | --- |
+| `mobile_ui.MeasureGridAvail` / `_GridOverflow` | 只量**可见**的列表：隐藏页的视口是没布局过的假值，不再把全局封面宽带偏（也不再用假视口判"一行放得下几个"） |
+| `mobile_ui.ReflowGridCoverForPage`（新增） | 按"刚露出来的这一页"的真实视口宽重排一次；封面宽没变(`_jmGridSized` 短路)时也补一次 `RefreshItemSizeHints` —— 隐藏期间根本没按真实视口定过栅格 |
+| `mobile_ui.InstallTabReflowHook`（新增） | 给所有 `QTabWidget` 接 `currentChanged`，延后 60ms 调上面那个（先让 Qt 把新页的几何摆好）。`Apply` / `OnShown` 各装一次（幂等，标记 `_jmTabReflow`） |
+| `mobile_ui_touch._TabSwipe` / `_TouchRouter`（重制） | 标签条横划滚动(第八轮重制为纯触控)：手势/跟手/惯性全在 `_TabSwipe` 自己的触控轨迹上算(1:1 跟手，松手按最后一段位移估速度后指数衰减，到尽头/慢下来就地停)；每一帧的增量喂给标签条 `wheelEvent` 里那条**像素滚动**分支（自造带 `PixelScroll` 能力的 `QPointingDevice`，主机实测喂 -60px 就精确移动 -60px）。不再挂 QScroller：`QScrollPrepareEvent`/`QScrollEvent` 只有 `QAbstractScrollArea` 实现了，QTabBar 上攒出的 scroller 从来不被认领(松手后 `state()` 恒 `Inactive`)。press 一律**扣住**（`QTabBar` 在 press 时就把手指底下的标签切成当前标签，横划顺带切页会白跑一次网络请求），判定成点按(tap)才走 `setCurrentIndex` 激活。第一次摸到某个标签条时会做一次"自检"（喂 8px 看偏移动不动），推不动就只在日志里记一行、不再假装在滚 |
+| `mobile_ui.TabBarOffset`（新增） | 给宿主回归/日志用：从 `tabRect(0).x()` 反推标签条当前偏移（`QTabBar` 没有公开的偏移 API） |
+| `mobile_ui_base._EventLocalPos` / `_EventGlobalPos`（新增） | 各处"取事件坐标"统一成这两个函数（滑动防误触、标签条横划、看图拖动共用一套） |
+
+**为什么只有"最新上传"是对的**：它的列表一直是可见的，量到的是真实视口。主机侧能把这条
+时序完整复现出来（同一份数据，两批 item 把全局封面宽改两次）：先填(隐藏的)分区页 →
+量到 320px 视口 → 142px，后填可见的"最新上传" → 量到 312px → 138px，于是**后加的那批才是对的**。
+
+**主机侧回归**（`android/tools/smoke_test_android.py` §③.6，offscreen 不联网，已进 `wsl_run_smoke.sh`）：
+真机顺序（先填隐藏分区、再点标签切过去）走一遍：断言"隐藏页不参与测量"、"切过去后一行 2 个"、
+"点按标签仍能切分区"、"横划 1:1 跟手 + 松手有惯性 + 不切分区"：
+
+```
+[ok] 分区(隐藏标签页)封面: 隐藏时不参与测量 -> 切过去后 4 个封面收成栅格 165px / 视口 348px -> 一行 2 个
+[ok] 分区标签条横划: 手指划 210px -> 跟手滚 210px -> 惯性后共 247px (惯性 1 次), 当前分区仍是 1
+```
+
+> 说明：Qt 里"触摸平滑滚动"的官方做法是 `QScroller`（`EnableTouchScroll` 给所有
+> `QAbstractScrollArea` 用的一直是它）——**只有它才吃** `QScrollPrepareEvent`/`QScrollEvent`
+> 这套协议（`QAbstractScrollArea::event` 认这两个事件）。`QTabBar` 既不是滚动区域、也
+> 没有公开的偏移 API：挂 QScroller 上去，松手后 `state()` 一直是 `Inactive`，没有任何
+> 惯性，所以标签条的手势/跟手/惯性改成自己算；"致动"仍然只能走它自己 `wheelEvent` 里
+> 那条**像素滚动**分支（合成一个带 `PixelScroll` 能力的 `QPointingDevice` + `QWheelEvent`，
+> 主机实测喂 -60px 就精确移动 -60px）——这是内部致动，不是把用户触控映射成鼠标/滚轮操作。
+> 手感相关常量都在 `mobile_ui_base.py`：`TouchSlopPx`（点按/滑动阈值）、`TabSelfCheckPx`
+> （自检位移）、`TabFlingDecay`/`TabFlingMinVelocity`/`TabFlingMaxVelocity`（惯性）、
+> `TabFlingStopGapMs`/`TabVelocityWindowMs`/`TabVelocitySampleMs`（速度估计）。
+>
+> 第六轮真机反馈补充：第五轮那个"点两端箭头"的实现**在真机上滑动仍然没有反应**
+> （主机上却是通的），所以这一轮把滑动判定并进触控守卫（和防误触同一个状态机、
+> 同一条真实投递路径），并改成上面这条"像素滚轮致动"的通道 —— 它不依赖箭头是否
+> 可见/可用，也不依赖 `usesScrollButtons()`，只要 `SH_TabBar_AllowWheelScrolling`
+> 为真（Qt 的 `QCommonStyle` 默认给真，Android 用的就是它）就能滚。真机上如果还滑不动，
+> 日志里会有一行"标签条横划致动自检失败(像素滚轮推不动标签条)"，那行直接说明是这条通道没通。
+
+### 3.8 第七轮真机反馈：首页除"最新上传"以外的分区**完全不能滑动**（所有滚动区域都要能手指滑动）
+
+**现象**：冷启动进首页，只有"最新上传"能手指上下滑动（带惯性）；切到任何其它分区后列表
+**一点都滑不动**（不是"滑得涩"，是纹丝不动），而且在上面滑动还会误点中封面（"滑动防误触"
+也一起没生效）。
+
+**根因**：**滚动区域是"后来才建出来"的，而"接管"只做过一遍。**
+`EnableTouchScroll(mainView)` 给每个 `QAbstractScrollArea` 装 `QScroller`（`MakeScrollable`），
+而它只在窗口 `Apply`/`OnShown` 时跑一遍。首页的分区页却是**网络回来后**由 `IndexView.InitBack`
+逐个 `AddTab()` 建出来的 —— 那一刻分区列表还不存在，于是它们**从来没有被接管**
+（`_jmTouchScroll=False`、也没 `grabGesture`），手指在上面划就和没接管的普通控件一样：
+Qt 不把它当滚动区域，也没有惯性。
+
+主机侧对照（`probe_scroll_pages.py` C 段，合成真实触摸事件走"Qt 手势 → QScroller → 滚动条"
+这条与真机同一条路），**改之前**：
+
+```
+AddTab 新建 1 个滚动区域, 接管=[False]
+新分区列表(用户报的那个)     划 150px -> 松手跟   0px, 停稳    0px  接管=False <<< 不跟手
+```
+
+**修法**（就一件事：让"接管"覆盖到**后建**出来的滚动区域；移动端标志/守卫分支包着，桌面端不变）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `mobile_ui_touch._ScrollWatcher`（新增） | App 级事件过滤器，听 `QEvent.ChildAdded`/`ChildPolished`；新出现的滚动区域攒起来，用 0ms 定时器推到**下一轮事件循环**再统一扫。建立即接管，覆盖分区页、详情页/设置页里的滚动区、看图工具菜单等一切"晚建"的滚动区 |
+| `mobile_ui_touch._AdoptScrollArea`（新增） | `_TouchRouter.OnTouch` 里的**兜底**：手指按到控件上时向上找最近的 `QAbstractScrollArea`，没接管过就地补装。放在判定模式之前 —— 同一次按下就算进"已接管滚动区域"，连带滑动防误触一起生效 |
+| `mobile_ui_touch.InstallScrollWatcher`（新增） | `Apply`/`OnShown` 各调一次（单例；顺手再全量扫一遍，幂等） |
+| `mobile_ui_touch.EnableTouchScroll`（改造） | 也覆盖 `root` **自己**（改用 `_SelfAndChildren`：`findChildren` 不含自己，而调用方经常直接把"那个列表"传进来），并返回本次新接管的个数（给 watcher 统计与回归断言用；现有调用点都忽略返回值） |
+
+**为什么"当场就扫"不行**：`ChildAdded` 是 `QWidget` 构造函数里发给父控件的，那一刻新控件的
+Python 子类还没构造完（属性/重写都还没挂上，`isinstance` 都不可靠），所以攒到下一轮事件循环
+再扫才准。**为什么不散点补**：分区页只是第一个现场 —— 详情页里的滚动区、看图工具菜单、
+以后任何新页面都会踩同一个坑；监听 `ChildAdded` 是唯一"建出来就接管"的位置，不用每加一个
+页面就补一行，也不用在建表期间反复遍历整棵树。
+
+**主机侧回归**（`android/tools/smoke_test_android.py` §③.7，offscreen 不联网，已进 `wsl_run_smoke.sh`）：
+用合成的真实触摸事件（`TouchBegin/Update/End` 直接投给视口）量四件事 —— ① `AddTab` 出来的
+分区列表自动接管 + 划 150px 跟手 150px（含惯性）；② 抹掉接管标记后手指按上去就地补装
+（兜底那一半）；③ 启动时就存在的首页/详情页/设置页都能手指滑动；④ 全量清点没有漏网的滚动区域：
+
+```
+[ok] 后建滚动区域自动接管: AddTab 出来的 ComicListWidget._jmTouchScroll=True, watcher={'seen': 14, 'scans': 5, 'adopted': 13, 'pending': 0}
+[ok] 后建分区列表手指滑动: 划 150px -> 跟手 150px(1:1，含 500ms 缓动走完)
+[ok] 后建分区列表松手惯性: 再划 150px -> 停稳共 2677px(手指只划了 150px)
+[ok] 兜底补装: 抹掉接管标记后按下 -> 就地重新接管，同一次按下即算进滑动区
+     | 首页 最新上传: 已接管(可滚范围 0px，不量跟手)
+[ok] 详情页 手指滑动: 划 150px -> 跟手 150px -> 停稳 150px
+[ok] 设置页 手指滑动: 划 150px -> 跟手 150px -> 停稳 150px
+[ok] 全量清点: 104 个滚动区域里只剩看图控件(QGraphicsView 自己拖动翻页)没接管
+
+结果: smoke=0 interfaces=0 crypto=0 image=0 picker=0
+```
+
+> 说明：offscreen 平台上 `QTest.touchEvent(QWindow*)` 送不进应用主窗口那一层
+> （`windowHandle()` 对应用内子控件返回 None），所以主机侧改成
+> `QApplication.sendEvent(viewport, QTouchEvent(...))` 合成触摸 —— 走的是同一条
+> "手势识别 → QScroller → `QScrollEvent` → 滚动条"的路（主机实测划 150px 立即跟 150px、
+> 松手惯性到 852px）。`QGraphicsView`（看图界面 / 超分预览）**故意不接管**：它的拖动是它
+> 自己的翻页/平移逻辑（`InstallReaderDrag`），所以清点时的唯一例外就是它。
+
+### 3.9 开启 HTTP3/ECH 后"CDN 请求大量失败"（失败自动降级并记住）
+
+**现象**：设置里勾上"启用HTTP3（UDP）"、"启用ECH"后，日志里成片出现
+`error:XXXReq, ech:True, url:..., h3:True`（超时 / 连接错误 / `ECH_REJECTED`），
+接口和 CDN 图片都大量失败（不崩溃，只是全都不通）；把两个勾去掉就恢复。
+
+**根因**：这两项都能提速，但都会让**每一个**请求都白等一轮：
+
+* **HTTP/3 走 UDP**。封掉 UDP 443 的网络里 QUIC 握手一直收不到回应，而 libcurl 自带的
+  fallback 只在"HTTP/3 连接**建立失败**"时才触发 —— 一直等不到就只能等到超时，
+  HTTP/2 那条路根本没机会走。它还不看域名：`GetJmServerReq` 的 `bytepluses.com`
+  （JM 服务器列表）、DOH 用的 `jpacg.cc` 这些**根本不说 QUIC** 的域名也会被设成 HTTP/3。
+* **ECH 配置是"拉一次用很久"**：`login_new_view.InitEchConfig` 每 15 分钟从
+  `cloudflare-ech.com` 拉一次写进 `QtOwner().echConfig`，再作为 `ecl:<base64>` 套到
+  所有 CF 域名上；配置轮换/过期时服务端直接回 `ECH_REJECTED`，TLS 握手失败。
+* **`curl_cffi` 没编出 HTTP/3** 时，设 `HTTP_VERSION=3` 会直接报
+  `CURLE_UNSUPPORTED_PROTOCOL`（也是异常）。
+
+**修法**（`src/server/`，与平台无关；垫片下自动跳过，所以 Android 现有行为一字不变）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `req.ServerReq.DowngradeTlsOptions`（新增） | 请求失败后关掉 HTTP/3 / ECH 并重试一次；`ECH_REJECTED` 先关 ECH，其余先关 HTTP/3；每项只关一次，都关完就返回 `False`（不会死循环） |
+| `req.Http3EchFallback`（新增） | **进程级的"用完就关"开关**：只要有一个请求因为它们失败就整体记住，后续请求 `SetCurlOpt` 直接不再开 —— 否则"每个请求各超时一次"的"大量失败"依旧存在 |
+| `req.IsAdvancedTlsSupported`（新增） | 垫片在 `android/shims/curl_cffi/__init__.py` 里声明 `HTTP3_ECH_SUPPORTED=False`，这里返回 `False`：降级重试只会多打一轮请求，直接不做 |
+| `Server._Send` / `DownloadBookHandler` | 接口请求与 CDN 图片下载失败后各降级重试一次。**测速故意不降级**：它是诊断，要让用户看到 h3 到底通不通 |
+| `Server._Send`（附带修） | 每次尝试开头把 `task.status` 复位成 `Status.Ok` —— 否则"重试成功了，handler 还按上一次的错误状态当失败处理"（下载那条路的 `ReDownload` 本来就是这么做的） |
+| `login_proxy_new_widget.SaveSetting` | 用户重新保存"代理设置"就 `ResetHttp3EchFallback()`：换网络/换 IP 后给一次重试机会 |
+
+**回归**（新增 `android/tools/host_test_net_fallback.py`，已进 `wsl_run_smoke.sh` 第 7 项，
+不联网、用假 session 驱动真实调用点）：先断言垫片下**不降级、不改状态**（Android 行为不变），
+再模拟真 `curl_cffi` 验证"第一轮只关 HTTP/3 → 还失败再关 ECH → 关完不再重试"、
+"记住后新请求不再开"、"重存代理设置后重置"、"`ECH_REJECTED` 优先关 ECH 而保留 HTTP/3"，
+最后驱动 `Server._Send`（接口，含"测速不降级"）与 `DownloadBookHandler`（CDN 图片）：
+
+```
+[ok] 垫片下 HTTP/3/ECH 不触发降级重试(不改变 Android 现有行为)
+[ok] HTTP/3、ECH 失败自动降级并记住(ECH 被拒先关 ECH)，Reset 后重置
+[ok] 接口失败一次: 关 HTTP/3 重试成功 -> [{'ver': 10005, 'ech': True}, {'ver': 10002, 'ech': True}]
+[ok] 接口连失败两次: 再关 ECH 重试 -> [{'ver': 10005, 'ech': True}, {'ver': 10002, 'ech': True}, {'ver': 10002, 'ech': False}]
+[ok] 关完还失败不再重试, 调用次数 = 3
+[ok] 测速 ping 不降级(让用户看到 h3 到底通不通)
+[ok] CDN 图片失败: 关 HTTP/3 后重投(ReDownload)
+
+结果: 全部通过
+```
+
+> 顺带修掉一个老问题：`Server._Send` 重试（切 URL / 降级）时**没有把 `task.status` 复位**，
+> 于是"重试成功了，handler 还按上一次的错误状态当失败处理"。现在每次尝试开头都置
+> `Status.Ok`（下载那条路 `ReDownload` 本来就是这么做的）。
+
+### 3.10 用官方 curl_cffi android wheel：目标 Python 必须整机迁到 3.14
+
+**问题**：`android/shims/curl_cffi` 垫片没有 TLS 指纹伪装，遇到 Cloudflare 严格模式可能 403；
+HTTP/3、ECH 两个开关在垫片下也是空操作。想要原生 `curl_cffi`，就得有 Android 的预编译包。
+
+**结论先行**：官方 wheel **不能直接塞进现有构建** —— 目标 Python 是 3.11，而它绑死 3.14：
+
+| 检查项 | 实测值 |
+| --- | --- |
+| 官方 Android wheel 发布范围 | 0.16.3 只有 `cp313` / `cp314` 两个 tag（`android_24_arm64_v8a`），**没有 cp311** |
+| `curl_cffi/_wrapper.abi3.so` 的 NEEDED | `libpython3.14.so`（cp313 那个是 `libpython3.13.so`）—— 名义 abi3，实际绑大版本 libpython |
+| Qt 6.11.2 android wheel（现状） | `cp311`，`.so` NEEDED `libpython3.11.so` |
+| Qt 6.12.0 android wheel（2026-10-08 发布） | `cp310-abi3` 标签，但 `.so` 同样 NEEDED **`libpython3.14.so`** —— 与 curl_cffi cp314 wheel 正好对齐 |
+
+所以"用官方 wheel" = **把整个 app 迁到 CPython 3.14**，正好 Qt 6.12.0 的 abi3 wheel 也是 3.14 构建的，
+两个 wheel 天然匹配。
+
+**迁移动作**（都在构建脚本里，可复现）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `tools/wsl_patch_p4a_versions.sh`（新增） | p4a 的 `python3`/`hostpython3` recipe 3.11.13 → **3.14.8**（recipe 的 patch 列表自带 3.14 分支）；`cffi` 2.0.0 → **2.1.1**（`curl_cffi` 运行时 `import _cffi_backend`，2.0.0 不支持 3.14） |
+| `tools/wsl_fetch_android_wheels.sh`（新增） | 下载并 **sha256 校验** Qt 6.12.0 abi3 + curl_cffi 0.16.3 cp314 三个 wheel。踩过的坑：86MB 下载中断留下的半截文件被当成"已完成"，构建时 unzip 才发现坏了 —— 所以校验不过就删掉重下 |
+| `recipes/curl_cffi/__init__.py`（重写） | 原来是"用 NDK 自编 curl-impersonate 再编 cffi 扩展"（交叉编译链路跑不通）。改成**解包官方 wheel 进 site-packages**，与 Qt deploy 工具生成的 PySide6 recipe 同一思路；并把 NDK 的 `libc++_shared.so` 按 `libc++_shared-d523468d.so` 放一份进 `lib/arm64-v8a/`（wheel 的 `NEEDED` 是这个带 hash 的名字） |
+| `tools/patch_buildozer_spec.py` | `curl_cffi` 加进 requirements（之前是 SkipRequirements，因为只有垫片）。`curl-cffi`（连字符写法）仍跳过 —— 那会被 p4a 当 pip 包拉 manylinux wheel |
+| `tools/wsl_reset_py314_cache.sh`（新增） | **一次性冷启动**：清掉所有 3.11 时代的编译缓存（`$JM_WORK/keep`、两处 `.buildozer`）—— p4a/buildozer 的已编译产物绑死 `libpython3.11`，一个都不能复用。与 Python 版本无关的源码包（openssl/libffi 等）会被 `wsl_seed_from_old_storage.sh` 复制回来，CPython 3.14.8 源码包由 `$JM_WORK/Python-3.14.8.tgz` 兜底（该脚本也已从 3.11.13 改成 3.14.8） |
+| `tools/wsl_setup_venv314.sh`（新增） | 建 `venv314`（系统 python3.14 + PySide6-Essentials 6.12.0 abi3 linux 版），`wsl_run_smoke.sh` 优先用它跑回归 —— 让语法编译/冒烟覆盖**目标 3.14 的真实语义**（venv311 覆盖不到 3.14 的移除项）。buildozer 仍只在 venv311 里跑（它要求宿主 ≤3.11） |
+| `tools/wsl_build_apk.sh` | wheel 选中后加防御断言：必须是 `cp310-abi3`，防止有人把旧 cp311 wheel 放回 `wheels/` 混进 3.14 构建（`wsl_fetch_android_wheels.sh` 会把旧版本 Qt wheel 归档进 `wheels/archive/`，因为构建脚本用 `ls \| head -1` 选 wheel，字符串排序 6.11.2 < 6.12.0 会选错） |
+
+**执行顺序**（迁移当天的完整链路，之后日常构建不再需要前两步）：
+
+```bash
+wsl -u root -e bash -lc 'bash <仓库根>/android/tools/wsl_setup_venv314.sh'   # 宿主 3.14 回归环境
+wsl -u root -e bash -lc 'bash <仓库根>/android/tools/wsl_reset_py314_cache.sh' # 清 3.11 缓存(下次为全量冷构建)
+wsl -u root -e bash -lc 'bash <仓库根>/android/tools/wsl_build_apk.sh --version 0.3'  # 出包
+```
+
+**为什么解包进 site-packages 就能用**：pycryptodome 的 cffi 扩展（`Crypto/Cipher/_raw_*.so`）
+走的就是这条路。注意**落点不是 `assets/private.tar`** —— p4a 的 qt bootstrap 把整个
+site-packages 打成 `lib/arm64-v8a/libpybundle.so`（一个 tar.gz 伪装成 .so，102MB），
+运行时由 `PythonUtil` 解包到应用私有目录的 `_python_bundle/` 下再 `import`，
+所以 `.so` 能按正常路径 `dlopen`。排查时 `unzip -p apk lib/arm64-v8a/libpybundle.so | tar tz`
+（或本仓库的 `wsl_verify_new_apk.sh`），别去 private.tar 里找 site-packages。
+
+**自动生效**：真包进 site-packages 后 `import curl_cffi` 优先命中真包（垫片只在真包缺失时才被
+`android/main.py` 加进 `sys.path`）；`IsAdvancedTlsSupported()` 找不到 `HTTP3_ECH_SUPPORTED`
+属性 → 返回 True，3.9 那套 HTTP/3、ECH 失败降级链路自动启用。
+
+**验证**（`wsl_verify_new_apk.sh` / `wsl_check_sync.sh` / `wsl_collect_apk.sh` 已加对应断言）：
+`libpython3.14.so` + `libc++_shared-d523468d.so` 在 `lib/arm64-v8a/`；`libpybundle.so` 里
+有 `_python_bundle/site-packages/curl_cffi/_wrapper.abi3.so`、`curl_cffi/fingerprints.pyc`、
+`curl_cffi/requests/session.pyc`、`curl_cffi.libs/libc++_shared-d523468d.so` 与
+`_cffi_backend.so`（cffi 2.1.1）。
+
+> 仍是**构建期自洽 + 宿主冒烟**的验证：本机没有真机（`adb devices` 为空），
+> "TLS 指纹伪装真的绕过 CF"要你在真机上确认。
+
+**3.14 迁移踩过的坑**（都已修在脚本里）：
+
+| 坑 | 现象 | 处理 |
+| --- | --- | --- |
+| p4a 自带 `3.14_armv7l_fix.patch` 是按 3.14.0 写的 | 3.14.8 上 `patch` 报 `Hunk #1 FAILED` | 上游 3.14.8 已含该修复（`Lib/sysconfig/__init__.py` 里有 `"arm": "armeabi_v7a"`），recipe 改成 `_p_version < Version("3.14.8")` 才打 |
+| `wsl_fix_recipe_urls.sh` 会强设 Python 版本 | 单独跑会把 3.14.8 改回 3.11.13 | 默认 `PYVER` 改成 3.14.8，且 `wsl_build_apk.sh` 里 fix 之后固定再跑 `wsl_patch_p4a_versions.sh` |
+| 被 kill 的构建留下截断源码包 | 大小够、`tar xf` 报 `unexpected EOF` | `wsl_seed_native_pkgs.sh` 用 `tar -tzf`/`unzip -t` 做完整性校验，不过就删掉重下 |
+| `distutils` 在 3.12 已移除 | `batch_sr_tool_view.py` import 直接崩 | 实测是死 import（全文件无调用），删掉 |
+| PySide6 6.12 剥掉了 `__doc__` | `host_test_file_dialog.py` 断 docstring 里的 `Tuple[str, str]` 失败 | 改成 docstring 非空才断言，为空则跳过（形状在 6.11 已验证，委托是原样转发） |
+| 宿主装了真 curl_cffi | `host_test_net_fallback.py` A 段"垫片语义"误命中真包 | shims 从 `sys.path.append` 改 `insert(0)` |
+| 旧 Qt wheel 混在 wheels/ 目录 | 构建脚本 `ls \| head -1` 按字符串序选中 6.11.2（cp311） | fetch 脚本把非目标版本归档进 `wheels/archive/`，build 脚本再加 abi3 断言 |
+
+### 3.11 第八轮真机反馈（2026-10-18，5 条）：SAF 选择器 / 双指缩放 / 页面宽度
+
+| # | 现象 | 根因（实证） | 修法 |
+| --- | --- | --- | --- |
+| 1 | 设置页、漫画详情页"宽度超出范围" | ①目录行里的路径 `QLabel` 的 `sizeHint` 就是**整段路径**宽度（`/storage/emulated/0/Android/data/<包名>/files/JMComic/commies` 60+ 字符），整行最小宽度远超屏幕；②详情页操作按钮行（6 个图标按钮 + 购买 + "上次看到第N章第M页"）最小宽度 549px | ①路径标签改成按宽度**中间省略**（`mobile_ui_layout.ElideText`，完整路径进 tooltip）；②按钮行折成多行（`WrapBookInfoButtons`）；③兜底 `ClampPageWidth`：拆行/压扁之后仍放不下的页面，把 `QScrollArea` 内容宽度夹到视口宽并关掉横向滚动条（宁可裁掉也不让整页能横向拖）；④换页后的重排在 150/650/1500ms 各跑一次（页面文字是网络回来后 `setText` 的，早先那一次量到的还是空文本） |
+| 2 | 看图菜单里"翻页模式"默认缩放不是 100% | `read_tool.ChangeReadMode2` 对 `UpDown/Samewight` 硬编码 `ScalePicture2(80)` | 手机上所有阅读模式都设 100%（桌面端保留 80%，窗口宽留白是刻意的） |
+| 3 | 看图页面**无法双指缩放** | 整条看图链路都建在鼠标事件上（`_ReaderDrag` 的 press/move/release、`read_graphics.eventFilter` 的三分区点按），而 Qt 只有在控件**不**接受触摸事件时才把触摸合成为鼠标事件 —— 想收 `QTouchEvent` 就必然丢掉鼠标，两者不能同时白拿 | `mobile_ui_reader._ReaderPinch`：视口 `WA_AcceptTouchEvents` + 自己把**单指**序列合成成鼠标事件（拖动/点按语义零变化），**双指**按两指距离比例走和菜单同一个入口 `ScalePicture2`。1→2 指时先合成 25px 移动再松手，避免那次 press 被场景当成"点按"误翻页 |
+| 4 | 选文件/选目录"索要过多权限" | 之前为了让 Qt 直接 `fopen("/storage/emulated/0/…")`，manifest 索要了 `READ_EXTERNAL_STORAGE`/`READ_MEDIA_IMAGES`/`MANAGE_EXTERNAL_STORAGE`（最后那个要用户去系统设置手动开"所有文件访问权限"），而且 scoped storage 下仍然读不到 | 全部改走 **SAF**（见下方"SAF 桥"），三个存储权限从 manifest 里删掉，一个都不留 |
+| 5 | 设置页"打开目录"点了没反应 | `QDesktopServices.openUrl(QUrl.fromLocalFile(path))` —— Android 上没有任何应用处理 `file://`（7.0 起系统就禁了） | 走 `Intent.ACTION_VIEW`（`DocumentsUI` 认 `vnd.android.document/directory`）：配了 SAF 导出目录的直接打开那个目录，否则打开本地路径；应用专属目录（系统对其它应用完全不可见）返回 `sandbox` 由界面给可操作提示 |
+
+#### SAF 桥：为什么绕这么一圈
+
+SAF（存储访问框架）是 Android 官方"不需要任何权限"的方案，但它的入口是
+`startActivityForResult` + `onActivityResult`，**Python 侧完全够不着**：
+
+* `pyjnius` 在 `bootstrap=qt` 下 dlopen 失败（`libjnius.so` 需要
+  `WebView_AndroidGetJNIEnv`，Qt bootstrap 没有这个符号，见 §3.4 #9）
+* PySide6 没有绑定 `QJniObject`
+* `am start` **不能**用来启自己的 Activity：Android 14+ 上
+  `ActivityManagerShellCommand` 把调用方包名写死成 `com.android.shell`，
+  被 `assertPackageMatchesCallingUid` 判为"包名不属于调用 uid"直接拒绝（Android 16 实测）
+* `am start-service --user 0` **可以**（实测只差"服务不存在"这一步）——
+  所以桥的入口是 Service，不是 Activity
+
+于是：
+
+```
+src/tools/saf_bridge.py            Python 侧：写请求 / 等结果 / 语义封装
+android/java/org/jmcomic/
+    SafService.java                同进程 Service：轮询信箱，用 ContentResolver 干活
+    SafPickActivity.java           不可见中转 Activity：拉起系统选择器、接 onActivityResult
+    SafStore.java                  SAF 读写实现(整树拷入/拷出、另存、显示名…)
+```
+
+通信是**文件信箱**（两端同 uid，同一个 `filesDir`）：
+
+```
+<filesDir>/saf/inbox/<id>.json    Python 写 {"id","op",...}
+<filesDir>/saf/outbox/<id>.json   Java 写 {"ok":true,...} / {"ok":false,"cancel":true}
+```
+
+* `id` 是定宽数字前缀 + 序号，Java 按文件名排序处理，请求顺序 = 提交顺序
+* 结果文件用 `.json.tmp` → `rename` 原子落地，Python 看到 `.json` 时内容一定完整
+* 等待用嵌套 `QEventLoop` + 60ms 轮询（和 3.3 的应用内选择器同一套办法，界面不冻）
+
+**语义约定**（业务层全是按路径干活的，SAF 给的是 `content://`）：
+
+| 场景 | 做法 |
+| --- | --- |
+| 选单个文件（超分导入图片、导入 zip） | SAF 选完立刻把内容拷进 `<filesDir>/import/`，返回**本地路径**（调用方一行不用改） |
+| 选目录（导入本地漫画、批量超分） | SAF 选目录 → 整棵树拷进 `<filesDir>/import/<目录名>` → 返回本地路径 |
+| 下载/缓存目录 | 本地落盘仍在应用专属目录（Android 10+ 无需权限）；SAF 选的目录记为**导出目标**，整本下完一次性导出（`DownloadItem.ExportToSaf`，Java 后台线程干，只投递不等结果） |
+| 另存为（复制图片、保存超分结果） | SAF `ACTION_CREATE_DOCUMENT` 选位置 → 先写本地暂存 → Java 写到那个 URI（`SafStore.WriteFile`） |
+| 打开目录 | 见上表 #5 |
+
+**降级**：桥没打进 APK / `am` 被拦 / Service 起不来时，`saf_bridge.IsSupported()` 或
+首次 `ping` 失败，`mobile_file_dialog` 自动回落到 3.3 那个应用内选择器（桌面端逻辑
+一个字没改）。代价是"取消"与"不可用"必须分清，否则会连弹两次选择器 ——
+`PickFile/PickTree` 取消返回 `False`、不可用返回 `None`。
+
+**构建挂钩**（`wsl_build_apk.sh` 步骤 3.6）：
+
+```bash
+python3 android/tools/patch_android_manifest.py \
+    --template <p4a>/pythonforandroid/bootstraps/qt/build/templates/AndroidManifest.tmpl.xml \
+    --java android/java --dist <dists>/JMComic <manifest...>
+```
+
+* 组件必须写进 p4a 的 **manifest 模板**（`{{ args.extra_manifest_application_xml }}`
+  那一行之前）：p4a 每次构建都按模板重新渲染 `src/main/AndroidManifest.xml`，
+  只补渲染产物下次就被覆盖
+* Java 源同理要在 gradle 编译**之前**就位，所以直接拷进 `dist/src/main/java/org`
+  （`android.add_src` 在这个 p4a 版本里只对 ant 生效，gradle 分支不读它）
+* `buildozer.spec` 的 `android.permissions` 现在只留
+  `INTERNET/ACCESS_NETWORK_STATE/WAKE_LOCK`
+
+**主机自检**（不需要手机）：`android/tools/host_test_saf_bridge.py`，用一个假 Service
+线程把协议的每条路径跑一遍（ping / 选文件 / 选目录 / 整树拷入 / 导出 / 另存 /
+sandbox 判定 / 取消语义）：
+
+```bash
+python android/tools/host_test_saf_bridge.py
+```
+
+### 3.12 第九轮真机反馈（2026-10-18 下午）：SAF 的四个真机坑 + 双指缩放卡死
+
+第八轮上线后真机(windows 侧 adb 验证 + logcat)暴露的问题，全部是"只在真机上才会犯"
+的错，逐条记下来：
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | **选完文件/目录什么都没发生**（选择器弹出来了，选完就回到应用，导入不生效） | `SafPickActivity` 声明了 `android:noHistory="true"` —— 这种 Activity 一旦被别的 Activity 盖住就被销毁，`onActivityResult` **永远不会回调**，我们的 `onDestroy` 反而把结果写成"取消"。日志里能看到 `saf op=pick` 之后再没有 `copyIn`，`files/import/` 一直是空的 | 去掉 `noHistory`（代价只是这一层透明 Activity 留在返回栈里，反正用户看不见） |
+| 2 | **从选择器返回就 SIGABRT 闪退**（`FORTIFY: pthread_mutex_lock called on a destroyed mutex` in `hwuiTask0`） | 透明 Activity 和 Qt 同进程：进程里多出一套 HWUI(View 渲染)，返回时 `ANativeWindow` 被销毁而 Qt 还在画 | 服务与 Activity 都声明 `android:process=":saf"`：Qt 进程里从此没有第二个窗口，它只是被 onPause。实测返回不再崩 |
+| 3 | 设置页**看不到当前下载/缓存目录**（只剩"下载 [打开目录]"和一片空白） | ①路径 `QLabel` 被 `EnableLabelWrap` 打开了 wordWrap，长路径折成十几行、整行 250px 高；②`sizePolicy=Ignored` 又没有 stretch，行里有按钮时被压成 0 宽；③省略只在 Resize 里算，而文字是页面建好之后才 `setText` 的，没有 Resize → 永远空 | ①`ElideText` 里 `setWordWrap(False)`+`EnableLabelWrap` 跳过已接管的标签；②给标签所在的那个**横向布局**（不是父 widget 的顶层布局）设 `setStretch(index,1)`；③`ElideText` 先把全文放上去，再用 Resize/0/150/600ms 四次重算省略 |
+| 4 | 选了目录但**设置看着没变**（以为没生效） | tree URI 上查 `OpenableColumns.DISPLAY_NAME` 恒为 null（那是 document URI 的列），名字空了于是界面退回显示本地路径 | `SafStore.DisplayName` 先 `buildDocumentUriUsingTree` 换成 document URI 再查；Python 侧再用 `UriDisplayName()` 从 URI 最后一段兜底；设置页配了导出目录时**这一行直接显示那个目录名**（tooltip 里写清"导出到 / 本地落地"两条） |
+| 5 | 打开目录跳到了"下载"根目录而不是所选文件夹 | `ACTION_VIEW` 喂 tree URI 时 DocumentsUI 只停在存储根 | `SafService.Open` 把 tree URI 换成"这棵树的根 document URI"再 `ACTION_VIEW`（mime=`vnd.android.document/directory`） |
+| 6 | 双指缩放**卡死/闪退** | 每动 5% 就 `ScalePicture2` 一次 → `changeScale` → 整页图形重排，手指还在屏幕上时做这个；1→2 指时还合成了一次 25px 移动，到边界会触发翻页（翻页弹加载框 = 输入事件里 show 窗口，正是 §3.4 #9 那个崩溃） | 缩放过程中**只记比例**，抬手时算一次百分比并 `QTimer.singleShot(0, ...)` 延后应用；1→2 指改成 `_ReaderDrag.CancelPress()`（把状态置成"已拖动"，那次 release 被吃掉，**不滚动也不翻页**），不再合成移动 |
+
+真机验证方式（不需要点屏幕也能验）：
+
+```bash
+# 1) 桥是否活：日志里应有 saf service ready / saf op=ping
+adb logcat | grep -E "JmSaf|saf bridge"
+# 2) 直接给信箱投一个请求(注意要 .tmp -> mv 原子落地，否则会被读到半截)
+adb shell "run-as org.jmcomic.jmcomic sh -c 'cat /data/local/tmp/req.json > files/saf/inbox/x.json.tmp && mv files/saf/inbox/x.json.tmp files/saf/inbox/x.json'"
+adb shell "am start-service --user 0 -n org.jmcomic.jmcomic/org.jmcomic.SafService"
+adb shell "run-as org.jmcomic.jmcomic cat files/saf/outbox/x.json"      # {"ok":true,...}
+```
+
+第九轮实测结论：`copyOut` 能把文件真的写进用户选的目录（`/storage/emulated/0/.../jmtest/a.txt` 落盘）、
+`copyIn` 能把整棵树拷进 `files/import`、tree URI 的持久授权在重启后仍有效。
+
+
+---
+
+### 3.13 第十轮：滚动模式缩放整体失效 + 单页放大后无法平移
+
+两个都是"缩放"这条链路上的老问题，都是真机 + 读代码定位的。
+
+**① 上下/左右/右左滚动模式下双指缩放（和缩放滑块）完全没反应**
+
+`read_graphics.ChangeScale()` 里有一段 `self.readImg.ShowImgAll(); return`（`ca41d1d`
+那次更新加的），把**所有模式**都改成走 `ShowImgAll` 了。而滚动模式里重排走的是
+`SetPixIem -> GetReadScale`，那个函数对滚动模式**把尺寸夹在视口上**：
+
+```python
+ReadMode.UpDown:          toScaleW = min(maxWidth, maxWidth * scale)   # 夹宽
+ReadMode.LeftRightScroll: toScaleH = min(maxHeight, maxHeight * scale) # 夹高
+```
+
+宽度/高度一封顶，`scaleCnt` 再大图片都一点不变 → 缩放看起来"完全不生效"。
+单页/双页不夹（`toScaleW = maxWidth * scale`），所以那边一直是好的 ——
+正好对应"只有滚动模式不能双指缩放"。
+
+修法：滚动模式恢复走**视图变换**（`Scale(ratio)`，`ca41d1d` 之前就是这么做的），
+比例直接算 `target / 当前 m11`（原来是 1.1 连乘 `abs(scale)` 次，150% 会变成 161%）：
+
+```python
+ratio = (1 + self.scaleCnt * 0.1) / self.transform().m11()
+self.Scale(ratio)
+```
+
+**② 双指缩放"不启动"：两根手指落在两条触摸序列里**
+
+Qt 的多点触摸是**每个触点一个目标控件**的。滚动模式下相邻页是
+`InitAllQLabel` 建的 `QGraphicsProxyWidget` 里嵌的**真实子窗口**（和视口一样大），
+手指常常一根落在图元上、一根落在相邻页的窗口上 —— 两条**独立序列**，每条只有
+一个点。只判断"这次事件里有几个点"的过滤器永远等不到两个点。
+单页模式整页就是一个大窗口、两根手指都在它身上，所以那边一直好使。
+
+修法：`_ReaderPinch` 把各条序列的触点按 `QEventPoint.id()` 累积到一张表里，
+够两个就进缩放；距离用**全局坐标**（不同控件的本地坐标不可比），合成鼠标事件时
+再从全局坐标 `mapFromGlobal` 换到视口坐标。诊断日志会打印每个触点下面的控件：
+
+```
+reader pinch: 开始双指缩放(base=100%, 模式=ReadMode.LeftRightScroll, 距离=612, 触点数=2)
+reader pinch: 触点 3 在(420,1500) 下面 = ReadVulkan
+reader pinch: 触点 4 在(980,1500) 下面 = QLabel        <- 落在相邻页的嵌入窗口上
+```
+
+**③ 单页/双页：放大后左右滑动只会翻页，看不到图片其它部分**
+
+两个原因叠加：
+
+* `ResetMaxNum()` 的页面模式分支**只设了垂直滚动范围**，横向那几行是被注释掉的
+  → 放大后 `hScrollBar.maximum` 一直是 0；
+* `_ReaderDrag._Scroll()` 在非滚动模式里"到边界就翻页"，`value == maximum == 0`
+  永远成立 → 任何一次横滑都是翻页。而且它**只吃横向位移**，纵向 dy 直接丢掉，
+  所以放大后既不能左右看、也不能上下看。
+
+修法：`ResetMaxNum` 用 `itemsBoundingRect()` 算场景矩形（放大后图片是**居中**摆放
+的，左边会伸出负 x，所以 `setSceneRect` 要从负 x 起算），纵向/横向范围一起给；
+拖动在"已放大"时改走 `_Pan`（两轴都滚），**只有 100% 时**才保留"滑到边界翻页"；
+另外放大状态下点按不再翻页（想平移时常常只滑十几像素，还在 20px 的"点按"判定里，
+一松手就翻页会把当前视角丢掉）。
+
+**④ 预览期间不许"滚动换页"**
+
+双指缩放的过程是 `QGraphicsView.scale()` 预览（只改绘制变换，不重排）。但滚动模式里
+`view.scale()` 会让 `QGraphicsView::updateScrollBars` 去改滚动条的值，`ReadScroll`
+的动画结束后 `OnValueChange` 会**按滚动位置换页**（`ReloadImg` 整页重排）——
+手指还在屏幕上，手感直接崩。所以预览期间给视图挂 `_jmPinchPreview`，
+`ReadScroll.OnValueChange` 看到就跳过换页逻辑。
+
+
+---
+
+
+### 3.14 下载目录"直写"：不再先落私有目录再导出
+
+**起因**（用户反馈）：把下载路径改成手机存储里的某个目录之后，文件并没有真的待在那里 ——
+原来的实现是"先写进应用专属目录、整本下完再拷到用户选的目录"，于是：
+
+* 下载到一半取消 / 进程被杀，私有目录里留下一份用户根本不知道的副本；
+* 在文件管理器里看不到正在下载的内容，看起来像"设置没生效"；
+* 几十本漫画占两份空间。
+
+**做法**：给业务层一个统一文件层 `src/tools/vfs.py`，路径写成
+`saf://<树 key>/commies/…`：
+
+```
+saf://t1/commies/作者/书名/original/第01话/0001.jpg
+   │            └── 树里的相对路径(和本地路径段一一对应)
+   └── 目录树登记表的短 key(<filesDir>/saf/trees.json)
+```
+
+`saf://` 开头的交给 SAF 数据面直接读写，其余照旧走 `os`。业务代码(下载、超分、
+删除、看图、本地书架)完全不关心自己在写哪一边。
+
+**数据面**（`android/java/org/jmcomic/SafIoServer.java`）：在 `:saf` 进程里开
+`127.0.0.1:<port>` 的 socket，端口写进 `<filesDir>/saf/io.port`。
+一次请求 = 一行 JSON 头(+ 写入时紧跟 `size` 字节原始数据)，应答一行 JSON
+(读取时后面跟 `size` 字节)。全程**不落地任何临时文件**：
+
+```
+{"op":"write","uri":"content://…","rel":"commies/x/1.jpg","size":123456}\n
+<123456 字节>
+→ {"ok":true,"size":123456}
+```
+
+支持的 op：`ping / write / read / stat / list / mkdirs / delete / doc`。
+一页图一次 `openOutputStream` 是省不掉的，但"每页都重新列一遍父目录"可以避免 ——
+`saf_store` 按目录缓存一次子项表，新建的文件直接塞进缓存（一本漫画几百页，
+从"每页 2 次 query"降到"每目录 1 次"）。
+
+**三个真机坑**（都在 0.40/0.41 实测踩到）：
+
+1. **`:saf` 进程被系统冻结**：空闲一会儿会被放进 cached 状态，内核照样受理 TCP
+   连接（backlog），但进程里的 `accept` 不跑 —— 现象是"连接成功、永远没有应答"。
+   所以每次连接先 `ping`（2.5s 无应答就 `am start-service` 重新拉起再重连）。
+2. **`socket.makefile()` 会连坐关掉 socket**：探活和正式请求共用一个 socket 时，
+   ping 用的 file 对象一旦被 GC，底层 socket 就被关掉 —— 正式请求一 `sendall` 就
+   `BrokenPipeError`。改成自己用 `recv` 缓冲读行/读定长。
+3. **`DocumentsContract.deleteDocument` 对"从树构建的 document uri"比较挑**，
+   失败时只是返回 false/抛异常 → 目录删不掉。现在递归删 + 兜底
+   `ContentResolver.delete`，并把失败原因放进应答的 `errors`。
+
+**换目录时搬旧数据**（`src/tools/download_path.py`）：选中新目录后，内存与数据库里的
+`savePath/convertPath` 立刻做前缀替换（`DownloadView.OnDownloadRootChanged`），
+旧目录的内容在**后台线程**整棵复制过去，**全部成功之后**才删旧目录（中途失败就保留，
+宁可多占一份也不删用户的东西）。
+
+**界面**：设置页"下载"一行显示还原后的真实路径（树 URI 里的
+`primary:Download/JMComic` 能还原成 `/storage/emulated/0/Download/JMComic`），
+"打开目录"直接定位到 `…/commies`；缓存(封面/图片缓存/超分临时图)指向应用外部
+缓存目录 `/storage/emulated/0/Android/data/<包名>/cache/jmcomic-qt`，tooltip 里
+写明"可在系统存储设置或文件管理器中手动清理"（见 6 运行时目录）。
+
+**删除**：文件一定删掉（用户在意的是"漫画没了"）；**目录删不掉不算失败** ——
+ExternalStorageProvider 对目录的 `deleteDocument` 经常直接回
+`IllegalStateException: Failed to delete <path>`（哪怕目录已经空了），
+`ContentResolver.delete` 在 SAF 上又是 `UnsupportedOperationException`。
+所以 `DeleteRel` 返回 `{files, dirs, errors}`，文件失败才算错，空目录残留在所难免。
+
+**自检**：两层。
+
+* 宿主：`android/tools/host_test_vfs.py`（内存假树覆盖路径拼接/读写/扩展名探测/
+  整树复制/删除），已并入 `wsl_run_smoke.sh`。
+* 真机：`tools/saf_selftest.py`，由文件触发（不需要点 UI，下载按钮在模拟器上
+  注入点击点不准）：
+
+  ```bash
+  adb shell "run-as <包名> sh -c 'echo 1 > files/saf/selftest'"
+  adb shell am start -n <包名>/org.kivy.android.PythonActivity
+  # 4s 后读结果
+  adb shell "run-as <包名> cat files/state/jmcomic-qt/saf_selftest.txt"
+  ```
+
+  它用**和下载完全相同的入口**跑 写/存在/大小/读/无扩展名读/列目录/二次写/删除，
+  输出形如：
+
+  ```
+  下载根目录: saf://t1/commies
+  真实路径: /storage/emulated/0/Download/JMComic/commies
+  write saf://t1/commies/自检/第01话/0001: True
+  size: 4500 (期望 4500)
+  结果: OK
+  ```
+
+
+### 3.15 第十一轮真机反馈（2026-10-28）：输入法/分屏时弹层错位 + 页面闪烁
+
+**起因**（用户反馈）：点可输入的文本框弹出输入法后，页面会"闪一下并改变布局"；搜索页的
+「搜索记录」这类悬浮候选菜单会错位、甚至超出显示范围；分屏/小窗模式同样闪。
+
+**根因**（两处，叠加出现）：
+
+1. **候选弹层只在"弹出那一刻"算一次几何**。手机端候选弹层是主窗口里的子控件 overlay
+   （`popup_list.Install`；不能用顶层窗口，见 3.4 的 eglSurface 死锁），旧 `Show()` 里
+   `edit.mapTo(host, …)` 只执行一次 —— 输入法把窗口缩小、页面滚动、高级面板重排之后
+   都不会再算，弹层就停在旧位置；宽度/高度再被硬夹，极端小窗下会被 clamp 压回输入框上
+   或顶出可见范围。基线实测：搜索页弹层 `popup=[300,618,1103,1389]`，比输入框下沿
+   (y=491) 低 127px（≈42dp）；登录页「获取地区」弹层 `bottom=1983` 紧贴输入法顶边 1984
+   被直接裁断。
+2. **闪烁来自 resize 期间的"冻结重绘 + 每帧全量重排"**。`MainView.resizeEvent` 为桌面
+   窗口拖拽做了 `setUpdatesEnabled(False)` 冻 60ms 再强刷；但输入法/分屏会连续发 resize，
+   在 Android 上就表现为"白一下、跳一下"。同时每个 resize 事件都同步跑
+   `OnResize → UpdateLimit / RelaxMinSizes / ResetGridCover / ApplyGridCoverSize`，
+   连纯高度变化（输入法弹出）也重算整页网格封面（logcat「520 个封面改为一行 2 个」）。
+   另外窗口擦除帧用调色板底色，未对齐主题、偏白。
+
+**改法**：
+
+* **弹层跟踪重锚**（`src/component/line_edit/popup_list.py`）：手机端几何统一由
+  `_ComputeMobileRect` 计算（贴输入框下方，放不下翻上方；上下都放不下时**先按空间较大
+  的一侧收缩高度再选边**，避免最后 clamp 把弹层压回输入框；四周 `PopupMargin=4`，整个
+  矩形永不出宿主窗口）；`_PopupTracker` 监视宿主窗口/全部祖先/输入框/列表滚动条的
+  Move/Resize/Show/Hide/WindowStateChange/scroll，用 `QTimer(0)` 合并成一次 `Reanchor`，
+  另加 120ms 兜底；`Reanchor` 先比锚点指纹（宿主尺寸/输入框位置/行数），没变直接返回；
+  输入框隐藏、宿主隐藏、输入框滚出可视区时直接收起；桌面端继续走原来的 `Qt.ToolTip`
+  浮层（不跟踪，行为与之前一致）。
+* **尺寸适配**（`src/view/main/main_view.py:163-188`）：Android 分支 resize 只做
+  `mobile_ui.OnResize` 后直接 return，**不再 PauseRepaint/关更新重绘**（桌面路径原样
+  保留）。`src/tools/mobile_ui_hooks.py` 新增 `ResizeSettleMs=120` 空闲去抖：一串 resize
+  只结算一次；结算时只有「宽/limit/页面/窗口状态」变化才做
+  `RelaxMinSizes / ApplyGridCoverSize / ReflowPortrait`，**纯高度变化（输入法）跳过**；
+  `OnShown` 改为幂等（尺寸/页面/窗口状态未变只 `update()` 一帧）；`_ApplyAndroidBackground`
+  把主窗 `QPalette::Window` 对齐主题 QSS 底色（设备实测 `#31363b`），消除擦除帧白闪。
+  `mobile_ui.py` 的 `UpdateLimit` 按宽度缓存；`mobile_ui_layout.py:132-151` 的
+  `RelaxMinSizes` 加幂等 guard，避免每次 resize 全树重扫。
+* **可观测性**（`Log.Warn`，logcat tag 是 `python`）：
+  `resize: 448x608 limit=320 landscape=False page=SearchView[搜索] events=1 bg=#31363b updates=True -> height-only, skip relayout`
+  / `-> relayout`、`ui: shown: … skip(unchanged)`、
+  `弹层上下空间不足，收缩高度贴边: 宿主=300x198 输入框=(100,71,120,40) 上=65 下=81 -> 高=96`。
+
+**真机验证**（AVD `Pixel_9_Pro_XL` / Android 16 / x86_64，dpr=3，真屏坐标；adb screencap、
+logcat、burst 帧分析）：
+
+| 场景 | 旧代码 | 新代码 |
+| --- | --- | --- |
+| 搜索记录弹层 + 输入法（搜索页） | popup=[300,618,1103,1389]，低于输入框 127px | popup=[300,498,1103,1269]，贴输入框下沿 gap=7px，bottom_found=True，未裁断 |
+| 输入法开/关（各 2 次） | 关输入法 55 帧 burst 出现 ~0.34s 深色空白带 + 一次整页重排（弹层跳 y=854） | burst 45/55 帧白闪帧=0；4 条全部 `height-only, skip relayout`，relayout=0、网格重算=0、updates=True |
+| 分屏/小窗 `wm size 900x1600` | 弹层几何失败（检测不到） | 宽 448→300dp：**恰好 1 条 `-> relayout`（events=2 合并）**；随后 2 条 height-only；输入法下弹层收缩为高 96dp、popup 底 738 < 输入法顶 801，列表内部滚动 |
+| 180° 旋转 / 合成横屏 | — | 180°：无重排、弹层仍贴住输入框 gap=7px；横屏 `wm 2992x1344`：Qt 收 300x372dp events=4 → 1 条 relayout |
+| 前后台 | 回前台全量 reflow | `ui: shown: 448x920 … skip(unchanged)`，无 resize、无重排 |
+| 登录页 TipLineEdit「获取地区」+ 输入法 | 弹层 bottom=1983 被输入法顶 1984 裁断（bottom_found=False） | 自动翻到输入框上方：popup=[276,777,875,1470]，bottom_found=True，完整可见；候选「全部地区/加拿大/德国/美国/英国/荷兰/香港」可点 |
+| 登录页 TipLineEdit「DOH」+ 输入法 | — | 弹层贴 DOH 输入框下沿约 2dp，4 条候选 +「添加 DOH 地址」行完整在输入法上方（`tip_doh2/D1_doh_ime.png`） |
+| 回归：首页→详情→返回→搜索 | — | OK，`traceback=0` |
+
+宿主机自检：`android/tools/host_test_search_popup.py`（覆盖跟随重锚、宿主 resize、宽度变化、
+300x250 极端小宿主收缩不压输入框、点外部收起、开合动画不被抖动打断）、
+`host_test_proxy_dropdowns.py`（登录页 TipLineEdit 下拉）、`host_test_app_state.py`
+（前后台）全部 PASS。
+
+**审计**：手机端所有"带悬浮候选菜单的输入框"共两类，都走同一套 `popup_list`：
+`SearchLineEdit`（`src/interface/ui_search.py:63`）与 `TipLineEdit`
+（`src/interface/ui_login_new.py:1001`/`:1043`、`src/interface/ui_login_proxy_widget.py:236`/`:506`/`:524`）；
+全仓库没有 `QCompleter`/`setCompleter`/`setEditable` 等其它自绘悬浮候选层。
+
+**行为边界**：弹层在"输入框移动 / 页面滚动 / 窗口 resize"时跟随重定位；输入框滚出可视区、
+页面切换、窗口隐藏时直接收起；窗口极矮时压缩弹层高度并让列表内部滚动（不再压回输入框）。
+
+**已知限制**：APK manifest 锁竖屏（`screenOrientation=1`），真 90/270° 旋转与本机真分屏
+无法在模拟器上完整复现，用 `wm size` 合成验证；`wm size reset` 瞬间的 2 帧深色是平台
+SurfaceView 重分配（非本代码可修）。真机未覆盖的两项：TipLineEdit 面板内滚动跟随（手指滚动属点外收起的设计边界，
+程序化滚动跟随由 host 测试 F2 覆盖）与“弹层打开时 180° 旋转”（同路径的宿主 resize/编辑框
+移动由 host 测试 E/F 覆盖）；真实 Android 多窗口分屏需在支持该模式的设备上复验。
+
+---
+
+### 3.16 "只有最新上传是双列，其余页面全是单列"：栅格 cell 恰好等于半宽
+
+**现象**：首页"最新上传"一行 2 个封面，切到其它分区（以及收藏/历史/本地等列表页）全是
+一行 1 个；但"进一次设置页再返回"有时会自己变回 2 个 —— 看起来像时序问题，实际是**差 2px**。
+
+**根因**：`RefreshItemSizeHints` 把 item 宽度钉成 `avail // GridColumns`（正好半个视口）。
+`QListWidget` 的 LeftToRight+Wrapping 装箱要求 `列数 × cell` **严格小于**视口宽：
+竖屏视口 346px 时 cell=173 就只放得下 1 个，cell=171 才能放 2 个。而"要不要再收窄"的
+判定在 `_GridOverflow` 里另算了一套 `avail // GridColumns`，两边都认为"173 装得下"，
+于是谁都不纠正它。
+
+唯一会多减 2px 的是 `ApplyGridCoverSize` 的自校正分支
+（`width = max(GridCoverMin, width - over - 2)`）。这条分支只在"封面一开始就超宽"时才走到：
+最新上传首屏按 240px 建封面，必然溢出一次 -> 收窄时多减了 2px -> 双列。
+分区页的封面一开始就按视口算，`over <= 0` -> 不进分支 -> 卡在半宽 -> 单列。
+这就是"只有最新上传是对的"的完整解释。
+
+**修法**（`mobile_ui_base.GridCellGap = 2` + 单一出口 `mobile_ui_grid.PerCellWidth()`）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `mobile_ui_base.GridCellGap`（新增） | 每列必须留出的空隙。不写死在各处，因为之前就是三处各算一套才漏掉的 |
+| `mobile_ui_grid.PerCellWidth(avail)`（新增） | `(avail - GridCellGap*GridColumns) // GridColumns`，封底 |
+| `GridCoverWidth` | 反算封面宽也走 `PerCellWidth`（封面宽 = 内容宽 - 边距 - 空隙） |
+| `RefreshItemSizeHints` | 钉 item 宽度的 `per` 改用 `PerCellWidth` |
+| `_GridOverflow` | 超宽判定的 `per` 改用 `PerCellWidth`（**必须与上一条同源**，否则永远判不出"半宽装不下"） |
+
+顺带修掉被这条用例挡住的过期断言（它们让 §3.6 之后**整段没跑过**）：
+`smoke_test_android.py` 里模型列表已迁到 `component/widget/sr_model_table.py`，
+按旧文件正则去抓必然是空集；`host_test_sr_model_list.py` 里 41 个模型 / 3 个分组是
+SRMD 加入前的硬编码。恢复断言后又暴露一个真 bug：`FullModelName` 对 SRMD 系列拼成
+`MODEL_SRMD_SRMD_UP2X`（`models.txt` 里的键是 `MODEL_SRMD_UP2X`），选中即匹配不到模型。
+
+**回归**：`android/tools/host_test_home_grid.py`（offscreen，不联网）
+
+```bash
+py -3.14 android/tools/host_test_home_grid.py
+```
+
+三条时序（隐藏先填 / 切页后填 / 一直可见）× 8 个宽度（320~480）全部断言"一行 2 个"。
+反证：把 `GridCellGap` 改回 0，同一套用例在**所有**宽度下变成"一行 1 个"，与真机现象一致。
+
+---
+
+
+### 4.1 调用链
+
+```
+task_waifu2x.py
+   └─ from sr_vulkan import sr_vulkan as sr     ← Android 下被替换成 sr_qnn(同构 API)
+        └─ sr_qnn/__init__.py (ctypes)
+             └─ libsr_qnn.so (C++, ONNX Runtime C API)
+                  └─ QNN Execution Provider → Hexagon NPU (HTP, fp16)
+                        └─ models/*.onnx (固定 1×3×192×192 输入)
+```
+
+图片解码/编码由 Python 侧的 `QImage` 完成（jpg/png/**webp**/gif/bmp 全支持），
+C++ 只处理 RGB 原始像素，所以不依赖任何图像库。
+
+### 4.2 QNN 要点（这几点决定能不能真的跑在 NPU 上）
+
+1. **固定 shape**：QNN EP 不支持动态 shape。模型必须是 `1×3×T×T`，
+   引擎按 T 切块、边缘补齐、回读拼接，保证无缝（`prepare_models.py` 负责固化 shape）。
+2. **精度**：fp32 模型通过 `enable_htp_fp16_precision=1` 以 fp16 在 HTP 上推理；
+   想要更快可以用 `--quantize` 生成 uint16/uint8 量化模型（QNN HTP 原生只吃量化模型，
+   可用 `--act-type uint8` 更快、`--per-channel` 更准）。
+3. **整图跑在 NPU**：先按 `session.disable_cpu_ep_fallback=1` 建“严格 HTP+提速项”会话，
+   失败再退回“严格 HTP+基础项”，再允许 CPU 兜底，最后退到纯 CPU EP —— 四层兜底，
+   保证任何机型都有超分可用，且不会因为某个提速项不受支持而丢掉 NPU。
+4. **context binary 缓存**：HTP 首次图编译很慢，引擎把编译结果缓存到
+   `JM_SR_CACHE`(默认 `models/context`)，第二次启动直接加载。
+5. **ADSP_LIBRARY_PATH / LD_LIBRARY_PATH**：引擎启动时自动把自身目录（含
+   `libQnnHtpV*Skel.so`）加进去，否则 HTP 初始化会失败。**顺序有讲究，见第 7 条**。
+6. **合并的 HTP 提速项**（见 `sr_qnn/models/README.md`）：会话优先级
+   `qnn_context_priority=high`、HTP 共享内存零拷贝 I/O（`enable_htp_shared_memory_allocator`，
+   需 `libcdsprpc.so`，探测不到自动跳过）、context 缓存内嵌单文件（`ep.context_embed_mode=1`）；
+   HTP 子系统重启（SSR）后引擎自动重建会话并重试当前分块。这些项都可用环境变量关闭，
+   且任一项不受支持时自动退回“基础项”，不会因此丢掉 NPU。
+7. **子进程的库搜索顺序（踩过，唯一会让 NPU 静默消失的坑）**：独立进程模式必须能同时
+   找到两类库 —— `libonnxruntime.so` 及其依赖 `liblog.so`/`libc++.so`（系统），和
+   `libcdsprpc.so` 及其依赖 `vendor.qti.hardware.dsp-V1-ndk.so`/`libvmmem.so`（厂商）。
+   所以 `LD_LIBRARY_PATH` 固定为 `[App lib 目录, /system/lib64, /vendor/lib64, /odm/lib64]`
+   （`sr_qnn.LibSearchTail`）。**`/system/lib64` 必须在 `/vendor/lib64` 之前**：
+   Android 17 的 `/system/lib64/liblog.so` 需要 `_ZNSt3__113__hash_memoryEPKvm`，
+   只有系统 `libc++.so` 提供，而 `/vendor/lib64/libc++.so` 是厂商旧版、没有该符号。
+   顺序颠倒时 `dlopen("libonnxruntime.so")` 直接失败（`cannot locate symbol ... referenced
+   by "/system/lib64/liblog.so"`）→ 进程模式起不来 → QNN 0 分区 → 超分退回纯 CPU，
+   而且**不报错、只变慢**（真机 5ms/块 → 318ms/块）。排查与验收见 §4.4。
+
+### 4.3 模型准备（已随 APK 分发）
+
+`android/sr_qnn/models/` 里现有 **31 个 onnx**（waifu2x cunet 9 + Real-CUGAN 17 +
+Real-ESRGAN 5），全部由官方 PyTorch 权重直接导出（导出/静态化/对账工具链见
+`android/tools/models_stage/README.md`），随 APK 的 `private.tar` 分发，首次启动
+由 `EnsureModels()` 解包到应用私有目录。**不需要**再手动准备模型。
+
+如果确实要自己改模型（换 tile、量化、加新权重）：
+
+```bash
+python android/tools/prepare_models.py --src <源 onnx 目录> --tile 192 --verify
+#   可选：--fp16 生成半精度；--quantize --calib-dir <图片目录> 生成 HTP 最快的量化模型
+```
+
+产出放到 `android/sr_qnn/models/`（文件名与 `models.txt` 对应，见该目录的 README）。
+默认映射：`MODEL_WAIFU2X_ANIME_UP2X_DENOISE3X` 等 → `waifu2x_cunet_up2x_denoise3.onnx`
+（真 cunet 权重）；`MODEL_REALCUGAN_*` / `MODEL_REALESRGAN_*` → 对应的 22 个 onnx。
+某个文件缺失时引擎只在**同倍数**内回退到最接近的可用模型，跨倍数不回退（会产出
+"分辨率变大但没细节"的假超分，比失败更糟），任务会以 -11 明确失败并提示缺哪个文件。
+
+**没有模型时**：`sr_qnn` 会明确报告“未找到任何 ONNX 模型”，
+`config.CanWaifu2x=False`，界面自动禁用超分相关选项（不会崩、不会卡）。
+
+### 4.4 设备侧验证（确认"真的在 NPU 上跑"，别只看有没有崩）
+
+超分"能出图"不等于"走对了后端"：QNN 起不来时引擎会静默降级到 CPU EP，
+功能照常、速度差两个数量级（真机实测 318ms/块 → 5ms/块）。所以验收必须看后端名。
+
+**一键验证**（推荐，脚本会自己触发自检并判定）：
+
+```bash
+bash android/tools/verify_sr_on_device.sh            # 默认取 adb devices 的第一台
+bash android/tools/verify_sr_on_device.sh <serial>   # 多设备时指定
+```
+
+**手动四步**：
+
+```bash
+PKG=org.jmcomic.jmcomic
+# 1. 打一次性标记（main.py 的 DumpDiagnostics 会消费并删除它）
+adb shell run-as $PKG touch files/sr_selftest
+# 2. 冷启动，让 DeferredStartup 跑完
+adb shell am force-stop $PKG
+adb shell monkey -p $PKG -c android.intent.category.LAUNCHER 1
+# 3. 取自检结论（约 10s 内出结果）
+adb shell run-as $PKG grep -A20 'sr selftest' files/android_startup.log | tail -20
+# 4. 看子进程自己的日志（进程模式失败原因只在这里）
+adb shell run-as $PKG cat files/sr_proc.log | tail -40
+```
+
+**判定标准**（三项必须同时成立）：
+
+| 行 | 通过 | 失败 |
+| --- | --- | --- |
+| `引擎模式:` | `独立进程(可加载厂商 FastRPC)` | `进程内 ctypes`（NPU 拿不到 FastRPC） |
+| `实际后端:` | `Qualcomm Hexagon NPU (QNN HTP, fp16)` | `CPU (ONNX Runtime, QNN 未生效)` |
+| `SELFTEST_SUMMARY` | `tile_ms` 个位数~几十 | `tile_ms` 300 上下 = 纯 CPU |
+
+同时 `profile providers` 应为 `{'QNNExecutionProvider': N}`；
+`{'CPUExecutionProvider': N}` 说明整图被切到 CPU（`跑在 CPU 上的算子:` 会点名）。
+
+参考（V2463A / SM8750 / Android 17 / CPython 3.14.8）：
+
+```
+  引擎模式: 独立进程(可加载厂商 FastRPC)
+  480x640 -> 960x1280, 0.105s, 20 块, 5.2ms/块
+  实际后端: Qualcomm Hexagon NPU (QNN HTP, fp16)
+  SELFTEST_SUMMARY backend=Qualcomm Hexagon NPU (QNN HTP, fp16) htp=True tile_ms=5
+```
+
+**常见失败签名 → 根因**：
+
+| `files/sr_proc.log` 里的行 | 根因 | 处理 |
+| --- | --- | --- |
+| `ort load FAILED ... cannot locate symbol "_ZNSt3__113__hash_memoryEPKvm" referenced by "/system/lib64/liblog.so"` | 子进程 `LD_LIBRARY_PATH` 里 `/vendor/lib64` 排在 `/system/lib64` 前面，厂商旧 `libc++.so` 顶掉了系统的 | 见 §4.2 第 7 条；`sr_qnn.LibSearchTail` 的顺序不能改 |
+| `self dir=/apex/com.android.runtime/bin` + `library ".../libonnxruntime.so" not found` | 用 `/system/bin/linker64` 启动时 `/proc/self/exe` 指向 linker 本身 | 同上；顺序正确时按 soname 回退仍能命中，属自愈路径 |
+| `fastrpc preload failed` / `加载 libcdsprpc.so 失败` | 厂商 FastRPC 库不可达（非高通机型、或 `/vendor/lib64` 没进搜索路径） | `vendor_libs/README.md`；无解时接受 CPU EP |
+| `未找到任何 ONNX 模型` | `models/` 为空 | `EnsureModels()` 没跑到 / 未打包模型 |
+
+`htp:0` 说明该机型没有可用 HTP（非高通/驱动缺失），此时自动走 CPU EP，功能仍可用但慢。
+
+---
+
+## 5. 构建（宿主机需 Linux/macOS，Windows 请用 WSL2）
+
+```bash
+# 依赖：autoconf/automake/libtool/pkg-config、**perl-core**（openssl recipe 要 FindBin 等核心模块）、
+#       JDK(区间见 tools/versions.env 的 JM_JDK_MIN/MAX)、Android SDK(platform-tools, platform, build-tools)、
+#       Android NDK r28 及以上、Python 3.11/3.12
+export ANDROID_HOME=$HOME/Android/Sdk
+# NDK 不用手动指定：脚本自动取 $ANDROID_HOME/ndk 下版本最高的那个（NDK 28+ 才默认
+# 按 16KB 页对齐编译，见 §11）。要钉住某个版本时用 JM_NDK_VERSION=<版本>。
+bash android/tools/resolve_ndk.sh --sdk "$ANDROID_HOME" --check   # 看选中的 NDK + 16KB 结论
+
+# Android wheel(Qt 6.12.0 abi3 + curl_cffi 0.16.3 cp314)：下载并 sha256 校验，放 android/wheels/
+# (每个 ABI 一套；缺失时 build_android.sh 会按目标 ABI 自动 qtpip download)
+bash android/tools/wsl_fetch_android_wheels.sh                  # arm64-v8a
+JM_ABI=x86_64 bash android/tools/wsl_fetch_android_wheels.sh    # x86_64
+
+# 一键构建两种架构(arm64-v8a 真机 + x86_64 模拟器)，产物落 android/dist/：
+#   JMComic-<版本>-arm64-v8a-debug.apk / JMComic-<版本>-x86_64-debug.apk
+# (一个 APK 只含一种 ABI；某架构失败会打印 架构+步骤+原因，日志在 android/build_logs/build-<abi>.log)
+cd android && ./build_android.sh
+
+# 只构建某一个架构 / 只改 python 代码时
+./build_android.sh --abi x86_64
+SKIP_NATIVE=1 ./build_android.sh
+
+# WSL 一体化流程(同步+wheel+打包+校验，等价 --abi)仍可用，详见 §10
+bash android/tools/wsl_build_apk.sh --abi x86_64
+
+adb install -r android/dist/*.apk
+```
+
+#### 5.0.1 Windows 一键构建(PowerShell -> WSL)
+
+不想开 WSL 手动敲命令的话，用 `android/build_apk_from_windows.ps1`：
+在 Windows 侧自检 WSL/发行版/路径，然后进入 WSL 按架构调用上面的构建流程，
+产物复制到输出目录(默认脚本所在目录 `android\`)，构建成功自动清理临时文件。
+
+```powershell
+# 先自检(不构建)：WSL/发行版/项目路径/构建树是否就绪
+powershell -ExecutionPolicy Bypass -File android\build_apk_from_windows.ps1 -DryRun
+
+# 一键构建两种架构(默认)，产物输出到脚本所在目录(android\)
+powershell -ExecutionPolicy Bypass -File android\build_apk_from_windows.ps1
+
+# 只构建模拟器包、指定发行版/输出目录/版本号
+powershell -ExecutionPolicy Bypass -File android\build_apk_from_windows.ps1 `
+    -Distro Ubuntu -Abi x86_64 -OutputDir D:\apk -AppVersion 0.52
+```
+
+要点：
+
+- **仓库根自动定位**：从脚本所在目录逐级向上找含 `android\build_android.sh` 的目录，
+  找不到再试当前工作目录；脚本被移动/复制到别处也能用，或用 `-ProjectPath` 显式指定。
+- **发行版自动检测**：不传 `-Distro` 时优先选 `Ubuntu`，只有一个发行版时直接用它；
+  传了则校验存在性，不存在会列出所有可用发行版。
+- **构建入口**：默认走 `tools/wsl_build_apk.sh`(按架构分别构建 + `wsl_collect_apk.sh`
+  自动收集回仓库)；`-BuildScript build_android.sh` 可改走 §5 的多架构脚本
+  (单次运行、产物取 `android\dist`)。
+- **产物与命名**：`JMComic-<版本>-<abi>-<buildtype>.apk`，与仓库现有产物一致。
+- **日志**：编排日志在 `android/logs/build_apk_<时间戳>.log`；每个架构的
+  详细构建日志归档到 `<输出目录>\logs\`；失败时保留临时目录(诊断信息)并给出重跑命令。
+- **失败处理**：默认某架构失败也继续构建其余架构，最后汇总(退出码 1)；
+  `-StopOnError` 可改成失败即停。退出码：0=全部成功，1=有架构失败，2=环境自检失败。
+- **注意**：构建是 wsl.exe 的前台子进程，**构建期间不要关终端**；
+  单架构冷构建约 40~60 分钟，缓存命中约 5 分钟。
+
+#### 5.0.2 单架构专用脚本(四个独立入口)
+
+每个架构有各自独立的入口脚本，架构在脚本内钉死，**不会下载/编译另一架构的
+wheel、AAR、原生库，也不会产出另一架构的 APK**；目标架构仍可用
+命令行参数或环境变量指定(只接受本脚本的架构，传错会报错并指路)：
+
+| 脚本 | 平台 | 架构 | 底层流程 |
+| --- | --- | --- | --- |
+| `android/build_arm64.ps1` | Windows(PowerShell) | arm64-v8a 真机 | WSL -> `tools/wsl_build_apk.sh --abi arm64-v8a` |
+| `android/build_x86_64.ps1` | Windows(PowerShell) | x86_64 模拟器 | WSL -> `tools/wsl_build_apk.sh --abi x86_64` |
+| `android/build_arm64.sh` | Linux/macOS | arm64-v8a 真机 | `build_android.sh --abi arm64-v8a` |
+| `android/build_x86_64.sh` | Linux/macOS | x86_64 模拟器 | `build_android.sh --abi x86_64` |
+
+```powershell
+# Windows：先自检(不构建)，再一键构建
+powershell -ExecutionPolicy Bypass -File android\build_arm64.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File android\build_arm64.ps1
+powershell -ExecutionPolicy Bypass -File android\build_x86_64.ps1 -AppVersion 0.52 -OutputDir D:\apk
+```
+
+```bash
+# Linux/macOS(WSL 内同理)
+cd android
+./build_arm64.sh  --dry-run     # 只校验+打印将执行的命令
+./build_arm64.sh  --version 0.52
+./build_x86_64.sh
+ABI=arm64-v8a ./build_arm64.sh  # 环境变量指定(等价默认)
+```
+
+共性行为：
+
+- **架构判断**：优先级 `--abi`/`-Abi` 参数 > `ABI` 环境变量 > 脚本默认架构；
+  接受别名(arm64/aarch64、x86-64/x64)。传另一架构会报错并提示对应的脚本，
+  传 `both`/`--abis` 会指路 `build_android.sh` / `build_apk_from_windows.ps1`。
+- **自检后失败即停**：PowerShell 版退出码 0=成功 / 1=构建失败 / 2=自检失败；
+  Shell 版沿用时 `build_android.sh` 的退出码。都支持 `--dry-run`/`-DryRun`
+  (只校验不构建)与 `-KeepTemp`(保留临时目录)。
+- **产物**：默认输出到脚本所在目录；PowerShell 版自动把 WSL 侧构建日志
+  归档到 `<输出目录>\logs\`，成功后清理临时目录，失败保留诊断信息。
+
+`build_android.sh` 会打印 `adb push` 模型的命令；如果希望模型直接打进 APK，
+用 `tools/patch_buildozer_spec.py --models android/sr_qnn/models` 把 `onnx/txt`
+加进 `source.include_exts` —— 模型随 `assets/private.tar` 分发，运行时由
+`android/main.py` 的 `EnsureModels()` 解包到可写目录（`wsl_build_apk.sh` 已自动
+带上这一步）。刻意不用 `android.add_assets`：那会往 APK 里再塞一份 ~200MB 的副本，
+而且 p4a 的 assets 只能通过 Qt 的 `assets:/` 或 Java AssetManager 读，原生
+`fopen` 打不开。
+
+**唯一的例外是 `assets/build-info.json`**（几 KB 的构建工具链信息，见
+§5.0.4）：它本来就要给 Python 侧用 `assets:/` 读，而且必须能在 APK 里
+`unzip -p <apk> assets/build-info.json` 直接看到（事故复盘时要拿它反查 NDK/JDK/Qt），
+塞进 `private.tar` 就等于没有。所以 `patch_buildozer_spec.py --build-info <json>`
+只把这一个**文件**条目写进 `android.add_assets`，绝不带目录（目录条目会被 p4a
+`copytree` 成一份完整副本，那正是上面要避免的事）。
+
+#### 5.0.4 构建工具链落盘(build-info.json)
+
+拿到一个 APK 时，"它是用哪个 NDK / JDK / Gradle / Qt 编的"必须能从产物本身反查 ——
+0.87 带着 15 个未对齐的库发出去却查不出原因，就是因为这个信息从来没落过盘。
+
+- `android/tools/gen_build_info.py` 收集 `git_sha/git_describe/git_dirty/build_time/
+  build_host/operator/app_version/abi/build_type/jdk_version/gradle_version/
+  agp_version/ndk_version/qt_version/p4a_version/python_version/allow_unaligned/
+  unaligned_reason` 并写 JSON；**任何一项读不到就写 `null`，且永远不会让构建失败**。
+- 打包前由 `build_android.sh`（以及 `wsl_build_apk.sh` / `wsl_repack_apk.sh`）生成，
+  同一份 json 落两处：`android/build_logs/build-info.json`（本机/开发环境）与
+  APK 内的 `assets/build-info.json`（产物内，unzip 可见）。
+- 运行期由 `src/config/build_info.py` 读出来（`Get()`/`Summary()`），展示在
+  **设置 → 最底部的「关于 / 构建信息」**（只读可复制）。桌面开发环境读不到
+  `assets:/` 时回退到 `android/build_logs/build-info.json`，都没有就显示"未找到"。
+- 自查：`python3 android/tools/gen_build_info.py --output /tmp/bi.json --print`。
+
+同类审计：16KB 门禁放行（`ALLOW_UNALIGNED=1`）会写
+`android/build_logs/unaligned_override.json` 并**追加**到仓库内可跟踪的
+`docs/build_audit/unaligned_overrides.jsonl`（一行一条 JSON），记录
+`time/operator/host/git_sha/abi/apk/reason/unaligned`。`ALLOW_UNALIGNED_REASON`
+不填不拦构建，但审计里只会记 `unspecified`，终端也会醒目提示。
+字段与复盘命令见 `docs/build_audit/README.md`。
+
+> **判断标准**：`docs/build_audit/unaligned_overrides.jsonl` **长期为空/不存在才是目标状态**。
+> 条数变多说明 16KB 对齐在退化 —— 该去查 `tools/check_elf_page_align.py` 指出的那几份库，
+> 而不是习惯性放行。审计一旦变成放行流程里的"例行一步"（"反正写了记录就能放"），
+> 它的角色就从刹车变成了流程，等于失效。
+
+
+#### 5.0.5 本机路径配置(tools/local.env)
+
+`tools/local.env` 是**机器本地**文件（`.gitignore` 忽略，模板 `local.env.example` 入库）：
+JDK/SDK/构建树的位置写在这里，脚本就不需要每次手工 `export`。
+
+- `JM_WORK` 默认是 `$HOME/jmcomic-build`。以 root 跑（`sudo` / `wsl -u root`）时 `$HOME`
+  是 `/root`，而构建树通常在普通用户家目录下、`/root` 对该用户不可写 —— 所以本机在
+  `local.env` 里显式写了 `JM_WORK=/home/wq159/jmcomic-build`。跟着派生的是
+  `JM_SRC=$JM_WORK/src`、`JM_SDK=$JM_WORK/android-sdk`、`JM_VENV=$JM_WORK/venv311`。
+- `JM_NDK` / `ANDROID_NDK_HOME` **故意留空**：`tools/resolve_ndk.sh` 默认取
+  `$JM_SDK/ndk` 下版本号最高者（当前 r30），装好即生效；写死会盖掉自动发现，而
+  16KB 页对齐正是靠"用新 NDK 重编"修掉的。要钉住某版用 `JM_NDK_VERSION=<版本>`。
+- `TMPDIR` 也留空：WSL 根分区空间充足时不需要指到别处；只有 `/tmp` 是小 tmpfs 时才要写。
+- 换机器/换用户必须重写这个文件；旧值可从 git 历史里找回：
+  `git log -p -- android/tools/local.env`。
+
+#### 5.0.3 版本号参数(全部构建脚本通用)
+
+**参数命名与作用范围**
+
+| 脚本 | 命令行参数 | 环境变量 | 默认值来源 |
+| --- | --- | --- | --- |
+| `build_android.sh` | `--version <v>` | `APP_VERSION` | `tools/patch_buildozer_spec.py` 的 `AppVersion`(现为 0.49)，取不到再退 `0.1` |
+| `build_arm64.sh` / `build_x86_64.sh` | `--version <v>`(透传) | `APP_VERSION`(透传) | 同左(由 `build_android.sh` 提取) |
+| `build_apk_from_windows.ps1` | `-AppVersion <v>` | `APP_VERSION` | 同左(WSL 侧 `patch_buildozer_spec.py` 提取) |
+| `build_arm64.ps1` / `build_x86_64.ps1` | `-AppVersion <v>` | `APP_VERSION` | 同左 |
+
+优先级统一为：**命令行参数 > 环境变量 > 默认值**。四个单架构脚本在收到显式版本号时
+会先自行校验再透传；不传则由 `build_android.sh` / `patch_buildozer_spec.py` 提取
+默认值并校验——两层都校，非法值在动手前就会被拒。
+
+**格式规则(语义化版本的数字核心子集)**
+
+```
+MAJOR.MINOR            仓库沿用简写，如 0.51
+MAJOR.MINOR.PATCH      完整三段，如 1.2.3
+每段：纯数字、不允许前导零(段为 0 除外)
+不接受：-alpha.1 / +build.5 之类预发布/构建元数据后缀
+```
+
+为什么不让带后缀：该值会写进 `buildozer.spec` 的 `app.version`(即 Android
+versionName)，p4a 的 `get_android_numeric_version()` 再按 `"."` 切**数字段**推导
+versionCode(如 `0.1`/minSdk34 → `10341`)，带后缀会推导失败或产出错误 versionCode。
+
+**该参数在哪里被用到**
+
+- **版本输出**：每个脚本启动时打印 `版本号: <值>(来源: ...)`，构建结束汇总里再次出现。
+- **构建标识(APK 文件名)**：`buildozer.spec` 的 `app.version` 决定 p4a 的 dist 名，
+  产物即 `JMComic-<版本>-<abi>-<类型>.apk`(如 `JMComic-0.52-arm64-v8a-debug.apk`)。
+- **元数据生成**：`app.version` 即 APK 的 versionName；versionCode 由 p4a 从它推导。
+  **versionCode 只能往上改**——改小会让 `adb install -r` 报
+  `INSTALL_FAILED_VERSION_DOWNGRADE`，手机上必须先卸载。注意这是 Android 包版本，
+  与桌面端 `config.RealVersion`(上游版本号，用于检查更新)无关。
+
+**错误处理**
+
+- 不合法：任何脚本都在**动手前**报错退出——Shell 版退出码 1，PowerShell 版退出码 2，
+  `patch_buildozer_spec.py` 返回 2；错误信息含非法值、来源(参数/环境变量/默认值)、
+  规则说明与修正示例，且不会写进 `buildozer.spec`、不会启动构建。
+- 不传：用默认值，各环节照常校验与打印。
+- 示例：
+
+```bash
+./build_android.sh --version 1.2.3      # OK(三段)
+APP_VERSION=0.52 ./build_arm64.sh       # OK(环境变量)
+./build_android.sh --version 1.2-beta   # 拒绝: 不接受预发布后缀
+```
+
+### 5.1 minSdk 34 与屏幕方向怎么落地
+
+`pyside6-android-deploy` 没有暴露 minSdk/屏幕方向/资产目录，所以构建流程是
+**打包 → 打补丁 → 再打包**（`build_android.sh` 已自动完成）：
+
+```bash
+# 手动执行(默认 API=34, minSdk=34, 屏幕方向=fullUser 跟随系统旋转锁定)
+API=34 MINAPI=34 ORIENTATION=portrait ./tools/pin_min_sdk.sh
+```
+
+补丁内容：`android.api/minapi=34`、`archs=arm64-v8a`、`local_libs`(NPU 运行库)、
+`source.include_exts`(模型随 private.tar 分发)、Manifest 的 `screenOrientation` 与 `INTERNET` 权限。
+需要强制竖屏就设 `ORIENTATION=portrait`；默认 `fullUser` 允许用户旋转，
+旋转后界面由 `mobile_ui.OnShown` 重新适配。
+
+验证：
+
+```bash
+adb shell dumpsys package <包名> | grep -E "minSdk|targetSdk"
+```
+
+### 5.2 依赖打包情况
+
+| 包 | 在 Android 上 | 说明 |
+| --- | --- | --- |
+| PySide6 / shiboken6 | ✅ 官方 aarch64 wheel | Qt Widgets/Network/Svg 等 |
+| pillow, bs4, lxml, natsort, tqdm | ✅ p4a 官方/纯 python recipe | 图像与解析 |
+| pycryptodomex, PySocks | ✅ p4a recipe | 加解密、socks 代理（垫片也用它） |
+| webdavclient3, pysmb, smbprotocol, jmcomic | ✅ 纯 python | p4a 直接 pip 安装 |
+| **curl_cffi** | ✅ arm64 走官方 wheel / ⚠️ x86_64 走垫片 | arm64-v8a 用 `android/recipes/curl_cffi` 解包官方 android wheel（TLS 指纹 + HTTP/3 + ECH）；上游没有 x86_64 的 android wheel，模拟器上自动使用 `android/shims/curl_cffi`（功能可用，但**没有 Chrome TLS 指纹**，遇到 Cloudflare 严格校验可能被拦）。见 §10.1 |
+| sr-vulkan / sr-vulkan-model-* | ❌ 不安装 | 由 `sr_qnn` 顶替（`sys.modules["sr_vulkan"]`） |
+
+### 5.3 与桌面端共存的注意点
+
+* `src/start.py` 被拆成 `InitSrEngine() / CheckProbeArgs() / InitQt() / Run()`，
+  桌面端入口 `python src/start.py` 仍然照旧（`__main__` 里依次调用）。
+* 桌面端超分仍然是 `sr_vulkan`；只有在 Android 上 `sr_backend.InstallQnnCompat()`
+  才会把 `sr_qnn` 注册成 `sr_vulkan`。
+* `Setting.InitLoadSetting()` 里 Android 的默认下载目录改为应用外部私有目录，
+  并在配置读完后调用 `platform_mobile.ApplyAndroidPathDefaults()` 校正历史
+  内部路径(见 §6)；其他平台分支未变。
+* `TaskMulti`（拼图）在 Android 上用线程代替多进程（p4a 下 fork 不稳定），桌面端仍用进程。
+
+---
+
+## 6. 运行时目录与权限
+
+| 用途 | 路径 | 权限 |
+| --- | --- | --- |
+| 配置/数据/日志 | `/data/data/<包名>/files/{config,data,state}` | 无需申请 |
+| 缓存(封面/图片缓存/超分临时图/zip 临时文件) | 默认 `/storage/emulated/0/Android/data/<包名>/cache/jmcomic-qt`，可在设置里改 | 无需申请(Android 10+) |
+| 下载目录 | 默认 `/storage/emulated/0/Android/data/<包名>/files/commies`；选了 SAF 目录后就是那个目录下的 `commies` | 无需申请(Android 10+) |
+| 导入落地（SAF 选中的文件/目录拷到这里） | `/data/data/<包名>/files/import/<名字>` | 无需申请 |
+| 模型 | `/data/data/<包名>/files/waifu2x-models` | 无需申请 |
+
+**下载与缓存都是"直接写"**：
+* 下载：设置 → 下载与缓存 → "设置目录"，手机走 SAF，选中的目录就是**下载目录本身**
+  (`saf://<key>/commies/…`)，每张图直接写进去(见 §3.14)，没有"先落私有目录再导出"。
+* 缓存：设置 → 下载与缓存 → "缓存位置"。默认值见上表；手机上点按钮走**系统 SAF
+  选择器**，选中目录后 `takePersistableUriPermission` 持久授权，应用以
+  `saf://<key>/jmcomic-qt` 直接读写(见 `tools/vfs.py`)。配置项是 `config.ini` 的
+  `[DownloadSetting] CachePathTree / CachePathTreeName`(SAF)；桌面端/历史配置用
+  `CachePath`(本地绝对路径)。"默认缓存"按钮恢复默认值。
+  新缓存**直接写新目录**，只有旧目录里已有的缓存会在后台用 vfs 搬一次(不覆盖)。
+* 老版本配置里落在 `/data/user/0/…` 的下载目录，启动时由
+  `platform_mobile.ApplyAndroidPathDefaults()` 改到外部存储，并把已下载的
+  `commies` 内容在后台搬过去；新下载立刻写外部目录。
+* 设置页的路径行改成"名称/按钮一行 + 路径整宽一行"，完整路径自动折行显示，
+  不再中间省略；"打开目录"对 SAF 目录直接打开其 document URI(系统文件管理器)。
+
+**为什么缓存单独放外部缓存目录**：缓存全是可再生数据(封面、看图图片缓存、超分临时
+图、zip 临时文件)，删了顶多重新下载；放在内部私有目录里用户没有任何手段清理
+(只能"设置-应用-清除数据"，连设置一起没)。放到
+`/storage/emulated/0/Android/data/<包名>/cache` 之后，系统"清理缓存"、设置-存储里
+的应用缓存、以及支持访问 `Android/data` 的文件管理器/root 都能看到并删掉它。
+启动时 `platform_mobile._MigrateCacheToExternal` 会把老版本留在内部私有目录的缓存
+(`<files>/cache/jmcomic-qt`)后台搬到新位置，不重复占两份。刻意的例外：QNN 的
+context binary 编译缓存(`waifu2x-cache`)和模型(`waifu2x-models`)仍留在内部私有
+目录 —— 前者要被反复 mmap，放 FUSE 挂载的外部存储上又慢又容易出怪问题；后者是
+用户显式下载的数据，删了要重新下载、还可能打断正在跑的超分。
+
+**APK 只申请网络权限**：`INTERNET` / `ACCESS_NETWORK_STATE` / `WAKE_LOCK`。
+`READ_EXTERNAL_STORAGE`、`READ_MEDIA_IMAGES`、`MANAGE_EXTERNAL_STORAGE`
+("所有文件访问权限") **全部删除** —— 应用私有目录之外的东西一律通过 SAF 由用户
+授权（见 3.11），系统选择器给的是 per-URI 授权，不需要任何权限声明，
+也不再需要引导用户去系统设置里手动开权限。
+
+代价（刻意的取舍）：SAF 授权的是 `content://` URI，Python 的 `open()` 打不开，
+所以"导入本地漫画/图片"= **拷贝一份**到 `files/import/`（占双份空间）。下载与
+缓存的常态写入不走这条路：要么是应用外部目录的真实路径，要么由 `tools/vfs.py`
+的 SAF 数据面**逐文件直写目标目录**（见 §3.14），不会先落私有目录再拷贝。
+
+---
+
+## 7. 已知限制
+
+1. `curl_cffi` 已用**官方 android wheel**（0.16.3 cp314，见 3.10），TLS 指纹伪装 / HTTP/3 / ECH 都可用；
+   `android/shims/curl_cffi` 垫片仍留在 APK 里，只是"真包缺失时"的兜底。
+2. QNN 后端只支持 HTTP/1.1 时代的同步取图流程不受影响；网络层的 HTTP/2-HTTP/3、ECH 现在**真正生效**
+   （垫片下是空操作）。垫片会声明 `HTTP3_ECH_SUPPORTED=False`，业务层据此**跳过"HTTP/3、ECH 失败降级重试"**
+   （见 3.9），所以真包/垫片两种情况都不会因为这两个开关而失败。
+3. cunet 模型在 NPU 上默认复用 anime 模型（质量接近，速度更好）；要精确一致需要自己导出 cunet onnx。
+4. 看图界面（`read_view`）沿用桌面端的自绘滚动逻辑，未挂 QScroller；竖屏条漫滚动本来就是它的强项。
+5. `Android 14 以下` 未做兼容（用户明确要求）：`minSdk 34`。
+
+---
+
+## 8. 调试与自检
+
+```bash
+adb logcat -s python:V Qt:V sr_qnn:V            # 运行日志
+adb shell run-as <包名> cat files/crash.log      # 启动阶段崩溃堆栈
+adb shell ls /data/data/<包名>/files            # 看目录是否创建成功
+adb shell dumpsys package <包名> | grep minSdk  # 确认 minSdk=34
+```
+
+超分相关的日志关键字：`sr_qnn loaded` / `模型回退` / `严格 HTP 失败` / `使用 CPU EP`。
+
+不需要手机、不需要 Android SDK 也能跑的两个自检脚本（本地开发用）：
+
+```bash
+# 1) C++ ↔ python ctypes 接口一致性(参数个数、声明/定义是否齐全)
+python android/tools/check_interfaces.py
+
+# 2) 强制 Android 模式跑一遍竖屏适配(offscreen，不联网)
+#    覆盖：抽屉、详情页堆叠、最小尺寸放宽、返回键、无系统托盘、
+#          sr_qnn 缺失时降级、模型表与界面列表一致、curl_cffi 垫片
+python android/tools/smoke_test_android.py
+
+# 3) 引擎逻辑自测(Linux 宿主构建 libsr_qnn.so 后)：固定 shape 分块拼接是否与
+#    参考实现一致、任意倍数/目标尺寸缩放、jpg/png 编码、任务 API、模型回退
+JM_SR_QNN_LIB=build-host/libsr_qnn.so python android/tools/host_test_sr_qnn.py
+
+# 4) 应用内文件选择器(见 3.3)：桌面委托/排序/过滤器/上级/三种模式/返回键/
+#    权限失败降级/嵌套事件循环不卡死
+QT_QPA_PLATFORM=offscreen python android/tools/host_test_file_dialog.py
+```
+
+上面 1)2)4) 加上接口解密链（`host_test_crypto_android.py`）和图片解码链路
+（`host_test_image_pipeline.py`）就是 **CI 每次提交都跑的那套门**，见
+`.github/workflows/android.yml`（`ubuntu-latest` + Python 3.11 + PySide6-Essentials 6.12.0，
+Qt offscreen，不需要手机与 Android SDK/NDK）。本地一条命令跑全部：
+`bash android/tools/wsl_run_smoke.sh`。
+
+WSL 构建树同步 + 语法检查（`/root` 只有 root 能读，所以 WSL 命令一律 `wsl -u root`）：
+
+```bash
+wsl -u root -e bash -lc 'bash <仓库根>/android/tools/wsl_sync_file_dialog.sh'
+```
+
+同一套用例再用非 root 用户跑一遍（root 无视权限位，`chmod 000` 那条分支只有普通用户
+才真正走到；脚本会把 venv 和基础解释器复制到 /tmp 并放开读权限）：
+
+```bash
+wsl -u root -e bash -lc 'bash <仓库根>/android/tools/wsl_run_file_dialog_asuser.sh'
+```
+
+---
+
+## 9. WSL2 上构建（实测流程与本环境的坑）
+
+仓库里的 `android/tools/wsl_*.sh` 是我在一台 Windows + WSL2(Ubuntu 26.04) 机器上
+实际跑通的脚本，可以直接复用；下面是它们解决的具体问题。
+
+| 步骤 | 脚本 | 解决的问题 |
+| --- | --- | --- |
+| 基础环境 | `wsl_setup_base.sh` / `wsl_setup_base2.sh` | apt 装 JDK17/gcc/cmake；**WSL 可以直接 `wsl -u root` 提权**，不需要 sudo 密码 |
+| Android SDK/NDK | `wsl_setup_android.sh` | cmdline-tools + platform-34 + build-tools 35 + **最新版 NDK**（装 `ndk` 包，脚本自动发现版本，不写死 r26d） |
+| 镜像配置 | `wsl_config_mirrors.sh` | ① pip 走清华镜像(PyPI 直连只有 ~11KB/s) ② git 全局 `insteadOf` 走 `ghproxy.net`（本机 DNS 把 github.com 污染成 127.0.0.1）③ **把 p4a 里 102 个 recipe 的 GitHub 直链批量改写成镜像**，否则编译 python3/openssl/libffi 时全部下载失败 |
+| ONNX Runtime | `wsl_fetch_ort.sh` | `onnxruntime-android-qnn` AAR(含 libonnxruntime.so 与 ORT 头文件) + NuGet 的 linux-x64 库(宿主自测用) |
+| QNN 运行库 | `wsl_fetch_qnn.sh` | **关键**：ORT 的 Android QNN AAR 只有 2 个 .so，QNN 运行库在同 POM 依赖的 `com.qualcomm.qti:qnn-runtime:2.37.1` 里（libQnnHtp.so / libQnnSystem.so / libQnnHtpPrepare.so / V68–V79 的 Stub+Skel），从 Maven 取即可，不需要登录 QNN SDK |
+| 宿主工具链 | `wsl_install_toolchain.sh` | PySide6-Essentials + shiboken6(local wheel；`pyside6-android-deploy` 就在 Essentials 里) + buildozer/cython |
+| **Python 3.11** | `wsl_build_py311_src.sh` | `pyside6-android-deploy` 硬性要求**宿主 Python ≤ 3.11**（buildozer 限制），而 Ubuntu 26.04 只有 3.14；从阿里云镜像下 CPython 源码自行编译安装 |
+| 同步 | `wsl_sync.sh` | 把 Windows 仓库同步到 ext4（`/mnt/c` 慢且符号链接行为不一致） |
+| 原生库 | `wsl_build_native.sh` | NDK 编译 arm64 `libsr_qnn.so` + 宿主 x86_64 构建 + 跑 `host_test_sr_qnn.py` |
+| 打包 | `wsl_build_apk.sh` | 两阶段生成并补丁 buildozer.spec（含**应用图标**），再正式打包 |
+| Gradle 内存 | `wsl_patch_gradle_mem.sh` | 把 p4a 的 Gradle 堆 `-Xmx2500m → 4096m`，否则 `:packageDebug` 打包 200MB `private.tar` 时会 OOM（详见 §10.2） |
+| 等构建 | `wsl_wait_build.sh` | **等 `detached_build.log` 出现"结束"** 再收集产物（见下面那条坑） |
+| 校验 | `wsl_check_sync.sh` | 仓库 vs 构建树 + **直接读 APK 里 `assets/private.tar` 的 `.pyc`**，确认打进去的真是当前代码 |
+| 校验图标 | `probe_apk_icon.py` | 解出 APK 里 `res/mipmap/icon.png` 与源图**逐像素比对**，并报告是否残留 PySide 自带图标 |
+
+> 看真机日志：`adb shell run-as org.jmcomic.jmcomic cat files/state/jmcomic-qt/logs/<日期>.log`
+> —— 竖屏适配、网格重排、返回键的证据都在应用自己的这份滚动日志里（`Log.*` 同时也会打到 logcat）。
+
+> 踩过的坑：`wsl_collect_apk.sh` 如果在构建还没结束时运行，拷回来的是**上一版 APK**
+> （现象：代码明明改了，真机日志里的行号和字符串却还是旧的）。所以先
+> `wsl_wait_build.sh`，再 `wsl_collect_apk.sh`，最后用 `wsl_check_sync.sh` 验 APK 内的 `.pyc`。
+
+
+### 9.1 为什么要两阶段补丁 buildozer.spec
+
+`pyside6-android-deploy` 的 `buildozer.py` 把 `requirements` 写死为
+`python3,shiboken6,PySide6`，且不暴露 minSdk / 自有 .so / 资源目录。它的
+`Buildozer.initialize()` 在发现项目目录已有 `buildozer.spec` 时会**直接沿用**，
+所以流程是：
+
+```
+pyside6-android-deploy --dry-run   # 生成 buildozer.spec + Qt recipe 目录 + jars
+python tools/patch_buildozer_spec.py android/buildozer.spec ...   # 注入下面这些
+pyside6-android-deploy             # 用补丁后的 spec 正式打包
+```
+
+注入内容：应用依赖清单、`android.api/minapi=34`、`android.add_libs_arm64_v8a`
+（`libsr_qnn.so` + `libonnxruntime.so` + QNN 运行库进 APK 的 `lib/arm64-v8a/`）、
+`source.include_exts` 加 `onnx/txt`（31 个超分模型随 private.tar 分发）、网络权限、
+`p4a.source_dir`（用本地已改镜像的 p4a）。
+
+**APK 版本号**（`app.version`，即 Android 的 versionName）也在这一步注入：
+工具每次 `--init` 都会把它重置成 `0.1`，所以必须由补丁覆盖，值取
+`android/tools/patch_buildozer_spec.py` 里的 `AppVersion`（可用 `--version` 临时覆盖）。
+p4a 用 `"10" + minSdk + 逐段(*100 累加)的版本号` 推导 `versionCode`：
+`0.1/minSdk34 → 10341`、`0.2 → 10342`、`0.3 → 10343`。**只能往上改** —— versionCode 变小会让
+`adb install -r` 报 `INSTALL_FAILED_VERSION_DOWNGRADE`（手机上得先卸载）。
+`wsl_build_apk.sh --version 0.3` 会把值透传给补丁脚本（detached 启动脚本也支持透传）。
+注意这是 Android 包版本，跟桌面端的 `config.RealVersion`（上游版本号，用于检查更新）无关，
+**迁移 CPython 3.14 也没有动它**。
+
+### 9.2 Android 上的依赖取舍（实测）
+
+| 依赖 | 处理 |
+| --- | --- |
+| lxml / pillow / pycryptodome | p4a 有 recipe，正常编译（`tools/tool.py` 顶层 import lxml，缺了应用起不来） |
+| bs4 / natsort / tqdm / pysmb / requests / webdavclient3 / pysocks 等 | 纯 python，p4a 用 pip 装（走清华镜像） |
+| **jmcomic** | 自定义 recipe `android/recipes/jmcomic`，用 `--no-deps` 安装：它的依赖 `curl-cffi` 在 Android 上编不出来，装本体即可 |
+| **curl_cffi** | 现在走 `android/recipes/curl_cffi` **解包官方 android wheel**（0.16.3 cp314，带 TLS 指纹 + HTTP/3 + ECH，见 §3.10）；`android/shims/curl_cffi` 垫片仍在 APK 里，但只在真包缺失时兜底 |
+| smbprotocol / cryptography | 暂不打包（需要 Rust 交叉编译）；SMBv3 上传功能在 Android 上不可用 |
+
+### 9.3 引擎自测结论（x86_64 宿主实测）
+
+`host_test_sr_qnn.py` 用一个固定 `1×3×192×192 → 1×3×384×384` 的双线性 Resize 模型
+当被测模型，逐项验证并全部通过：
+
+* 模型表 41 个常量与界面下拉列表、`models.txt` 完全一致
+* 300×200 图片 2x 超分（跨 2 个分块，192 的块 + 边缘补齐）输出 600×400，
+  与 numpy 参考实现 **max diff = 0.5/255、mean = 0.20**，分块边界无额外突变 → 分块拼接正确
+* `scale=1.5` → 450×300、目标尺寸模式 `600×400` 均正确
+* 请求缺失模型时自动回退到可用模型
+* `removeWaitProc` 丢弃排队任务、`remove` 取消运行中任务、非法图片/非法模型号被拒绝
+* 这个测试实际抓出了一个真 bug：输入张量曾按 HWC 填充（ONNX 要 NCHW），修复后才与参考实现吻合
+* 本轮（2026-10-18）补齐：`host_test_sr_qnn.py` 的"模型回退"用例原先请求 **4x** 缺失模型，
+  与引擎"跨倍数不回退"的设计矛盾必然失败，已改成请求同倍数（2x）缺失模型；
+  重跑 **31/31 全部通过**
+* 模型集：`models.txt` 的 41 条引用对应 31 个唯一 onnx（9 waifu2x + 17 Real-CUGAN +
+  5 Real-ESRGAN），全部由官方 PyTorch 权重导出（工具链 `tools/models_stage/`），
+  随 APK `private.tar` 分发（APK 内对账零缺失）；引擎宿主测试用的是构造的小模型，
+  不依赖这 31 个真实权重
+
+
+### 9.4 应用图标（启动器图标）
+
+`pyside6-android-deploy --init` 生成 buildozer.spec 时，把 `icon.filename` 写死为
+**PySide6 自带的** `PySide6/scripts/deploy_lib/pyside_icon.jpg`（256×256 JPEG），
+所以默认装到手机上启动器显示的是 PySide 的 logo。修法是让补丁脚本把它换掉：
+
+```bash
+# wsl_build_apk.sh 里（补丁 buildozer.spec 之前）
+ICON="$WORK/icon/app_icon.png"                          # 刻意放在 source.dir 之外
+cp -f "$SRC/res/icon/logo_round.png" "$ICON"            # 与主窗口/托盘图标同一张图
+python android/tools/patch_buildozer_spec.py ... --icon "$ICON"   # -> icon.filename
+```
+
+几点实测结论：
+
+* p4a(`bootstraps/common/build/build.py`) 是**原样** `shutil.copy(icon, res/mipmap/icon.png)`，
+  **不缩放、不校验尺寸**；清单模板里是 `android:icon="@mipmap/icon"`，所以给 512×512
+  带 alpha 的 PNG 就行（`res/icon/logo_round.png` 正好是 512×512 RGBA，圆角外透明）。
+* **用不了自适应图标**：p4a 的 `--icon-fg/--icon-bg` 要往 `res/mipmap-anydpi-v26/` 写 XML，
+  但 `bootstrap=qt` 的 res 模板里**没有这个目录**，传了会直接 `FileNotFoundError`。
+  `bootstrap=_sdl_common` 才有（可以对照 `p4a/pythonforandroid/bootstraps/_sdl_common/build/src/main/res/mipmap-anydpi-v26`）。
+* 图标拷到 `$WORK/icon/` 而不是 `android/` 下：spec 里 `source.dir = .`（即 `src/android`），
+  放进去会被 p4a 再打一份（457KB）进 `assets/private.tar`。
+* 核对方式（不能比文件字节，aapt2 可能对 `res/` 下的 PNG 无损重编码）：
+
+  ```bash
+  python android/tools/probe_apk_icon.py android/JMComic-0.2-arm64-v8a-debug.apk res/icon/logo_round.png
+  #   res/mipmap/icon.png: PNG 512x512 456970 字节
+  #       与期望图: 尺寸相同=True 不同像素=0/262144 最大通道差=0
+  #       结论: 是我们换上的图标(逐像素一致)
+  aapt dump badging ...apk | grep icon
+  #   application: label='JMComic' icon='res/mipmap/icon.png'
+  ```
+
+  换图标前同一个脚本给出的对照是 `res/mipmap/icon.png: JPEG 256x256 8157 字节`（PySide 默认图）。
+
+### 9.5 android/tools 的约定：路径不写死、脚本分两档
+
+所有脚本都不含本机绝对路径。公共路径集中在两个文件里，按需覆盖环境变量即可：
+
+| 文件 | 给谁用 | 用法 |
+| --- | --- | --- |
+| `android/tools/env.sh` | bash 脚本 | 在 shebang 之后 `. "$(dirname "${BASH_SOURCE[0]}")/env.sh"` |
+| `android/tools/env.ps1` | PowerShell 脚本 | 在 `param()` 之后 `. "$PSScriptRoot\env.ps1"` |
+
+解析出来的变量（两边同名，可直接互换）：
+
+| 变量 | 含义 | 默认值 |
+| --- | --- | --- |
+| `JM_REPO` / `$JmRepo` | 仓库根（脚本自己往上两级推出） | 自动定位 |
+| `JM_WORK` | WSL 构建树 | `$HOME/jmcomic-build`（本机由 `tools/local.env` 显式指定，见 §5.0.5） |
+| `JM_SDK` / `JM_NDK` | Android SDK / NDK | `$JM_WORK/android-sdk`、`$JM_SDK/ndk` 下版本最高者（可用 `JM_NDK_VERSION` 钉住） |
+| `JM_VENV` / `JM_VPY` | buildozer 宿主 venv / python | `$JM_WORK/venv311` |
+| `JM_ADB` / `$JmAdb` | adb 可执行文件 | 先查 `PATH`，再查 `$ANDROID_HOME`、`~/Android/Sdk` |
+| `JM_SERIAL` / `$JmSerial` | 目标设备串号 | `adb devices` 里第一个已授权设备 |
+| `JM_USER` | WSL 非 root 用户（跑"降权回归"用） | `id -un 1000` |
+| `JM_ABI` | 目标 ABI：`arm64-v8a` / `x86_64`（见 §10） | `arm64-v8a` |
+| `JM_WHEEL_TAG` | 由 `JM_ABI` 派生：Qt wheel 的平台标签 | `android_aarch64` / `android_x86_64` |
+| `JM_LIBS_KEY` | 由 `JM_ABI` 派生：buildozer 的 add_libs 键后缀 | `arm64_v8a` / `x86_64` |
+| `JM_QNN` | 由 `JM_ABI` 派生：是否有 QNN 运行库 | `1` / `0` |
+
+所以"换一台机器"只需要：
+
+```bash
+export JM_WORK=/path/to/build-tree JM_SDK=/path/to/android-sdk JM_SERIAL=<序列号>
+```
+
+目录按"是否属于文档化的构建/验证流程"分成两档（判据见 `android/tools/README.md`）：
+
+* `android/tools/` —— **入口脚本**：构建、同步、打包、校验、宿主回归、真机自检。
+  不在文档里的脚本不会被保留在这一层。
+* `android/tools/archive/` —— **移植过程的一次性排查脚本**，按历史原貌保留、只做了字符串脱敏
+  （机器名/串号/绝对路径换成占位符），多数只跑过一次，**不保证可直接运行**。
+
+`android/build_logs/` 是真机证据目录（抓回的日志/截图/配置），**已 gitignore、不入库**；
+其中还含真机配置（账号、代理 IP）与下载样本，不要提交。
+
+## 10. x86_64 支持（Android 模拟器 / 虚拟机）
+
+真机是 arm64-v8a，而 Android Studio 的 AVD 基本都是 **x86_64**。用 arm64 包去跑模拟器
+只能靠镜像的 native bridge（`libnb.so`）翻译指令，既慢又容易在原生库上出问题
+（`libsr_qnn.so`/`libonnxruntime.so` 都得翻译一遍）。所以这里单独出 x86_64 包。
+
+**一个 APK 只含一种 ABI**：p4a 按 arch 分别建 dist，原生库也按 `libs/<abi>/` 分目录。
+切换是"换一个架构再打一次"，不是往同一个包里塞两份。
+
+```bash
+# 目标 ABI 由 JM_ABI 决定（默认 arm64-v8a，保持原行为不变）
+JM_ABI=x86_64 bash android/tools/wsl_fetch_android_wheels.sh   # Qt 的 android_x86_64 wheel
+JM_ABI=x86_64 bash android/tools/wsl_fetch_ort.sh               # ONNX Runtime x86_64
+JM_ABI=x86_64 bash android/tools/wsl_build_native.sh            # libsr_qnn.so / libsr_qnn_proc.so
+bash android/tools/wsl_build_apk.sh --abi x86_64                # 打包
+# 产物：android/JMComic-<版本>-x86_64-debug.apk
+```
+
+`wsl_build_apk.sh` 会自己跑 wheel 下载与 ORT 补齐，也能用 `--abi` 显式指定；两者等价：
+`--abi x86_64` 就是 `JM_ABI=x86_64`。
+
+### 10.1 两种 ABI 的差异
+
+| 项 | arm64-v8a（真机） | x86_64（模拟器） |
+| --- | --- | --- |
+| Qt wheel | `pyside6-6.12.0-...-android_aarch64.whl` | `...-android_x86_64.whl`（同一版本，Qt 官方两个都发） |
+| ONNX Runtime | `onnxruntime-android-qnn` AAR（只有 arm64） | `onnxruntime-android` AAR（普通版，有 x86_64） |
+| QNN 运行库 | `libQnnHtp*` / `libQnnSystem` 等 20 个 | **没有**（高通 NPU 只存在于 arm64 设备） |
+| 超分后端 | QNN HTP（NPU）+ CPU 兜底 | ONNX Runtime CPU EP |
+| curl_cffi | 官方 android wheel（TLS 指纹 + HTTP/3 + ECH） | **用 `android/shims/curl_cffi` 纯 python 垫片** |
+| 原生库目录 | `android/libs/arm64-v8a/` | `android/libs/x86_64/` |
+| 构建缓存 | `$JM_WORK/keep-arm64-v8a/` | `$JM_WORK/keep-x86_64/` |
+
+#### 为什么 x86_64 没有 curl_cffi
+
+上游只发布 `curl_cffi-*-android_24_arm64_v8a.whl`（PyPI 上 cp313/cp314 都是 arm64），
+没有任何 x86_64 的 Android wheel。我们的 `android/recipes/curl_cffi` 是"解包官方 wheel"，
+没有 wheel 就无包可解，所以 x86_64 的 `requirements` 里**不含 curl_cffi**
+（`patch_buildozer_spec.py --abi` 负责剔除），运行时由 `android/main.py` 的 `SetupPath()`
+在 `import curl_cffi` 失败时把 `android/shims` 挂进 `sys.path`，上层代码无需改动。
+
+代价：垫片没有 Chrome TLS 指纹、不支持 HTTP/3/ECH（`HTTP3_ECH_SUPPORTED=False`
+会让 `src/server/req.py` 跳过降级重试）。对"在模拟器上跑通界面/登录/下载"够用，
+但**不能用模拟器验证 TLS 指纹相关的线上问题** —— 那类问题必须真机。
+
+#### 超分在模拟器上是 CPU 推理
+
+`sr_qnn.cpp` 的 QNN 是运行期 `dlopen("libQnnHtp.so")` 的（没有链接期依赖），
+所以同一份源码两种 ABI 都能编。x86_64 上找不到 QNN 库就回落 CPU EP：
+`sr_qnn.getGpuInfo()` 只列 `CPU (ONNX Runtime)`，`HasHtp()` 为 `False`。
+速度比真机的 NPU 慢一个数量级，用途是**验证功能链路**（分块、拼接、编码、任务队列），
+不是评估性能。宿主侧 `host_test_sr_qnn.py` 已经用同一份引擎在 x86_64 上跑过
+（分块边界无接缝、缩放/回退/取消全部通过）。
+
+### 10.2 x86_64 特有的坑
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `android.add_libs_x86_64` 写了但 APK 里没有 `.so` | buildozer 1.6.0 的 add_libs 映射表里**没有 x86_64**（只有 armeabi/v7a/arm64/x86/mips），键被静默忽略 | `wsl_patch_buildozer_addlibs.sh` 幂等补一行（`wsl_build_apk.sh` 会自动调用） |
+| 切 ABI 后 Qt 库还是上一种架构的 | `android/deployment/recipes` 缓存了上一次生成的 PySide6 recipe，里面**写死了解包哪个 wheel** | `wsl_build_apk.sh` 检测到 recipe 里的 wheel 不是当前 ABI 就删掉 `deployment/` 让工具重新生成 |
+| 冷构建时又下一遍 CPython/Pillow | p4a 的源码包缓存目录按 arch 分（`build-<abi>/packages`） | `wsl_seed_from_old_storage.sh` / `wsl_seed_sources.py` 都按 `JM_ABI` 找目录，x86_64 直接从 arm64 的缓存复制（源码包与架构无关） |
+| 切回 arm64 后 30 分钟又编一遍 | `pyside6-android-deploy` 每次启动都 `rmtree(.buildozer)` | `wsl_save_build_cache.sh` / `wsl_restore_build_cache.sh` 按 `keep-<abi>/` 分目录保存已编译产物（save 会保存**所有**存在的 ABI 目录，打任一 ABI 都不会毁掉另一套） |
+| 冷构建到 PySide6 recipe 时报 `FileNotFoundError: .../android/wheels/pyside6-...whl` | 构建过程中 `android/wheels/*.whl` 被某个步骤删掉了（arm64 构建没触发，x86_64 冷构建必现）。文件和 recipe 里写死的绝对路径一起消失，报错点离真正原因很远 | `wsl_build_apk.sh` 把 wheel **复制到 `$JM_WORK/wheelhouse/<abi>/`**（`source.dir` 之外，与图标同思路）再把该路径写进 recipe，工程目录被清扫也不影响 |
+| 超分进程模式在模拟器上刷 4 条 `sr_qnn_proc` 失败日志 | 进程模式只为让 QNN HTP 拿到 FastRPC；x86_64 没有 QNN，硬走一遍会在裸 `linker64` 子进程里 `dlopen` `libonnxruntime.so` 失败（依赖链里的 `/system/lib64/libgui.so` 在该命名空间找不到符号） | `sr_qnn` 检测到没有 `libQnnHtp.so` 就直接跳过进程模式走 ctypes + CPU EP（`JM_SR_PROC=force` 可强制试） |
+| 下载 86MB 的 Qt wheel 只跑 12KB/s | 海外镜像（jaist）对国内很慢 | `wsl_fetch_android_wheels.sh` 优先清华/中科大/上交镜像，并带 `--speed-limit 200000 --speed-time 20`（低于 200KB/s 就换源） |
+| `:packageDebug` 只报一句 `IncrementalSplitterRunnable` 失败，但 dist 目录里多了一个 400MB 的 `java_pid*.hprof` | p4a 的 `gradle.tmpl.properties` 把堆写死成 `-Xmx2500m`，把 200MB 的 `assets/private.tar` + 约 500MB 原生库压进一个 APK 时 **Java OOM**（hprof 就是 `-XX:+HeapDumpOnOutOfMemoryError` 留的堆转储，看到它即可断定是 OOM 而不是代码问题） | `wsl_patch_gradle_mem.sh` 幂等把模板**和**已存在的 dist 副本改成 `-Xmx4096m`（只改 dist 会被下次构建按模板覆盖回去），顺手删掉历史 hprof；`wsl_build_apk.sh` 步骤 3.7 自动调用 |
+| 构建跑到一半，`wsl_build_apk.sh` 开始报 `line N: -sfn: command not found` / `syntax error near unexpected token 'fi'` | 构建**正在运行**时改了这个脚本：bash 按文件偏移续读，中间插入内容会让后半段读串 | 别在构建过程中编辑正在跑的脚本；要改就等这轮结束（或改完重启一轮） |
+
+### 10.3 模拟器上验证
+
+```bash
+# 1) 装（同 versionCode 覆盖安装，签名不变；不同 ABI 允许）
+adb install -r android/JMComic-<版本>-x86_64-debug.apk
+
+# 2) 确认真的是原生 x86_64，不是被 native bridge 翻译
+adb shell dumpsys package org.jmcomic.jmcomic | grep primaryCpuAbi
+#    期望：primaryCpuAbi=x86_64
+
+# 3) 启动并看应用自己的日志
+adb logcat -c && adb shell am start -n org.jmcomic.jmcomic/org.kivy.android.PythonActivity
+adb logcat -d | grep -iE "python|sr_qnn|Qt" | tail -40
+```
+
+应用内的启动自检写在 `<AppDataDir>/logs/<日期>.log` 与 `android_startup.log` 里；
+`main.py` 的 `DumpDiagnostics()` 会列出这几种关键信息，正好用来看 ABI 是否一致：
+
+```
+  libsr_qnn.so / libonnxruntime.so: <路径>      # 必须落在 .../lib/x86_64/
+  libplugins_imageformats_qwebp_*: ...          # 前缀匹配，后缀是实际 ABI
+  sr backend: CPU (ONNX Runtime)                # 模拟器上没有 HTP 是正常的
+```
+
+> 模拟器镜像建议用 x86_64 的 Google APIs 镜像（Android 14/15/16 都行，minSdk 是 34）。
+> **16KB 页镜像要不要用，取决于包的版本**：0.87 及更早由 NDK r26d 编出，全部按 4KB
+> 对齐，系统会把它塞进"16KB 向后兼容模式"（首启有警告、Android 17 可设成 fatal 直接
+> 崩溃）；从改用 NDK r28+ 的版本起才真正 16KB 对齐。别凭镜像能装就下结论，跑
+> `python tools/check_elf_page_align.py dist/<apk>` 看结论（见 §11）。
+
+### 10.4 不想动构建脚本时的手工路径
+
+三个开关就是全部：
+
+1. `pysidedeploy.spec` 的 `[buildozer] arch = x86_64`（`fill_deploy_spec.py --arch x86_64`）
+2. `buildozer.spec` 的 `android.archs = x86_64` 与 `android.add_libs_x86_64 = ...`
+   （`patch_buildozer_spec.py --abi x86_64 --libs libs/x86_64`）
+3. `libs/x86_64/` 里的原生库（Qt 插件从 x86_64 wheel 解、ORT 从普通 AAR 解、
+   `libsr_qnn*.so` 用 NDK 编）
+
+其余（源码、模型、清单、权限、图标）两种 ABI 完全共用。
+
+### 10.5 实测结果（Android 15 / x86_64 AVD，2026-10-18）
+
+APK：`JMComic-0.36-x86_64-debug.apk`（388MB，debug 签名，versionCode 103436 —— 与 arm64 同版本号，
+可以 `adb install -r` 直接覆盖安装，但两种 ABI 只能装一个）。设备侧：
+
+```
+$ adb shell dumpsys package org.jmcomic.jmcomic | grep primaryCpuAbi
+    primaryCpuAbi=x86_64                    # 原生 x86_64，不是 native bridge 翻译的
+$ aapt2 dump badging ... | grep native-code
+    native-code: 'x86_64'
+```
+
+启动自检（`files/android_startup.log`，由 `main.py` 的 `DumpDiagnostics()` 写出）：
+
+| 检查项 | 结果 |
+| --- | --- |
+| python / optimize | `3.14.8` / `sys.flags.optimize: 1` |
+| native 库目录 | `.../lib/x86_64`（不是 `lib/arm64`） |
+| `libsr_qnn.so` / `libonnxruntime.so` | 都在 `lib/x86_64/` 里找到 |
+| `libQnnHtp.so` | `NOT FOUND`（x86_64 预期） |
+| 7 个 Qt 插件 | 全部命中，后缀 `_x86_64` |
+| 图像格式 | jpeg / gif / webp / svg 全 OK |
+| pycryptodome | `backend=cffi`，`jmcomic decode_resp_data: True` |
+| 超分 | `loaded=True`、`models available: 31`、`backend: CPU (ONNX Runtime)`、`htp capable: False` |
+| jnius | 与 arm64 相同地失败（`cannot locate symbol "WebView_AndroidGetJNIEnv"`，已知且不影响功能） |
+
+网络与解密链（无需真实账号即可验证）——在模拟器上输入任意假账号点"登录"，服务端返回的密文被正确解开：
+
+```
+user_handler.py[line:243] - WARNING: 登陆失败！！！, code:401, text:
+{"code":401,"data":[],"errorMsg":"无效的用户名和\/或密码!"}
+```
+
+说明 x86_64 包里的 HTTPS 请求 → AES 解密 → JSON 解析 → UI 提示整条链路是通的
+（`android/shims/curl_cffi` 垫片在没有原生 curl_cffi 的情况下能正常发请求）。
+
+界面侧（`adb shell input -d <display> tap …` 逐个点，模拟器是多 display 的，
+`input`/`screencap` 都要带 display id）：
+
+| 操作 | 结果 |
+| --- | --- |
+| 点"菜单" | 抽屉正常展开：头像 / 登录 / 打卡 / J Coins / 等级 / 收藏数 / 分流 / 屏蔽词 / 用户区 / 导航区 |
+| 抽屉里点"设置" | 设置页渲染完整（通用 / 代理 / WAIFU2X / 下载与缓存 四个 tab、主题、语言、字体、缩放比例） |
+| 切到 "WAIFU2X" tab | `CPU/GPU 选择` 下拉显示 **CPU (ONNX Runtime)**（x86_64 没有 NPU，`getGpuInfo()` 只列 CPU），模型名 `MODEL_WAIFU2X_*` 正常填充 |
+
+超分真实推理（`touch files/sr_selftest` 触发 `main.py` 的一次性自检，`files/sr_report.txt`）：
+
+```
+引擎模式: 进程内 ctypes
+进程模式失败: 没有 QNN 运行库(libQnnHtp.so)，跳过进程模式，直接用 ctypes + CPU EP
+192x192 -> 384x384, 1.731s, 4 块, 432.7ms/块
+480x640 -> 960x1280, 6.577s, 20 块, 328.9ms/块
+实际后端: CPU (ONNX Runtime)
+profile providers: {'CPUExecutionProvider': 1275, 'XnnpackExecutionProvider': 750}
+SELFTEST_SUMMARY backend=CPU (ONNX Runtime) htp=False tile_ms=329
+```
+
+即超分链路（分块 → 推理 → 拼接 → 编码）在 x86_64 + CPU EP 上是真的能跑的，
+只是慢（真机 NPU 约 1/10 的耗时）。
+
+**仍然没验证的部分**：用真实账号登录、登录后的漫游/搜索/下载/看图。这些都需要账号
+（401 那类结果只能证明请求链路通，不能证明登录成功后的业务流程）。
+模拟器上也不该拿来评估性能 —— 超分只走 CPU，和真机 NPU 没有可比性。
+
+
+
+
+
+
+
+
+## 11. 16KB 页大小兼容（0.88 起）
+
+### 11.1 为什么必须做
+
+Android 15 起系统可以跑在 16KB 页上。这类设备要求 `.so` 的 `PT_LOAD` 段按 16KB
+对齐，否则：
+
+* 系统把应用塞进 **16KB 向后兼容模式**（bionic 用 `linker_phdr_16kib_compat` 重映射
+  段，复杂布局还要 memfd 双映射 + SIGSEGV 模拟），首启弹"以 16KB 兼容模式运行"的警告；
+* Android 17 可以把兼容模式设成 `fatal`（`bionic.linker.16kb.app_compat.enabled=fatal`），
+  不合规的库直接 SIGABRT —— 表现就是"装完即闪退"，且崩在进程启动阶段，用户无法自救；
+* Google Play 对 targetSdk≥35 的更新自 2025-11 起强制要求 16KB 兼容（官方文档口径：
+  2027-02-01 起不合规更新无法发布）。本项目是 sideload 分发、targetSdk 34，暂不受
+  商店规则约束，但设备侧的风险与 targetSdk 无关。
+
+一句话：**不是"能不能装"的问题，是"还能撑多久"的问题。**
+
+### 11.2 0.87 的实测基线（arm64-v8a，218 个 .so）
+
+| 分层 | 状态 |
+| --- | --- |
+| Qt 6.12 全套 + 插件（164 个） | 已按 16KB 构建 ✅ |
+| onnxruntime（2）+ QNN arm64（12） | 已对齐 ✅ |
+| `libpython3.14.so` / `libpythonbin.so` / `libmain_*.so` | 4KB ❌（进程入口就断在这） |
+| recipe 三方库：`libssl`/`libcrypto`/`libsqlite3`/`libffi`/`libfreetype`/`libpng16`/`libjpeg`/`libturbojpeg`/`libc++_shared`(×2) | 4KB ❌ |
+| 自研 `libsr_qnn.so` / `libsr_qnn_proc.so` | 4KB ❌ |
+| 7 个 `libQnn*Skel.so` | ELF32/Hexagon，DSP RPC 加载，**不参与** bionic 校验 |
+| `libpybundle.so` | 非 ELF（数据包），不参与加载 |
+| `libavformat.so`（Qt 自带） | `p_align` 已达标，但有 1 个段 offset/vaddr 不同余（门禁只告警） |
+
+根因：这些库都由 **NDK r26d** 编出，r26 默认 4KB 对齐。NDK r28 起默认 16KB。
+
+### 11.3 两条命令（一个拦产物，一个验设备）
+
+```bash
+# 产物级门禁：build_android.sh 第 8 步自动跑，不合规直接失败
+python tools/check_elf_page_align.py dist/JMComic-<ver>-arm64-v8a-debug.apk
+python tools/check_elf_page_align.py dist/... --json --soft     # CI 里只报不拦
+python tools/check_elf_page_align.py libs/arm64-v8a --list-ok   # 查目录
+
+# 设备级验收（16KB AVD 即可，无需真机：镜像名含 16k，getconf PAGE_SIZE=16384）
+bash tools/avd_verify.sh --apk dist/JMComic-<ver>-x86_64-debug.apk --abi x86_64
+#   一行出 PASS/FAIL 表：装包 / 首帧(am start -W) / 进程存活 / 16KB 库加载 /
+#   兼容模式 / PSS / 截图。判据是"退出码 + 产物 + 日志关键字"三者合判：
+#   ① `dlopen failed: .*program alignment` 与 `UnsatisfiedLinkError` 必须 0 条
+#   ② 应用**不能**被标记为 16KB 兼容模式（否则即使前面全绿也是假绿）
+#   ③ `pidof` 必须非空 —— 页对齐只证明"编对了"，能启动存活才证明"能跑"
+bash tools/check_16kb_device.sh --pkg org.jmcomic.jmcomic --launch
+bash tools/check_16kb_device.sh --pkg org.jmcomic.jmcomic --fatal on   # 严格模式暴露问题
+```
+
+判定口径与 Google 的 `check_elf_alignment.sh` 一致：只看 `PT_LOAD` 的 `p_align`
+是否 ≥ 16384。额外的"offset/vaddr 同余"检查默认只告警（会有 Qt 自带的库命中，
+且我们无法重编它们），需要严格模式时加 `--strict-congruence`。
+
+### 11.4 NDK 版本策略：不写死
+
+`tools/resolve_ndk.sh` 是全仓唯一入口，选择顺序：
+
+1. `JM_NDK` / `ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` 显式目录
+2. `JM_NDK_VERSION=<版本>` → `$SDK/ndk/<版本>`（回退到已知可用版本）
+3. 默认取 `$SDK/ndk/*` 里**版本号最高**的一个 —— 以后装了新 NDK 不用改任何脚本
+4. `$SDK/ndk-bundle` 兜底
+
+`build_android.sh` 会校验版本 ≥ r28，低于就直接报错并给安装/钉版本的命令；
+`build_android.sh`、`build_arm64.sh`、`build_x86_64.sh`、`tools/env.sh` 以及
+`tools/wsl_*.sh` 全部走这个解析器，不再有 `26.1.10909125` 这类硬编码。
+
+`libsr_qnn.so` 的 CMake 里另外显式加了
+`-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384`，
+所以就算有人把 NDK 钉到 r26/r27，这个库也不会退化成 4KB。
+
+### 11.5 回归清单（16KB 设备上逐条走）
+
+1. 冷启动 → 首页出图；logcat 里不出现 `running in 16 KB backcompat mode`
+2. 超分：QNN/HTP 与 CPU 两条后端各跑一张
+3. 图片解码：webp / gif / 长图各一张；翻页动画（QRhi 覆盖层）连续翻 30 页
+4. 下载 + 解密入库（SQLite）、历史记录、字体渲染
+5. `--fatal on` 后重复 1~4，全过才算"不依赖兼容模式"
+
+> 注意：模拟器抓不到 QRhiWidget 层的像素（见 §8），翻页动画的像素级验收要在真机做。
+
+## 12. 工具链版本集中配置与跨平台可移植性（0.88 起）
+
+### 12.1 一个文件管所有版本号
+
+工具链版本不再散落在十几个脚本里，全部集中在 **`tools/versions.env`**：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `JM_API_LEVEL` | 34 | compileSdk / targetSdk / p4a `--android-api` |
+| `JM_MIN_SDK` | 34 | minSdk（改动直接影响可安装设备范围） |
+| `JM_BUILD_TOOLS` | `auto` | `auto` = 用 `$SDK/build-tools` 下已装的最高版本 |
+| `JM_JDK_MIN` / `JM_JDK_MAX` | 17 / 25 | 构建 JDK 的允许区间（25 LTS 需要 Gradle ≥9.1） |
+| `JM_GRADLE_MIN` | 9.1.0 | 支持 Java 25 的最低版本（同时含 3 个 high 级公告的修复） |
+| `JM_GRADLE_VERSION` | 9.8.2 | 改写 p4a 模板与 dist 里的 wrapper（打包前预置，立即生效） |
+| `JM_NDK_MIN_MAJOR` | 28 | 16KB 页对齐的起点 |
+| `JM_CMAKE_MIN` | 3.20 | libsr_qnn 的 CMake 要求 |
+| `JM_ORT_VERSION` | 1.29.0 | ONNX Runtime 依赖版本 |
+
+约定：**环境变量永远优先**。临时换版本不用改文件、不用提交：
+
+```bash
+JM_API_LEVEL=35 ./build_android.sh          # 试 targetSdk 35
+JM_JDK_VERSION=21  ./build_android.sh       # 钉住 JDK 主版本
+JM_GRADLE_VERSION=8.14.6 ./build_android.sh # 顺手把 Gradle 补到安全版本
+JM_BUILD_TOOLS=36.0.0 ./build_android.sh    # 强制某个 build-tools
+```
+
+### 12.2 版本是怎么"动态获取"的
+
+| 对象 | 解析方式 | 校验 |
+| --- | --- | --- |
+| NDK | `JM_NDK`/`ANDROID_NDK_HOME` → `JM_NDK_VERSION` → `$SDK/ndk/*` 最高版本 | 主版本 ≥ `JM_NDK_MIN_MAJOR` |
+| JDK | `JM_JDK` → `JAVA_HOME`（区间内才用）→ `JM_JDK_VERSION` → 扫描常见安装位 | 主版本 ∈ `[JM_JDK_MIN, JM_JDK_MAX]`（区间值见 `tools/versions.env`），越界直接报错并说明原因 |
+| build-tools | `auto` 时取已装最高版本 | 目录存在性检查 |
+| Gradle | 打包前改写 p4a 模板 + dist 的 `gradle-wrapper.properties`；打包后复查 | 低于 `JM_GRADLE_MIN` 告警（`JM_GRADLE_VERSION` 直接改写） |
+| cmake | `cmake --version` | ≥ `JM_CMAKE_MIN` |
+
+装新版本工具链后**不需要改任何脚本**：把 NDK 放进 `$SDK/ndk/`、JDK 放进常规目录即可。
+
+### 12.3 跨平台：抽掉了哪些隐含假设
+
+`tools/resolve_host.sh` 提供一层薄抽象，脚本里不再出现平台方言：
+
+| 原来 | 现在 | 为什么 |
+| --- | --- | --- |
+| `sed -i`（14 处） | `jm_sed_i` | BSD sed 必须 `-i ''`，否则 macOS 上直接失败 |
+| `nproc`（5 处） | `jm_nproc` | macOS 无 `nproc`，回落 `sysctl -n hw.ncpu` / `getconf` |
+| `sha256sum`（2 处） | `jm_sha256` | macOS 是 `shasum -a 256`，再回落 `openssl dgst` |
+| `stat -c %Y` / `readlink -f` | `jm_stat_mtime` / `jm_realpath` | BSD 参数不同 |
+| `$(uname -s)` 字面量判断 | `jm_host_os` | 能区分 WSL / MSYS，错误提示能指到正确做法 |
+| Windows 风格路径 | `jm_norm_path` | `D:/Android_SDK` → `/mnt/d/Android_SDK`，否则 `[[ -d ]]` 全判假 |
+| `mapfile`（bash 4+） | `while read` | macOS 自带 bash 3.2 没有 `mapfile` |
+| GNU `sed '0,/re/'` 与 `\n` 替换 | python 内联脚本 | 这两个都是 GNU 扩展，BSD 上会静默改错或报错 |
+
+换行符另外两道保险：`.gitattributes` 强制 `android/**/*.sh` 为 LF；`tools/check_scripts.py`
+在每次构建开始时体检（CRLF/BOM/shebang），必要时 `--fix` 一键规范化。
+
+### 12.4 下载策略：镜像 + aria2 多线程
+
+所有 GitHub 下载（p4a 的 recipe 源码包、raw 补丁文件、本脚本拉的头文件）统一走
+`tools/resolve_host.sh` 的 `jm_download`：
+
+* **镜像**：`github.com` / `raw.githubusercontent.com` 一律加前缀
+  `JM_GH_MIRROR_PREFIX`（默认 `https://gh-proxy.com/`，实测 ~4MB/s）。
+  已挂在其它镜像下的链接不会被二次包装。
+* **aria2c 多线程**：装了 `aria2c` 就用 `-x16 -s16` 并发 + 断点续传；
+  没装或失败自动回落 `curl -fsSL --retry 3`。关闭：`JM_USE_ARIA2=0`。
+* **p4a 内部下载**：给 `Recipe.download_file` 打了本地补丁
+  （`tools/patch_p4a_downloader.py`，构建时幂等注入），p4a 自己的下载也走 aria2。
+  原因：p4a 用 urlretrieve 串行下载，国内网络下就是"卡在下载 openssl/sqlite3"。
+* **两个副本都要镜像化**：p4a 会把自己复制到 `.buildozer/.../python-for-android/`，
+  下载用那份副本的 recipe——只改 venv 没用，所以每次打包前两处都重新镜像化
+  （`tools/patch_p4a_urls.sh`，幂等）。
+
+### 12.4 迁移到 Linux 主机的检查清单
+
+```bash
+# 1) 脚本本身是否干净（CRLF/BOM/shebang）
+python android/tools/check_scripts.py android
+
+# 2) 三个解析器是否都能挑到东西
+bash android/tools/resolve_ndk.sh  --sdk "$ANDROID_HOME" --check
+bash android/tools/resolve_jdk.sh  --check
+bash android/tools/resolve_host.sh --check   # 打印平台结论（也可 source 后用 jm_* 函数）
+
+# 3) 构建（会自动跑上面两步）
+bash android/build_android.sh --abi arm64-v8a
+```
+
+仍然与平台绑定的只剩两处，都是**有意为之**：
+`tools/wsl_*.sh`（WSL 专用流程：ext4 构建树、`setsid` 脱离式构建）和
+`*.ps1`（Windows 侧入口）。它们不参与 Linux 主机构建，也不被 `build_android.sh` 调用。
