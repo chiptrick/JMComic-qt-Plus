@@ -13,7 +13,7 @@
 项目代码里用的是 **PySide6**（`from PySide6.QtWidgets import ...`），不是 `QtPy` 那个兼容层。
 两者性能特征一致（PySide6 官方绑定、shiboken6 封装），下文统一按 PySide6 讨论。
 
-项目锁定 `PySide6==6.5.3`（`src/requirements.txt`），本文实测环境是 **PySide6 6.12.0**
+项目锁定 `PySide6==6.5.3`（`python/src/requirements.txt`），本文实测环境是 **PySide6 6.12.0**
 （本机唯一可用的 wheel）。6.5 的绑定层开销通常比 6.12 高 10~30%，**结论方向不变，绝对值偏乐观**。
 
 ### 测量环境
@@ -69,10 +69,10 @@ Qt 使用密度：
 
 ### H1 图片解码与还原（阅读器主路径）
 
-* `src/task/task_qimage.py:44` `TaskQImage.Run()` —— **单线程**消费队列，`ConverQImage()` 在 `:154`：
+* `python/src/task/task_qimage.py:44` `TaskQImage.Run()` —— **单线程**消费队列，`ConverQImage()` 在 `:154`：
   `QImage.loadFromData()` → `q.scaled(..., SmoothTransformation)`。
-* `src/tools/tool.py:1271` `SegmentationPicture()` —— 桌面端走 **PIL**：解码 → `crop/paste` 分块还原 → **重新编码**成 JPEG/PNG 字节。
-* 回流 `src/view/read/read_view.py:589` `ShowImgAll()` → `read_graphics.py:715` `SetPixIem()`：
+* `python/src/tools/tool.py:1271` `SegmentationPicture()` —— 桌面端走 **PIL**：解码 → `crop/paste` 分块还原 → **重新编码**成 JPEG/PNG 字节。
+* 回流 `python/src/view/read/read_view.py:589` `ShowImgAll()` → `read_graphics.py:715` `SetPixIem()`：
   再 `QPixmap(data)` + `scaled(SmoothTransformation)`。
 
 **问题**：一张图被"解码 + 编码 + 再解码"三次，其中一次编码完全是浪费。
@@ -105,12 +105,12 @@ GPU 覆盖层 `component/widget/gpu_anim_cover.py` 用 `QRhiWidget` + 视口位�
 
 ### H6 跨线程数据回流
 
-`src/task/qt_task.py:16` `taskBack = Signal(int, bytes)`，载荷是 `pickle.dumps(data)`（`server/user_handler.py` 40+ 处）。
+`python/src/task/qt_task.py:16` `taskBack = Signal(int, bytes)`，载荷是 `pickle.dumps(data)`（`server/user_handler.py` 40+ 处）。
 `downloadStBack = Signal(int, dict)`、`localBack = Signal(int, int, list)` 同理。
 
 ### H7 启动资源
 
-`src/start.py:78` `import images_rc` —— 22.3 MB Python 源码，468k 行字节字面量。
+`python/src/start.py:78` `import images_rc` —— 22.3 MB Python 源码，468k 行字节字面量。
 
 ---
 
@@ -304,7 +304,7 @@ C++ 里同样的代码放 `QThreadPool(4)` 就是 3~4× 吞吐（真机 8 核约
 | 风险 | 说明 | 影响 |
 |---|---|---|
 | **生态缺口** | `jmcomic==2.6.20` 是 Python SDK（登录、API 签名、章节解析、图片分块算法全在里面）；`curl_cffi` 负责 TLS 指纹/CF 盾；`sr_vulkan`/`sr_qnn` 是 Python 扩展；`webdavclient3`/`pysmb` 负责 NAS。C++ 侧没有等价物，全部要照协议重写或重新绑定 | **极高**，可能占全部工作量的一半 |
-| **Android 打包链重建** | 现在是 p4a + buildozer + PySide6-Android wheels（`android/tools/*.sh`）；C++ 要换 Qt for Android（CMake + Gradle + NDK），QNN/ONNX Runtime 集成方式完全不同。项目冷构建 40~60 min/ABI | **极高** |
+| **Android 打包链重建** | 现在是 p4a + buildozer + PySide6-Android wheels（`python/android/tools/*.sh`）；C++ 要换 Qt for Android（CMake + Gradle + NDK），QNN/ONNX Runtime 集成方式完全不同。项目冷构建 40~60 min/ABI | **极高** |
 | **70k 行重写 + 回归** | 273 个文件 / 70,825 行，其中 8.3k 行 Android 专用 UI 胶水、11.3k 行 uic 生成代码要重新生成。当前版本仍在修换页方向、封面错位这类 UI 细节 | 高 |
 | **线程模型变化** | Python 有 GIL "保护"，QPixmap 只能在 GUI 线程、QImage 可跨线程这些规则在 C++ 里变成实打实的崩溃/数据竞争；对象所有权（parent/智能指针）要重新设计 | 高（新 bug 高发区） |
 | **迭代效率** | 现在改一行 Python 直接跑；C++ 改一行要编译（Android 40~60 min）。调 UI 参数、试动画曲线的成本上升一个数量级 | 中高（长期） |
@@ -368,5 +368,5 @@ C++ 里同样的代码放 `QThreadPool(4)` 就是 3~4× 吞吐（真机 8 核约
 | `.workbuddy/tmp/bench_reader.py` | 阅读器 60 页建场/重绘/缩放 |
 | `.workbuddy/tmp/bench_parallel.py` | 解码并行度（GIL）与 PIL 对照 |
 
-复跑：`/run/media/kokomi/Data/jm-build/JMComic-qt/android/.venv/bin/python <script>`
+复跑：`/run/media/kokomi/Data/jm-build/JMComic-qt/python/android/.venv/bin/python <script>`
 （该 venv 的 PySide6 是 6.12；如需对齐 6.5.3 结论，建议在 pin 环境中复测 `bench_parallel.py` 与 `bench_startup.py`）

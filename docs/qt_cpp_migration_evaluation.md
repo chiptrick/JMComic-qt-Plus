@@ -30,15 +30,15 @@
 
 | 分层 | 文件 | 行数 | 迁移性质 |
 |---|---:|---:|---|
-| `src/interface/` | 50 | 11,291 | **uic 生成**（49 个 `.ui` 编译产物），C++ 侧重新 `uic` 即可，≈0 成本 |
-| `src/view/` | 79 | 17,266 | 页面级逻辑，手写 |
-| `src/component/` | 84 | 11,753 | 自绘控件/列表/动画，手写，迁移成本最高 |
-| `src/tools/` | 34 | 22,983 | 其中 `mobile_*.py` **8,309**（Android 适配胶水）、`zh_wiki.py` **8,274**（简繁映射数据表） |
-| `src/server/` | 5 | 3,326 | 网络/协议/加解密 |
-| `src/task/` | 14 | 2,646 | 下载、解码、超分调度 |
-| `src/config/` | 4 | 816 | 配置 |
+| `python/src/interface/` | 50 | 11,291 | **uic 生成**（49 个 `.ui` 编译产物），C++ 侧重新 `uic` 即可，≈0 成本 |
+| `python/src/view/` | 79 | 17,266 | 页面级逻辑，手写 |
+| `python/src/component/` | 84 | 11,753 | 自绘控件/列表/动画，手写，迁移成本最高 |
+| `python/src/tools/` | 34 | 22,983 | 其中 `mobile_*.py` **8,309**（Android 适配胶水）、`zh_wiki.py` **8,274**（简繁映射数据表） |
+| `python/src/server/` | 5 | 3,326 | 网络/协议/加解密 |
+| `python/src/task/` | 14 | 2,646 | 下载、解码、超分调度 |
+| `python/src/config/` | 4 | 816 | 配置 |
 | **合计（不含 `images_rc.py`）** | **274** | **70,825** | |
-| `src/images_rc.py` | 1 | 468,665（22.3 MB） | rcc 生成的 Python 字节字面量，C++ 侧变 `.qrc` |
+| `python/src/images_rc.py` | 1 | 468,665（22.3 MB） | rcc 生成的 Python 字节字面量，C++ 侧变 `.qrc` |
 
 **真实迁移面** = 70,825 − 11,291（生成）− 8,274（数据表）= **51,260 行**。
 
@@ -52,8 +52,8 @@ Qt 使用密度 `[实测]`：394 个类、71 个 `QWidget` 子类、526 处 `.co
 | Android 构建 | `pyside6-android-deploy` → buildozer → python-for-android → Gradle；**每个 ABI 打包两次**（打完再补 minSdk/local_libs 再打） |
 | 单 ABI 耗时 | 冷构建 **40~60 分钟**，缓存命中约 5 分钟 |
 | 宿主约束 | Linux / WSL2 / macOS；宿主 venv 固定 Python 3.11 |
-| 设备迭代 | `android/tools/hotpush.sh`：push 单个 `.py` → 重启应用，**约 10 秒** |
-| 回归测试 | 30 个 `android/tools/host_test_*.py`，**9,100 行**，宿主 offscreen 直接跑 |
+| 设备迭代 | `python/android/tools/hotpush.sh`：push 单个 `.py` → 重启应用，**约 10 秒** |
+| 回归测试 | 30 个 `python/android/tools/host_test_*.py`，**9,100 行**，宿主 offscreen 直接跑 |
 | 桌面打包 | PyInstaller，产物 **306 MB** |
 
 ### 1.3 体积基线（本次直接拆包测得）`[实测]`
@@ -125,7 +125,7 @@ PIL 11 MB、cryptography 9.6 MB、lxml 6.6 MB、tcl/tk 6.5 MB、python310.dll 4.
   （`requirements_android_ci.txt` 明确写了"用桌面端钉的 6.5.3 会掩盖移动端适配层依赖新 API 的问题"）。
   C++ 侧只有一个 Qt 版本。
 - **Android 上的 Python 专有坑**：`bootstrap=qt` 下 `ctypes.util` 必须补（README §3.1）、
-  `PYTHONOPTIMIZE=2` 让 ctypes 后端必死（§3.2）、`curl_cffi` 垫片（`android/shims/`）、
+  `PYTHONOPTIMIZE=2` 让 ctypes 后端必死（§3.2）、`curl_cffi` 垫片（`python/android/shims/`）、
   p4a recipe、`PYTHONPATH`/`sys.path` 修补。这些在 C++ 里整体消失。
 - **类型契约靠约定**：281 处 `getattr`、70 处 `**kwargs`、47 处 `pickle` 跨线程传参。
   C++ 强制显式契约，能消掉一类"字段改名/结构漂移"的线上问题。
@@ -224,12 +224,12 @@ PIL 11 MB、cryptography 9.6 MB、lxml 6.6 MB、tcl/tk 6.5 MB、python310.dll 4.
 
 ```
 $ grep -rn "from jmcomic\|import jmcomic" src
-src/server/req.py:365:        from jmcomic import JmCryptoTool
-src/server/user_handler.py:1254:    from jmcomic import JmCryptoTool
+python/src/server/req.py:365:        from jmcomic import JmCryptoTool
+python/src/server/user_handler.py:1254:    from jmcomic import JmCryptoTool
 ```
 
 只用到 `JmCryptoTool.decode_resp_data(data, ts=...)` 一个静态方法（响应体 AES 解密）。
-请求构造、分页、图片分块还原都在本仓库 `src/server/`、`src/tools/tool.py` 里。
+请求构造、分页、图片分块还原都在本仓库 `python/src/server/`、`python/src/tools/tool.py` 里。
 **这一项的迁移成本从"半年"降到"一到两天"。**
 
 真正的高风险项是另一个：
@@ -237,7 +237,7 @@ src/server/user_handler.py:1254:    from jmcomic import JmCryptoTool
 > `curl_cffi` 依赖 **curl-impersonate** 版 libcurl（Chrome TLS/HTTP2 指纹 + HTTP/3 + ECH）。
 > Android 上它是**静态编进** `curl_cffi/_wrapper.abi3.so` 的（BoringSSL + ngtcp2/nghttp3 + ECH），
 > 仓库里没有独立的 `libcurl-impersonate.so` 可以复用。
-> `android/recipes/curl_cffi/__init__.py` 的注释直接写明：早期"用 NDK 自编 curl-impersonate"的
+> `python/android/recipes/curl_cffi/__init__.py` 的注释直接写明：早期"用 NDK 自编 curl-impersonate"的
 > recipe **在 p4a 下跑不通**，最后是靠上游发布官方 Android wheel 才解决（README §3.10）。
 
 桌面侧则相反：`lib/linux/libcurl-impersonate-chrome-*.so.4.8.0`（20 MB）、
@@ -277,7 +277,7 @@ Qt 官方文档原文：
 仓库里也已经把这条约束写死：
 
 ```bash
-# android/build_android.sh:240
+# python/android/build_android.sh:240
 *) die "pyside6-android-deploy 只支持 Linux / WSL / macOS 主机(当前: $(jm_host_desc))；
    Windows 请在 WSL2 里运行: wsl --cd /mnt/c/<路径>/android -e ./build_android.sh" ;;
 ```
@@ -329,7 +329,7 @@ Gradle 9.5.1 / AGP 9.2.1、支持 API 28~36。
 
 1. **16 KB 页对齐**：Qt 6.12 在 NDK < 28 时会给链接目标自动加 `-Wl,-z,max-page-size=16384`
    （`android_16kb_pages` 特性），但项目自己的 `.so`（`libsr_qnn.so`）仍需过
-   `android/tools/check_elf_page_align.py` 这道门。用 NDK 28+ 则由 Clang 默认保证。
+   `python/android/tools/check_elf_page_align.py` 这道门。用 NDK 28+ 则由 Clang 默认保证。
 2. **NDK 版本对齐**：Qt 官方 Android 库是用 NDK 27.2 编的，混用更高版本可能出现符号缺失；
    项目当前用 r28（为了 16 KB 默认对齐），需要实测确认，或统一钉到 27.2 + 显式链接参数。
 3. **Windows 文件系统副作用**：长路径（>260）、大小写不敏感（掩盖 Linux CI 才会暴露的问题）、
@@ -394,5 +394,5 @@ FrameTick p95、单页解码耗时。**若 PSS 未降 25% 或首帧未降 50%，
 | APK 体积构成 | `unzip -l` / `unzip -v` 按条目聚合；`assets/private.tar` 为 gzip（magic `1f8b`），`tar -tvf` 逐项统计 |
 | 桌面包体积 | `du -sh build_out/JMComic_windows_x64_py310` + 子目录聚合 |
 | 依赖盘点 | `grep -rn "from jmcomic\|import jmcomic"`、`grep -rn impersonate`、`ls lib/*` |
-| 构建约束 | Qt 官方文档（pyside6-android-deploy / Qt for Android Prerequisites）+ `android/build_android.sh` |
+| 构建约束 | Qt 官方文档（pyside6-android-deploy / Qt for Android Prerequisites）+ `python/android/build_android.sh` |
 | 性能数据 | 引用 `docs/pyside6_to_cpp_performance_assessment.md`（实测脚本见其附录） |

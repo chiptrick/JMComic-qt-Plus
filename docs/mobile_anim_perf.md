@@ -19,7 +19,7 @@ QWidget 顶层窗口（raster 绘制 → QRhi 合成 → Android TextureView）
 为什么每帧只刷窄带：raster 的绘制代价 ≈ 脏区面积。整页脏区 30.4ms/帧（≈32fps），
 120×120 脏区 9.2ms/帧，接缝窄带（12~19 逻辑px）1.5ms/帧。
 
-## 2. RHI 后端：钉成 Vulkan（`android/main.py: ApplyRhiBackend`）
+## 2. RHI 后端：钉成 Vulkan（`python/android/main.py: ApplyRhiBackend`）
 
 ```
 QT_WIDGETS_RHI_BACKEND=vulkan
@@ -53,7 +53,7 @@ PySide6 的 Linux 轮子只带运行时：`pyside6-qsb` 只是个包装器，最
 FileNotFoundError: .../site-packages/PySide6/qsb
 ```
 
-`android/tools/setup_qsb.sh` 用 `apt-get download`（不需要 root）拉
+`python/android/tools/setup_qsb.sh` 用 `apt-get download`（不需要 root）拉
 `qt6-shader-baker`（提供 `qsb`）+ `libqt6shadertools6`（提供 `libQt6ShaderTools.so.6`），
 解包后装进 venv：
 
@@ -67,8 +67,8 @@ site-packages/PySide6/Qt/lib/libQt6ShaderTools.so.6*      # 唯一缺失的依�
 `.qsb` 容器版本向后兼容）。烘焙：
 
 ```bash
-bash android/tools/setup_qsb.sh            # 安装工具链 + 烘焙 + 校验
-bash android/tools/setup_qsb.sh --skip-install   # 只烘焙
+bash python/android/tools/setup_qsb.sh            # 安装工具链 + 烘焙 + 校验
+bash python/android/tools/setup_qsb.sh --skip-install   # 只烘焙
 ```
 
 产物 `animcover.{vert,frag}.qsb`（各 ~900 字节）里有 `SpirvShader`（Vulkan 必需）
@@ -165,7 +165,7 @@ Qt 源码里有 `QT_WIDGETS_RHI`，看起来像"打开 RHI 合成"的总开关�
 - 纯 raster 路径在 3.75 DPR 下每帧固定成本 ≈ 9ms（整窗合成），这是 110fps 级别
   的天花板，破不了；要稳定 120fps 必须让动效离开 raster 覆盖层（见第 3 节的 QRhiWidget）。
 - `QT_ANDROID_SURFACE_CONTAINER_TYPE=0`（SurfaceView）能省掉一层合成，但会让多任务
-  快照/截屏拿不到画面（见 `android/main.py: ApplySurfaceContainer` 的说明），不可取。
+  快照/截屏拿不到画面（见 `python/android/main.py: ApplySurfaceContainer` 的说明），不可取。
 - 降 DPR（3.75 → 2.0）能把每帧成本砍到 28%，代价是整屏变糊。
 
 ## 6. 复测方法

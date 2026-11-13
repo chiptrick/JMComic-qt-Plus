@@ -97,7 +97,7 @@
 | # | 任务 | 改动点 | 完成标准 |
 |---|---|---|---|
 | 0.1 | **修 16KB 不合规** | 用 NDK ≥ r28 重编 `libsr_qnn`/`libsr_qnn_proc`/`libpython3.14`/`libc++_shared`；recipe 产物（openssl/libffi/sqlite/jpeg/png/freetype/turbojpeg）随之重编 | `check_elf_page_align.py` 两个 APK 都是 **0 未对齐**；`check_16kb_device.sh` 真机通过 |
-| 0.2 | **门禁不可绕过** | `build_android.sh` 已有硬门禁（`ALLOW_UNALIGNED=1` 才放行），补一条：放行时必须往 `android/build_logs/` 写 `unaligned_override.json`（含原因/操作人/时间） | 任何 `ALLOW_UNALIGNED=1` 的构建都能被审计 |
+| 0.2 | **门禁不可绕过** | `build_android.sh` 已有硬门禁（`ALLOW_UNALIGNED=1` 才放行），补一条：放行时必须往 `python/android/build_logs/` 写 `unaligned_override.json`（含原因/操作人/时间） | 任何 `ALLOW_UNALIGNED=1` 的构建都能被审计 |
 | 0.3 | **build-info 落盘** | 打包末尾把 JDK/NDK/Gradle/AGP/Qt/p4a/CPython 版本 + git sha 写入 `assets/build-info.json`（或 `res/raw`），运行时"关于"页可读 | 从 APK 就能反查工具链（现在做不到，见 §7.1） |
 | 0.4 | **修正过期文档** | `resolve_jdk.sh` 头注释仍写"默认 17~24"；`requirements_android_ci.txt` 的 PySide6 版本说明与 6.12 不一致 | 文档与 `versions.env` 一致 |
 | 0.5 | **指标基线快照** | 用 §1.4 的口径各测一次，存 `docs/baseline_2026-11.md` | 后续每阶段有对照 |
@@ -114,7 +114,7 @@ Android 17 若把兼容模式设为 fatal，表现为**装完即闪退**；Googl
 
 | 项 | 内容 |
 |---|---|
-| 改动 | `script/build_qrc.py`：`pyside6-rcc` 加 `--binary -o src/images.rcc`；`src/start.py:78` 的 `import images_rc` 换成 `QResource.registerResource(":/images.rcc")` + `addSearchPath` |
+| 改动 | `script/build_qrc.py`：`pyside6-rcc` 加 `--binary -o python/src/images.rcc`；`python/src/start.py:78` 的 `import images_rc` 换成 `QResource.registerResource(":/images.rcc")` + `addSearchPath` |
 | 收益 | 启动 **-196 ms**、RSS **-75 MB**、APK **-22 MB**（`private.tar` 里这份是明文存储） |
 | 风险 | 资源路径需要与 `:/png/...` 前缀对齐；Android 端 `private.tar` 里也要带上 `.rcc` |
 | 验收 | `bench_startup.py` 冷启 ≤800 ms；`du` 对比 `images_rc.py` 消失；真机首帧不回退 |
@@ -124,7 +124,7 @@ Android 17 若把兼容模式设为 fatal，表现为**装完即闪退**；Googl
 
 | 项 | 内容 |
 |---|---|
-| 改动 | `src/tools/tool.py:1271 SegmentationPicture` 桌面分支改调 `ToolUtil.SegmentationQImage`（`:1099`，Android 已在用）；`task_multi.py:31` 的进程池入参同步 |
+| 改动 | `python/src/tools/tool.py:1271 SegmentationPicture` 桌面分支改调 `ToolUtil.SegmentationQImage`（`:1099`，Android 已在用）；`task_multi.py:31` 的进程池入参同步 |
 | 收益 | 单页 39.6 → 24 ms（-40%） |
 | 风险 | 进程池里 PIL 释放 GIL，换 Qt 后不释放 → 见 B1，本步只改单线程路径 |
 | 验收 | `bench_pipeline.py` 单页 ≤26 ms；像素级与旧路径逐点比对（`mobile_ui_diag.py:1125` 已有对照工具） |
@@ -133,7 +133,7 @@ Android 17 若把兼容模式设为 fatal，表现为**装完即闪退**；Googl
 
 | 项 | 内容 |
 |---|---|
-| 改动 | 基础包只带 2~3 个默认模型（waifu2x cunet up2x + realcugan se up2x）；其余 24 个改为首次使用时下载 → 落 `files/state/models/`；`android/tools/patch_buildozer_spec.py` 的 `source.include_exts` 收窄；`android/main.py:121` 的"从 assets 兜底复制"改为"校验 + 缺失提示" |
+| 改动 | 基础包只带 2~3 个默认模型（waifu2x cunet up2x + realcugan se up2x）；其余 24 个改为首次使用时下载 → 落 `files/state/models/`；`python/android/tools/patch_buildozer_spec.py` 的 `source.include_exts` 收窄；`python/android/main.py:121` 的"从 assets 兜底复制"改为"校验 + 缺失提示" |
 | 收益 | APK **-150 MB 量级**（433 → 约 280，再叠加 A1 约 260） |
 | 风险 | ① 首次超分需联网（离线场景要回退到"仅默认模型"）；② 下载源与校验（sha256 + 断点续传）；③ `sr_model_table.py` 的 41 个模型条目要区分"已装/未装" |
 | 验收 | 基础包 ≤120 MB（含 3 模型）；下载失败有明确提示；模型表与磁盘一致（`host_test_sr_model_list.py` 扩展） |
@@ -156,7 +156,7 @@ Android 17 若把兼容模式设为 fatal，表现为**装完即闪退**；Googl
 | 项 | 内容 |
 |---|---|
 | 问题 | `QImage.loadFromData()` 期间不释放 GIL → 线程池 4 线程仅 **0.91×**；PIL 对照 1.82× |
-| 方案 | 复用 `src/task/task_multi.py` 的进程池模式，新增"解码 worker"（进程内用 PIL 解码 + 分块还原 + 转 QImage 共享内存回传）；或写 pybind11 扩展把 `QImageReader` 搬出 GIL |
+| 方案 | 复用 `python/src/task/task_multi.py` 的进程池模式，新增"解码 worker"（进程内用 PIL 解码 + 分块还原 + 转 QImage 共享内存回传）；或写 pybind11 扩展把 `QImageReader` 搬出 GIL |
 | 判据 | 先做 2 天 spike：进程池 IPC 成本 vs 解码收益。若单页 IPC >5 ms，改走 pybind11 |
 | 验收 | 10 页预加载 ≤80 ms（现 200 ms，≥2.5×）；内存峰值 +≤30 MB |
 | 风险 | 进程池在 Android 上 fork 开销、共享内存生命周期、崩溃隔离 |
@@ -254,7 +254,7 @@ Android 17 若把兼容模式设为 fatal，表现为**装完即闪退**；Googl
 对仓库内两个 APK 直接跑仓库自带门禁：
 
 ```
-$ python android/tools/check_elf_page_align.py android/JMComic-0.87-arm64-v8a-debug.apk
+$ python python/android/tools/check_elf_page_align.py python/android/JMComic-0.87-arm64-v8a-debug.apk
 [FAIL] 15 个 64 位库的 PT_LOAD 段不满足 16384 字节对齐
   libc++_shared.so / libc++_shared-d523468d.so / libcrypto.so / libffi.so / libfreetype.so
   / libjpeg.so / libmain_arm64-v8a.so / libpng16.so / libpython3.14.so / libpythonbin.so
@@ -300,20 +300,20 @@ $ ... -x86_64-debug.apk → 对齐 183 / 未对齐 14
 
 ```bash
 # 1) 版本解析（不构建）
-bash android/tools/resolve_jdk.sh --check          # 期望 Java 25.x，区间 17~25
-bash android/tools/resolve_ndk.sh --sdk "$ANDROID_HOME" --check   # 期望 30.x + 16KB 结论
+bash python/android/tools/resolve_jdk.sh --check          # 期望 Java 25.x，区间 17~25
+bash python/android/tools/resolve_ndk.sh --sdk "$ANDROID_HOME" --check   # 期望 30.x + 16KB 结论
 
 # 2) 两个 ABI 冷构建（清 .work，强制重编 recipe）
-rm -rf android/.work && cd android && ./build_android.sh --abi arm64-v8a,x86_64
+rm -rf python/android/.work && cd android && ./build_android.sh --abi arm64-v8a,x86_64
 
 # 3) 产物验收（三件套，缺一不可）
-python android/tools/check_elf_page_align.py android/dist/JMComic-*-arm64-v8a-debug.apk
-python android/tools/check_apk_qt_libs.py    android/dist/JMComic-*-arm64-v8a-debug.apk
-adb install -r android/dist/JMComic-*-arm64-v8a-debug.apk && \
+python python/android/tools/check_elf_page_align.py cpp/dist/JMComic-*-arm64-v8a-debug.apk
+python python/android/tools/check_apk_qt_libs.py    cpp/dist/JMComic-*-arm64-v8a-debug.apk
+adb install -r cpp/dist/JMComic-*-arm64-v8a-debug.apk && \
   adb shell am start -W -n org.jmcomic.jmcomic/org.kivy.android.PythonActivity | grep TotalTime
 
 # 4) 真机 16KB（Android 15+ 设备）
-bash android/tools/check_16kb_device.sh
+bash python/android/tools/check_16kb_device.sh
 ```
 
 判定标准：

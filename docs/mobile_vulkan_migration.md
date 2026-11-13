@@ -19,19 +19,19 @@
 
 | # | 位置 | 作用 | 与 GL 的关系 | 处置 |
 |---|---|---|---|---|
-| 1 | `android/main.py: ApplyRhiBackend()` | QApplication 之前钉 `QT_WIDGETS_RHI=1` + `QT_WIDGETS_RHI_BACKEND=vulkan` | 决定窗口合成走 Vulkan | **保留**，唯一权威开关（见 §4.1） |
-| 2 | `android/main.py: ApplySurfaceContainer()` | `QT_ANDROID_SURFACE_CONTAINER_TYPE=1`（TextureView） | 与 GL 无关，但决定"每帧一次纹理合成"的成本模型 | 保留 |
-| 3 | `src/tools/vulkan_accel.py` | 探测 Vulkan 可用性 + 按设置写环境变量 + 状态查询 | **旧的 GL 加速入口**，已改为 Vulkan 语义 | **收敛**：不再与 #1 争夺开关（见 §4.1） |
-| 4 | `src/config/setting.py: IsOpenVulkan`（旧键 `IsOpenOpenGL` 自动迁移） | 用户可见的"图片加速"开关 | 从 GL 改到 Vulkan | 保留；默认值建议改 1（见 §4.1） |
-| 5 | `src/view/read/read_vulkan.py` | 看图视口（纯 QWidget，无图形上下文） | 旧实现是自带 GL 上下文的视口，已废弃 | 保留；改名/注释已澄清 |
-| 6 | `src/view/read/read_graphics.py` | `QGraphicsView` 装配，按开关换视口 | 无 GL 调用 | 保留 |
-| 7 | `src/component/widget/gpu_anim_cover.py` | 换页动画 GPU 合成层 | **原 QOpenGLWidget → 现 QRhiWidget** | **已迁移**（本轮） |
-| 8 | `src/component/widget/animation_stack_widget.py` | 动画宿主、驱动、降级 | 依赖覆盖层接口 | 已适配（GPU/raster 双覆盖层） |
-| 9 | `src/component/widget/shaders/animcover.{vert,frag,qsb}` | 着色器源码 + 预编译产物 | qsb = GLSL/Vulkan 通用容器 | 新增 |
-| 10 | `android/tools/setup_qsb.sh` | 给 PySide6 轮子补 `qsb` 并烘焙 `.qsb` | 工具链 | 新增 |
-| 11 | `android/tools/patch_buildozer_spec.py` | `source.include_exts` 放行 `qsb` | 打包 | 已加 |
-| 12 | `src/qt_error.py`、`src/tools/mobile_ui_base.py`、`mobile_ui_window.py`、`mobile_ui.py` | 匹配历史崩溃文本 | 只匹配字符串 `QAndroidPlatformOpenGLWindow::eglSurface()` / `QOpenGLContext::makeCurrent` | **保留**（见 §3） |
-| 13 | `src/tools/platform_mobile.py:606` | 关掉托盘/无边框等桌面特性 | 注释提到 GLES，无代码依赖 | 保留 |
+| 1 | `python/android/main.py: ApplyRhiBackend()` | QApplication 之前钉 `QT_WIDGETS_RHI=1` + `QT_WIDGETS_RHI_BACKEND=vulkan` | 决定窗口合成走 Vulkan | **保留**，唯一权威开关（见 §4.1） |
+| 2 | `python/android/main.py: ApplySurfaceContainer()` | `QT_ANDROID_SURFACE_CONTAINER_TYPE=1`（TextureView） | 与 GL 无关，但决定"每帧一次纹理合成"的成本模型 | 保留 |
+| 3 | `python/src/tools/vulkan_accel.py` | 探测 Vulkan 可用性 + 按设置写环境变量 + 状态查询 | **旧的 GL 加速入口**，已改为 Vulkan 语义 | **收敛**：不再与 #1 争夺开关（见 §4.1） |
+| 4 | `python/src/config/setting.py: IsOpenVulkan`（旧键 `IsOpenOpenGL` 自动迁移） | 用户可见的"图片加速"开关 | 从 GL 改到 Vulkan | 保留；默认值建议改 1（见 §4.1） |
+| 5 | `python/src/view/read/read_vulkan.py` | 看图视口（纯 QWidget，无图形上下文） | 旧实现是自带 GL 上下文的视口，已废弃 | 保留；改名/注释已澄清 |
+| 6 | `python/src/view/read/read_graphics.py` | `QGraphicsView` 装配，按开关换视口 | 无 GL 调用 | 保留 |
+| 7 | `python/src/component/widget/gpu_anim_cover.py` | 换页动画 GPU 合成层 | **原 QOpenGLWidget → 现 QRhiWidget** | **已迁移**（本轮） |
+| 8 | `python/src/component/widget/animation_stack_widget.py` | 动画宿主、驱动、降级 | 依赖覆盖层接口 | 已适配（GPU/raster 双覆盖层） |
+| 9 | `python/src/component/widget/shaders/animcover.{vert,frag,qsb}` | 着色器源码 + 预编译产物 | qsb = GLSL/Vulkan 通用容器 | 新增 |
+| 10 | `python/android/tools/setup_qsb.sh` | 给 PySide6 轮子补 `qsb` 并烘焙 `.qsb` | 工具链 | 新增 |
+| 11 | `python/android/tools/patch_buildozer_spec.py` | `source.include_exts` 放行 `qsb` | 打包 | 已加 |
+| 12 | `python/src/qt_error.py`、`python/src/tools/mobile_ui_base.py`、`mobile_ui_window.py`、`mobile_ui.py` | 匹配历史崩溃文本 | 只匹配字符串 `QAndroidPlatformOpenGLWindow::eglSurface()` / `QOpenGLContext::makeCurrent` | **保留**（见 §3） |
+| 13 | `python/src/tools/platform_mobile.py:606` | 关掉托盘/无边框等桌面特性 | 注释提到 GLES，无代码依赖 | 保留 |
 
 ### 1.1 为什么"GL 上下文"这条路在本项目里本来就走不通
 
@@ -99,8 +99,8 @@ W default : QRhiWidget: No QRhi
 
 | 位置 | 原来写的 | 现在 |
 |---|---|---|
-| `android/main.py: ApplyRhiBackend()` | `QT_WIDGETS_RHI = "1"`（0.82 新加） | 只写 `QT_WIDGETS_RHI_BACKEND` |
-| `src/tools/vulkan_accel.ApplyFromSetting()` | `os.environ[ENABLE_ENV] = "1"` | `os.environ.pop(ENABLE_ENV)`，只写后端 |
+| `python/android/main.py: ApplyRhiBackend()` | `QT_WIDGETS_RHI = "1"`（0.82 新加） | 只写 `QT_WIDGETS_RHI_BACKEND` |
+| `python/src/tools/vulkan_accel.ApplyFromSetting()` | `os.environ[ENABLE_ENV] = "1"` | `os.environ.pop(ENABLE_ENV)`，只写后端 |
 
 `vulkan_accel` 那处更隐蔽：它执行时机（窗口是否已经建好）决定了这一行是否生效，
 所以会出现"同一份代码，热推时好、装包后坏"的抽风现象。`IsActive()` 也相应改成
@@ -110,8 +110,8 @@ W default : QRhiWidget: No QRhi
 
 问题现状（本次审计发现）：**两处在抢同一个开关**
 
-* `android/main.py: ApplyRhiBackend()`（QApplication 之前）无条件写 `vulkan`
-* `src/tools/vulkan_accel.ApplyFromSetting()`（start.py，QApplication 之后）按
+* `python/android/main.py: ApplyRhiBackend()`（QApplication 之前）无条件写 `vulkan`
+* `python/src/tools/vulkan_accel.ApplyFromSetting()`（start.py，QApplication 之后）按
   `Setting.IsOpenVulkan` 决定，且 `IsOpenVulkan` 默认是 **0（关）**
 
 后果：默认安装的用户拿到的是"main.py 强制开的 Vulkan"，而设置里明明写着"关"；
@@ -120,7 +120,7 @@ W default : QRhiWidget: No QRhi
 **改造（建议，未实施）**：把决策收敛到一个函数，语义为"Android 默认开、桌面端跟随设置"：
 
 ```python
-# android/main.py
+# python/android/main.py
 def ApplyRhiBackend():
     # 只负责"默认值"：Android 默认 Vulkan；显式 env / sr_env.txt 可覆盖
     want = (os.environ.get("JM_WIDGETS_RHI") or "vulkan").strip().lower()
@@ -128,7 +128,7 @@ def ApplyRhiBackend():
     os.environ["QT_WIDGETS_RHI_BACKEND"] = want
     os.environ.setdefault("QSG_RHI_BACKEND", want)
 
-# src/tools/vulkan_accel.ApplyFromSetting()
+# python/src/tools/vulkan_accel.ApplyFromSetting()
 #   已有逻辑不变，只是当 env 已经指到 vulkan 时把状态标成 "on(由启动器指定)"，
 #   不再因为 Setting.IsOpenVulkan=0 就报 "off"，避免日志与实际不一致。
 ```
@@ -212,14 +212,14 @@ GPU 一开始就不可用时全程走 raster，也不存在切换。
 
 | 文件 | 改动 |
 |---|---|
-| `src/component/widget/gpu_anim_cover.py` | QOpenGLWidget → `QRhiWidget`；`.qsb` 着色器；双纹理视口位移；纹理尺寸/UV/看门狗 |
-| `src/component/widget/animation_stack_widget.py` | `UseGpuCover=True`；`BrokenHook` 中途降级；快照留存 |
-| `src/component/widget/shaders/*` | 着色器源码 + 预编译 `.qsb` |
-| `android/main.py` | 只写 `QT_WIDGETS_RHI_BACKEND`（**不能**写 `QT_WIDGETS_RHI=1`，见 §4.0） |
-| `src/tools/vulkan_accel.py` | 不再写 `ENABLE_ENV`（同上），`IsActive()` 改成只看后端 |
-| `android/tools/patch_buildozer_spec.py` | `.qsb` 放行 |
-| `android/tools/setup_qsb.sh` | 补 qsb 工具链 + 烘焙（无需 root） |
-| `android/tools/host_test_gpu_layer.py` | 新增回归 |
+| `python/src/component/widget/gpu_anim_cover.py` | QOpenGLWidget → `QRhiWidget`；`.qsb` 着色器；双纹理视口位移；纹理尺寸/UV/看门狗 |
+| `python/src/component/widget/animation_stack_widget.py` | `UseGpuCover=True`；`BrokenHook` 中途降级；快照留存 |
+| `python/src/component/widget/shaders/*` | 着色器源码 + 预编译 `.qsb` |
+| `python/android/main.py` | 只写 `QT_WIDGETS_RHI_BACKEND`（**不能**写 `QT_WIDGETS_RHI=1`，见 §4.0） |
+| `python/src/tools/vulkan_accel.py` | 不再写 `ENABLE_ENV`（同上），`IsActive()` 改成只看后端 |
+| `python/android/tools/patch_buildozer_spec.py` | `.qsb` 放行 |
+| `python/android/tools/setup_qsb.sh` | 补 qsb 工具链 + 烘焙（无需 root） |
+| `python/android/tools/host_test_gpu_layer.py` | 新增回归 |
 
 ### 待办（按优先级）
 
@@ -254,9 +254,9 @@ GPU 一开始就不可用时全程走 raster，也不存在切换。
 
 ```bash
 cd <构建树>/src && export QT_QPA_PLATFORM=offscreen
-python3 ../android/tools/host_test_gpu_layer.py     # .qsb / 无 GL 依赖 / UV / 位移偏移
-python3 ../android/tools/host_test_anim_cover.py    # 窄带、快照缓存、延后 SwitchCurrent
-python3 ../android/tools/host_test_back_reader.py   # 返回键与看图栈
+python3 ../python/android/tools/host_test_gpu_layer.py     # .qsb / 无 GL 依赖 / UV / 位移偏移
+python3 ../python/android/tools/host_test_anim_cover.py    # 窄带、快照缓存、延后 SwitchCurrent
+python3 ../python/android/tools/host_test_back_reader.py   # 返回键与看图栈
 python3 ../.workbuddy/probe/host_check_grid.py      # 图文对齐（封面左右边界）
 python3 ../.workbuddy/probe/host_check_cover.py     # 封面 pixmap 跟随 label 尺寸
 ```
@@ -287,8 +287,8 @@ adb logcat -d | grep -iE "GpuAnimCover|Invalid texture upload|watchdog|fallback"
 ### 7.3 打包校验
 
 ```bash
-aapt dump badging android/JMComic-0.82-arm64-v8a-debug.apk | head -3
-python3 android/tools/check_apk_qt_libs.py         # 构建脚本 4.5 步内置
+aapt dump badging python/android/JMComic-0.82-arm64-v8a-debug.apk | head -3
+python3 python/android/tools/check_apk_qt_libs.py         # 构建脚本 4.5 步内置
 unzip -p <apk> assets/private.tar | tar -tf - | grep '\.qsb$'
 ```
 

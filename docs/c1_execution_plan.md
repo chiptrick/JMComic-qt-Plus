@@ -51,7 +51,7 @@
 | 角色              | 主要职责                                | 关键产出                       |
 | --------------- | ----------------------------------- | -------------------------- |
 | **主理人 / PM**    | 提供真机、拍板优先级、验收最终结果                   | 真机可用、里程碑确认                 |
-| **C++ 工程师**     | C1 壳/阅读器/桥的代码、性能修复、发布构建             | `android/c1_shell/` 代码、APK |
+| **C++ 工程师**     | C1 壳/阅读器/桥的代码、性能修复、发布构建             | `cpp/shell/` 代码、APK |
 | **Python 工程师**  | `bridge.py` 真实网络逻辑、与 `server.py` 对接 | `bridge.py`、桥协议文档          |
 | **QA / 验收工程师**  | 真机回归、性能采样、端到端验证                     | 测试记录、验收表                   |
 | **发布 / DevOps** | CI 恢复、签名包、构建审计                      | CI 状态、release 包            |
@@ -148,7 +148,7 @@
 **产出**：
 
 - `docs/c1_w7_report.md`（含功能/性能/稳定性表格）
-- `android/build_logs/c1_w7_*.log`
+- `python/android/build_logs/c1_w7_*.log`
 - 截图 / logcat 关键行
 
 **验收判据**：
@@ -182,9 +182,9 @@
 | 交付物  | 路径                                                   |
 | ---- | ---------------------------------------------------- |
 | 验收报告 | `docs/c1_w8_acceptance.md`                           |
-| APK  | `android/dist/JMComic-c1-<version>-<abi>-<type>.apk` |
-| 构建日志 | `android/build_logs/`                                |
-| 门禁结果 | `android/build_logs/`                                |
+| APK  | `cpp/dist/JMComic-c1-<version>-<abi>-<type>.apk` |
+| 构建日志 | `python/android/build_logs/`                                |
+| 门禁结果 | `python/android/build_logs/`                                |
 
 **验收判据**：
 
@@ -241,7 +241,7 @@
 #### 设计约束
 
 - C++ 侧只通过 JSON 行协议调用，不感知具体网络实现；
-- Python 侧复用现有 `src/server/server.py` 的请求/超时/重试逻辑；
+- Python 侧复用现有 `python/src/server/server.py` 的请求/超时/重试逻辑；
 - 每个请求带 `id/method/params`，响应带 `id/ok/result/error`；
 - 超时、崩溃、重启语义与现有 `PythonBridge` 一致。
 
@@ -272,7 +272,7 @@
 | P5-1 | 构建 release APK | `--version 0.1-c1`                      |
 | P5-2 | 跑 16KB 门禁      | 0 未对齐                                   |
 | P5-3 | 跑直链判据          | DT_NEEDED 含 libsr_qnn.so                |
-| P5-4 | 归档 APK + 日志    | `android/dist/` + `android/build_logs/` |
+| P5-4 | 归档 APK + 日志    | `cpp/dist/` + `python/android/build_logs/` |
 | P5-5 | 恢复 GitHub CI   | 3 个 workflow 从 disabled → active        |
 
 **CI 恢复命令**：

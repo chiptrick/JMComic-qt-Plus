@@ -2,7 +2,7 @@
 
 - 日期：2026-11-02
 - 范围：C1（Qt C++ 壳 + 导航 + 本地阅读器 + 设置 + C++ 网络层）验收结论与发布建议
-- 依据：`docs/c1_w7_report.md`、`android/build_logs/c1_w7_20261102-222611/`、Windows 侧构建门禁
+- 依据：`docs/c1_w7_report.md`、`python/android/build_logs/c1_w7_20261102-222611/`、Windows 侧构建门禁
 
 ---
 
@@ -63,10 +63,10 @@
 
 | 交付物 | 路径 |
 |---|---|
-| APK | `android/dist/JMComic-c1-0.2-arm64-v8a-debug.apk`（68MB） |
-| 构建脚本 | `android/c1_shell/build_windows.ps1`（Windows，无需 WSL） |
-| 取证脚本 | `android/tools/c1_w7_regression.sh` |
-| 原始日志 | `android/build_logs/c1_w7_20261102-222611/`（logcat / c1_log / meminfo / gfxinfo / report） |
+| APK | `cpp/dist/JMComic-c1-0.2-arm64-v8a-debug.apk`（68MB） |
+| 构建脚本 | `cpp/shell/build_windows.ps1`（Windows，无需 WSL） |
+| 取证脚本 | `python/android/tools/c1_w7_regression.sh` |
+| 原始日志 | `python/android/build_logs/c1_w7_20261102-222611/`（logcat / c1_log / meminfo / gfxinfo / report） |
 | 网络层设计 | `docs/c1_net_layer.md` |
 | W7 明细 | `docs/c1_w7_report.md` |
 

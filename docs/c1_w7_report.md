@@ -2,8 +2,8 @@
 
 - 日期：2026-11-02
 - 设备：vivo V2463A（`10AF5K2B0D001AM`）/ Android 17（SDK 37）/ arm64-v8a / **SELinux Enforcing** / 120Hz
-- 包：`android/dist/JMComic-c1-0.2-arm64-v8a-debug.apk`（68MB，Windows 侧构建）
-- 取证：`android/build_logs/c1_w7_20261102-222611/`（脚本自动生成）＋ 手工复核
+- 包：`cpp/dist/JMComic-c1-0.2-arm64-v8a-debug.apk`（68MB，Windows 侧构建）
+- 取证：`python/android/build_logs/c1_w7_20261102-222611/`（脚本自动生成）＋ 手工复核
 
 ---
 
@@ -78,7 +78,7 @@ C1Fps page-turns n=26 total=26 p50=6.9ms p95=7.6ms max=7.6ms
 
 ## 5. 原"人工 checklist"：已自动化（8/8 PASS）
 
-`android/tools/c1_w7_manual_check.py` 把这 8 项做成可复现取证，不靠人眼：
+`python/android/tools/c1_w7_manual_check.py` 把这 8 项做成可复现取证，不靠人眼：
 
 - **定位**：Qt 6 的 Android accessibility 桥把按钮文字暴露成 `content-desc`、把 QLabel 文字
   暴露成 `content-desc` 并给出 `bounds`。于是可以"按文字找控件、按标题读页码"，
@@ -133,11 +133,11 @@ C1Fps page-turns n=26 total=26 p50=6.9ms p95=7.6ms max=7.6ms
 
 ```bash
 # 构建（Windows，无需 WSL）
-powershell -File android/c1_shell/build_windows.ps1 -Abi arm64-v8a
+powershell -File cpp/shell/build_windows.ps1 -Abi arm64-v8a
 
 # 取证（脚本会自动投图、冷启动 3 次、触发自检、采集日志/PSS/门禁）
-bash android/tools/c1_w7_regression.sh \
-  --apk android/dist/JMComic-c1-0.2-arm64-v8a-debug.apk \
+bash python/android/tools/c1_w7_regression.sh \
+  --apk cpp/dist/JMComic-c1-0.2-arm64-v8a-debug.apk \
   --images /tmp/c1pages --runs 3 --no-install
 ```
 

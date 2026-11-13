@@ -14,10 +14,10 @@
 1. **方案的整体决策成立**（先取确定收益、迁 C++ 推迟到 C0 决策门），但**执行顺序必须调整两处**：
    - ~~把"度量能力建设"（新增 0.6 / 0.7 / 0.8）提到 0.1 之前。~~ **【已被 §0A 推翻】** 原理由是方案 §1.4 的验收口径全靠三个未入仓脚本；现在脚本已入仓（0.6 ✅）、实证也已出（0.8 ✅ 结论=闪退），所以正确顺序是：**0.1b 立即开工（后台长时间构建），0.5/0.7 与之并行**。
    - 把 0.3（build-info 落盘）**并入 0.1b 的同一次构建**，省掉一轮 4 小时机器时间。（仍成立）
-2. **0.1 必须拆成 0.1a / 0.1b**。15 个未对齐库里，本项目 CMake 自编的只有 `libsr_qnn.so` / `libsr_qnn_proc.so`（`android/build_android.sh:482-501`，本机 NDK 30.0.16248370 已装，重编只需分钟级）；`libpython3.14` / `libc++_shared` / openssl 等来自 **p4a dist 与 p4a 内置 recipe**，必须走全量 dist 重建（40~60 min/ABI，且 `android/recipes/` 里只有 `curl_cffi` 和 `jmcomic`，其余配方不在本仓库）。两者风险等级差一个数量级，不能算一个任务。
-3. **A1 的实际影响面是方案描述的三倍以上**（详见 §2.1）：`import images_rc` 出现在 **6 个文件**（`src/start.py` + 5 个由 `pyside6-uic` 生成的 `src/interface/ui_*.py`，因为 `ui/*.ui` 里有 5 处 `<include location="../res/images.qrc"/>`）。只改 `start.py` 会在下次跑 `script/build_ui.py` 时被自动重新引入。且 **Android 侧有个方案完全没提的硬阻塞**：p4a 只拷贝 `source.include_exts` 放行的扩展名（现为 `py,png,jpg,...` + `onnx,txt,qsb`），**`.rcc` 不在白名单**——不加进去，Android 上图标会全部静默消失（不崩、不报错）。
-4. **A2 的改动比方案小得多**（详见 §2.2）：`src/task/task_qimage.py` 里**已经有** `_SegmentQImage()` + `ConverQImage(info, q)` 的 QImage 直通路径，只是被 `if platform_mobile.IsAndroid():` 挡着。所谓"桌面去 PIL"= 放开这个条件 + 保留 bytes 回退。方案担心的 bytes/QImage 契约问题**只影响 `TaskMulti` 进程池 worker 和 `mobile_ui_diag` 的三处诊断打印，而这两处根本不需要改**——收益全部在单线程看图路径上。
-5. **W1 有一部分已经在仓库里了**：`android/tools/versions.env` 已经把基线写成 `JM_JDK_MAX:=25` / `JM_GRADLE_MIN:=9.1.0`，注释写明"基线（0.88 起）：JDK 25 LTS + Gradle 9.x"。而 `resolve_jdk.sh` 头注释仍写"默认 17~24"。所以 0.4 不只是"改注释好看"——它是唯一能让后来者知道版本区间已变的地方，属**必须做**。
+2. **0.1 必须拆成 0.1a / 0.1b**。15 个未对齐库里，本项目 CMake 自编的只有 `libsr_qnn.so` / `libsr_qnn_proc.so`（`python/android/build_android.sh:482-501`，本机 NDK 30.0.16248370 已装，重编只需分钟级）；`libpython3.14` / `libc++_shared` / openssl 等来自 **p4a dist 与 p4a 内置 recipe**，必须走全量 dist 重建（40~60 min/ABI，且 `python/android/recipes/` 里只有 `curl_cffi` 和 `jmcomic`，其余配方不在本仓库）。两者风险等级差一个数量级，不能算一个任务。
+3. **A1 的实际影响面是方案描述的三倍以上**（详见 §2.1）：`import images_rc` 出现在 **6 个文件**（`python/src/start.py` + 5 个由 `pyside6-uic` 生成的 `python/src/interface/ui_*.py`，因为 `ui/*.ui` 里有 5 处 `<include location="../res/images.qrc"/>`）。只改 `start.py` 会在下次跑 `script/build_ui.py` 时被自动重新引入。且 **Android 侧有个方案完全没提的硬阻塞**：p4a 只拷贝 `source.include_exts` 放行的扩展名（现为 `py,png,jpg,...` + `onnx,txt,qsb`），**`.rcc` 不在白名单**——不加进去，Android 上图标会全部静默消失（不崩、不报错）。
+4. **A2 的改动比方案小得多**（详见 §2.2）：`python/src/task/task_qimage.py` 里**已经有** `_SegmentQImage()` + `ConverQImage(info, q)` 的 QImage 直通路径，只是被 `if platform_mobile.IsAndroid():` 挡着。所谓"桌面去 PIL"= 放开这个条件 + 保留 bytes 回退。方案担心的 bytes/QImage 契约问题**只影响 `TaskMulti` 进程池 worker 和 `mobile_ui_diag` 的三处诊断打印，而这两处根本不需要改**——收益全部在单线程看图路径上。
+5. **W1 有一部分已经在仓库里了**：`python/android/tools/versions.env` 已经把基线写成 `JM_JDK_MAX:=25` / `JM_GRADLE_MIN:=9.1.0`，注释写明"基线（0.88 起）：JDK 25 LTS + Gradle 9.x"。而 `resolve_jdk.sh` 头注释仍写"默认 17~24"。所以 0.4 不只是"改注释好看"——它是唯一能让后来者知道版本区间已变的地方，属**必须做**。
 6. **W2 也部分已存在**：`.github/workflows/android.yml` 已经在 push/PR 到 main 时跑宿主侧回归（5 道门 + shell 语法 + 全量字节码编译）。W2 剩余的是"页对齐干跑 + 体积预算 + 夜间 x86_64"，不是从零搭 CI。**但发现一个隐患**：`android.yml` 注释与实现用的是 **Python 3.11 + PySide6 6.11.2**，而 APK 实际链路已到 **CPython 3.14 + Qt 6.12**——"CI 与 APK 同一套环境"的假设已经失效，这一条需要用户拍板（见 Q7）。
 7. **B 阶段的最大不确定性是 B1**。进程池 vs pybind11 的 2 天 spike 必须真的做，不能"边做边看"——因为 pybind11 分支会引入新的原生构建物，**ABI / NEON / 16KB 对齐三条门禁都要重新过一遍**，代价远超一个解码函数。
 
@@ -46,7 +46,7 @@ dlopen failed: libc++_shared.so program alignment (4096)
 
 ### 更新 2：0.6 已由工程师完成（我原列为"待做 2 人日"，现改为"已交付，剩口径校准"）
 
-已入仓：`script/bench_startup.py` / `bench_pipeline.py` / `bench_reader.py` / `bench_common.py`，统一 CLI（`--runs` / `--json` / `--out` / `--src` / `--python`），口径写在各自 `--help`。首帧判定复用 `src/start.py` 的 `Run(afterShow=...)` 扩展点，**没有改业务代码**（这一点很重要：0.5 的基线因此不会因为"为了测量而改了被测对象"而失真）。
+已入仓：`script/bench_startup.py` / `bench_pipeline.py` / `bench_reader.py` / `bench_common.py`，统一 CLI（`--runs` / `--json` / `--out` / `--src` / `--python`），口径写在各自 `--help`。首帧判定复用 `python/src/start.py` 的 `Run(afterShow=...)` 扩展点，**没有改业务代码**（这一点很重要：0.5 的基线因此不会因为"为了测量而改了被测对象"而失真）。
 
 但实测数值与方案基线**不可直接比对**，原因是口径与环境双重差异：
 
@@ -74,7 +74,7 @@ dlopen failed: libc++_shared.so program alignment (4096)
 2. **0.7 / `avd_verify.sh`**：PASS/FAIL 判定不能只看进程退出码，必须"退出码 + 产物（截图/日志/PSS）+ logcat 关键字"三者合判。
 3. **`host_test_*.py` 系列**：31 个宿主测试若都用 6.12 跑，需要统一加"已知崩溃白名单"，否则 W2 的门禁全部不可用。
 
-### 更新 4：0.7 的 `android/tools/avd_verify.sh` 已存在并被实际使用
+### 更新 4：0.7 的 `python/android/tools/avd_verify.sh` 已存在并被实际使用
 
 原文档把 0.7 当成"新建脚本（2 人日）"，实际该脚本已存在且已在 16KB 模拟器上跑出 FAIL(4 项)。**0.7 降级为"补齐判定规则与回归用例文档"，工作量 2 → 0.5 人日**；省下的时间建议转给 Q11 的视觉回归基线。
 
@@ -121,14 +121,14 @@ dlopen failed: libc++_shared.so program alignment (4096)
 工程师在正在跑的那次构建里查了 dist 实际对齐状态：
 
 - **x86_64**：`194 对齐 / 1 未对齐 / 1 跳过`，唯一未对齐的是**我们自己的 `libsr_qnn_proc.so`（p_align=4096）**；`QtCore/QtGui/QtWidgets/QtSvg/QtSql/QtNetwork` 等**全部 16384**。
-- **arm64**：`libc++_shared.so` 与 `libc++_shared-d523468d.so` **是同一份库的两个名字**（同尺寸 1330832、md5 均 `4c038ab17e9e4c24c3e35daa13f1f7ac`；后者来自 `curl_cffi` wheel 的 `curl_cffi.libs/`，由 `android/recipes/curl_cffi` 复制）。0.87 arm64 的对齐报告里**这两个名字都在未对齐名单**。
+- **arm64**：`libc++_shared.so` 与 `libc++_shared-d523468d.so` **是同一份库的两个名字**（同尺寸 1330832、md5 均 `4c038ab17e9e4c24c3e35daa13f1f7ac`；后者来自 `curl_cffi` wheel 的 `curl_cffi.libs/`，由 `python/android/recipes/curl_cffi` 复制）。0.87 arm64 的对齐报告里**这两个名字都在未对齐名单**。
 
 **这意味着**：
 
 1. **NDK 30 重编后 Qt/p4a 侧已经合规** —— 我原文档最担心的"p4a 官方只保证 ≤28c、可能编不过"风险**没有发生**。0.1b 的工作量从"p4a dist 全量重建（2 人日 + 高风险）"收窄为"**0.1a（重编 `libsr_qnn*`）+ 覆盖 arm64 那两个 libc++ 名字**"，估**1 人日 + 中风险**。
 2. **0.1a 的定位反转**：它不再是"只影响超分"，而**可能就是启动修复的最后一块**（x86_64 侧只剩 `libsr_qnn_proc.so`）。优先级从 P1 **回调为 P0**。
 3. **但有一处必须警惕（待确认）**：上面是 **dist 目录**里的对齐状态，**不等于 APK 里的对齐状态**——APK 里还有从 wheel 拷贝进来的库。必须出包后用 `check_elf_page_align.py` 对**APK**复验一次，才能宣布 0.1b 完成。**这是 0.1b 唯一的待确认项。**
-4. arm64 侧要处理的是"**同名的第二份旧副本**"，不是"Qt 编错了"。修法二选一：覆盖两份同名文件，或让 `android/recipes/curl_cffi` 不再复制旧的那份（推荐后者，从根上少一份 1.3 MB）。
+4. arm64 侧要处理的是"**同名的第二份旧副本**"，不是"Qt 编错了"。修法二选一：覆盖两份同名文件，或让 `python/android/recipes/curl_cffi` 不再复制旧的那份（推荐后者，从根上少一份 1.3 MB）。
 
 ### 更新 8（2026-11-09 晚）：Android 17（SDK 37）能安装 targetSdk=34 的包——原"待确认"可关闭
 
@@ -168,7 +168,7 @@ dlopen failed: libc++_shared.so program alignment (4096)
 
 ### 更新 10（2026-11-09 第三轮）：**0.1a 已完成**
 
-`android/sr_qnn/cpp/CMakeLists.txt` 用 `foreach` 覆盖两个 target，两个 ABI 重编后 **PT_LOAD 全部 `0x4000`**。→ **0.1a 的实际状态是"已完成"**，0.1b 的 x86_64 侧预期为 `194 对齐 / 0 未对齐 / 1 跳过`。
+`python/android/sr_qnn/cpp/CMakeLists.txt` 用 `foreach` 覆盖两个 target，两个 ABI 重编后 **PT_LOAD 全部 `0x4000`**。→ **0.1a 的实际状态是"已完成"**，0.1b 的 x86_64 侧预期为 `194 对齐 / 0 未对齐 / 1 跳过`。
 
 **这条把 0.1 这一大项彻底收口了**：原方案把它当作"用 NDK ≥ r28 重编 4 个库 + 7 个 recipe 产物"（隐含要全量重建 dist），实测下来实际是：
 
@@ -192,10 +192,10 @@ dlopen failed: libc++_shared.so program alignment (4096)
 
 ```
 .Trash-0/
-android/tools/avd_cases.md            ← AVD 验收用例
-android/tools/avd_verify.sh           ← AVD 验收通道本体
-android/tools/gen_build_info.py       ← 0.3 的实现
-android/tools/record_unaligned_override.py  ← 0.2 的实现
+python/android/tools/avd_cases.md            ← AVD 验收用例
+python/android/tools/avd_verify.sh           ← AVD 验收通道本体
+python/android/tools/gen_build_info.py       ← 0.3 的实现
+python/android/tools/record_unaligned_override.py  ← 0.2 的实现
 docs/bench_raw/                       ← 基准包留档
 docs/implementation_task_list.md      ← 本文档
 docs/qt_cpp_migration_plan.md         ← 【用户已确认的迁移方案】
@@ -203,7 +203,7 @@ script/bench_common.py                ← bench 公共层
 script/bench_pipeline.py              ← bench 管线
 script/bench_reader.py                ← bench 阅读器
 script/bench_startup.py               ← bench 启动
-src/config/build_info.py              ← 0.3 的读取端
+python/src/config/build_info.py              ← 0.3 的读取端
 ```
 
 **这不是"以后要注意"，是"现在就有风险"**：一次误操作 `git clean -df`（IDE 的 "Clean untracked files" 就有这个行为）会同时抹掉基准脚本、AVD 验证通道、本文档以及**用户已确认的迁移方案**。
@@ -255,7 +255,7 @@ aaeba20  fix(android): sr_qnn_proc 也按 16KB 页对齐链接
 **⚠ 仍有两个未闭合的窗口，本批次必须处理完：**
 
 1. **"暂存"不等于"安全"**：只要有人 `git reset`，这 12 项立刻退回未跟踪状态，重新变成 `git clean -df` 的猎物。**必须提交（`git commit`）才算交付。** 这也是修订 19 要求"`git add` **并**提交"的原因——`git add` 是能挡住 IDE "Clean untracked files" 的**最小**动作，但不是终点。
-2. **`docs/build_audit/` 目录尚不存在**：0.2 的实现（`android/tools/record_unaligned_override.py`）设计为双写——`build_logs/unaligned_override.json`（就地可见但被 gitignore）+ **`docs/build_audit/unaligned_overrides.jsonl`（仓库内可追溯的审计主档）**。但该目录**至今未被创建**，会等到第一次放行时才由脚本临场建出来——那一刻它就是个未跟踪目录，同样暴露在 `git clean -df` 下。**建议现在就创建 `docs/build_audit/README.md`（说明用途与格式）并一起提交**，让审计主档从第一天起就在版本库里。否则"可审计"这件事建立在一个可能被误删的目录上。
+2. **`docs/build_audit/` 目录尚不存在**：0.2 的实现（`python/android/tools/record_unaligned_override.py`）设计为双写——`build_logs/unaligned_override.json`（就地可见但被 gitignore）+ **`docs/build_audit/unaligned_overrides.jsonl`（仓库内可追溯的审计主档）**。但该目录**至今未被创建**，会等到第一次放行时才由脚本临场建出来——那一刻它就是个未跟踪目录，同样暴露在 `git clean -df` 下。**建议现在就创建 `docs/build_audit/README.md`（说明用途与格式）并一起提交**，让审计主档从第一天起就在版本库里。否则"可审计"这件事建立在一个可能被误删的目录上。
 
 > **`.Trash-0/`**：57 KB，建议直接删除；若不想删，加进 `.gitignore`（按正确语义可挡 `-df`）。
 
@@ -265,14 +265,14 @@ aaeba20  fix(android): sr_qnn_proc 也按 16KB 页对齐链接
 
 | 任务                 | 交付物                                                                                                             | 与我原设计的差异                                                                                                                                                                                                                |
 | ------------------ | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **0.2 门禁审计落盘**     | 新增 `android/tools/record_unaligned_override.py`                                                                 | **采纳了修订 11 的双写方案**：`build_logs/`（就地）+ `docs/build_audit/unaligned_overrides.jsonl`（仓库内追加主档），并在文件头注释里写明"`build_logs` 被 gitignore、清缓存就没了"这个理由。→ **"可审计"从"只存在于本地"变成真的可追溯。** 唯一缺口：`docs/build_audit/` 目录尚未创建（见上）。           |
-| **0.3 build-info** | `android/tools/gen_build_info.py` + `src/config/build_info.py`（读取端）+ 设置-关于页展示 + `build_android.sh` 打包前调用        | **回答了 Q8**：走 `android.add_assets` 但**仅含 json**（不是模型那种 45MB 副本），读取端优先 `assets:/build-info.json`（Qt 的 `QFile` scheme），桌面回退读 `android/build_logs/build-info.json`。**这个双路径设计比我在 Q8 里给的二选一更好**——它同时覆盖了"APK 内可反查"与"桌面开发环境可读"。 |
-| **0.4 版本/文档一致**    | `resolve_jdk.sh` 头注释、`src/requirements_android_ci.txt`、`android/README.md`、`android/tools/README.md`、`SKILL.md` | 与我设计的范围一致（含"两处 requirements 文件"那条）。                                                                                                                                                                                     |
+| **0.2 门禁审计落盘**     | 新增 `python/android/tools/record_unaligned_override.py`                                                                 | **采纳了修订 11 的双写方案**：`build_logs/`（就地）+ `docs/build_audit/unaligned_overrides.jsonl`（仓库内追加主档），并在文件头注释里写明"`build_logs` 被 gitignore、清缓存就没了"这个理由。→ **"可审计"从"只存在于本地"变成真的可追溯。** 唯一缺口：`docs/build_audit/` 目录尚未创建（见上）。           |
+| **0.3 build-info** | `python/android/tools/gen_build_info.py` + `python/src/config/build_info.py`（读取端）+ 设置-关于页展示 + `build_android.sh` 打包前调用        | **回答了 Q8**：走 `android.add_assets` 但**仅含 json**（不是模型那种 45MB 副本），读取端优先 `assets:/build-info.json`（Qt 的 `QFile` scheme），桌面回退读 `python/android/build_logs/build-info.json`。**这个双路径设计比我在 Q8 里给的二选一更好**——它同时覆盖了"APK 内可反查"与"桌面开发环境可读"。 |
+| **0.4 版本/文档一致**    | `resolve_jdk.sh` 头注释、`python/src/requirements_android_ci.txt`、`python/android/README.md`、`python/android/tools/README.md`、`SKILL.md` | 与我设计的范围一致（含"两处 requirements 文件"那条）。                                                                                                                                                                                     |
 
 **另有一项方案与我原文档都未覆盖、但已完成的工作**：
 
-- **`android/tools/local.env` 改为 WSL Ubuntu 可用路径**，并注明"本机配置性质、不 git add"。→ 已补进任务清单。
-  - **补充核实**：该文件**早已被 `.gitignore:178` 忽略**（模板 `local.env.example` 入库），机制一直存在；缺的只是 `android/tools/README.md` 里的文档说明（原本 0 命中），现已补齐。**我最初判断"没有机制防护"是错的，已在修订 20 里订正并记下教训。**
+- **`python/android/tools/local.env` 改为 WSL Ubuntu 可用路径**，并注明"本机配置性质、不 git add"。→ 已补进任务清单。
+  - **补充核实**：该文件**早已被 `.gitignore:178` 忽略**（模板 `local.env.example` 入库），机制一直存在；缺的只是 `python/android/tools/README.md` 里的文档说明（原本 0 命中），现已补齐。**我最初判断"没有机制防护"是错的，已在修订 20 里订正并记下教训。**
 
 ### 更新 13（2026-11-09 深夜）：**"0.1 已收口"这个结论是错的，必须撤回**
 
@@ -280,7 +280,7 @@ aaeba20  fix(android): sr_qnn_proc 也按 16KB 页对齐链接
 
 #### 错误 1：`check_elf_page_align.py` 的扫描范围有盲区——它看不见 Python 扩展模块
 
-实测（源码 `android/tools/check_elf_page_align.py:26` 与 `:243-248`）：
+实测（源码 `python/android/tools/check_elf_page_align.py:26` 与 `:243-248`）：
 
 - APK 分支只枚举 `i.filename.endswith(".so")`，并交给 `LoadElfZip` 解析；
 - `libpybundle.so` **名字虽是 .so，内容是打包容器的数据文件** → `LoadElfZip` 返回 `meta is None` → 归入 `skipped["notelf"]`，**跳过**；
@@ -290,17 +290,17 @@ aaeba20  fix(android): sr_qnn_proc 也按 16KB 页对齐链接
 
 #### 错误 2：0.1a 不是"顺带完成"，而是一个必须显式执行的步骤
 
-实测 `android/tools/wsl_build_apk.sh:93-99`：
+实测 `python/android/tools/wsl_build_apk.sh:93-99`：
 
 ```
 # libsr_qnn.so 要编译，只提示不自动跑（它要 1 分钟且会再同步一次仓库）。
 if [ ! -f "$ANDROID/libs/$JM_ABI/libsr_qnn.so" ]; then
-    echo "[warn] ... 先跑：JM_ABI=$JM_ABI bash android/tools/wsl_build_native.sh"
+    echo "[warn] ... 先跑：JM_ABI=$JM_ABI bash python/android/tools/wsl_build_native.sh"
 fi
 ```
 
-→ **打 APK 的脚本只 warn，不编译**。真正编译的是 `android/tools/wsl_build_native.sh:65-76`（`cmake` + 拷贝 `libsr_qnn.so` 与 `libsr_qnn_proc.so`），本轮由 team-lead 显式跑过。  
-**因此 0.1a 的准确定义是：`JM_ABI=<abi> bash android/tools/wsl_build_native.sh` 必须显式执行，且在每个 ABI 上各跑一次。** 我原文档把它写成"落在某次构建里"，会让下一个人以为"打个包就自动对齐了"——这是会实际导致漏修的表述错误。
+→ **打 APK 的脚本只 warn，不编译**。真正编译的是 `python/android/tools/wsl_build_native.sh:65-76`（`cmake` + 拷贝 `libsr_qnn.so` 与 `libsr_qnn_proc.so`），本轮由 team-lead 显式跑过。  
+**因此 0.1a 的准确定义是：`JM_ABI=<abi> bash python/android/tools/wsl_build_native.sh` 必须显式执行，且在每个 ABI 上各跑一次。** 我原文档把它写成"落在某次构建里"，会让下一个人以为"打个包就自动对齐了"——这是会实际导致漏修的表述错误。
 
 #### 结论修正：16KB 的真实现状
 
@@ -362,7 +362,7 @@ team-lead 用独立扫描器逐个解析 bundle 内程序头（本机无 `libpyb
 
 对任务量的影响：A3 的"清单/校验/下载"部分（A3a）可独立开工（不依赖真实源的骨架 + GitHub Release 实现）；  
 原 A3 的体积收益上限从 -100~150MB 变为 **-199MB（全部模型）**，是 G2 体积目标的最大单项。  
-配套必须做：`EnsureModels()`（`android/main.py`）改为优先扫外部目录、缺失时回退提示；  
+配套必须做：`EnsureModels()`（`python/android/main.py`）改为优先扫外部目录、缺失时回退提示；  
 `pin_min_sdk.sh` 里 `android.add_assets = models:models` 一行应删除（模型不再进 assets —— 用户已确认，待实现）。
 
 
@@ -395,7 +395,7 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 但"单人可维护 70,825 行 / 双轨期成本 / 热更新链路丢失(G5)"三项代价不变，Go/No-Go 仍按迁移方案 §9 判据执行。
 
 **验收判据（按修订 21 三问）**：
-- 命令：出包后 `python android/tools/check_elf_page_align.py <apk>`、`python android/tools/check_pybundle_align.py <apk> <abi>`（无 bundle 则记 N/A），再 `bash android/tools/avd_verify.sh --apk <apk> --serial emulator-5554`；
+- 命令：出包后 `python python/android/tools/check_elf_page_align.py <apk>`、`python python/android/tools/check_pybundle_align.py <apk> <abi>`（无 bundle 则记 N/A），再 `bash python/android/tools/avd_verify.sh --apk <apk> --serial emulator-5554`；
 - 字段：lib 门禁 未对齐=0；bundle 门禁 0 或 N/A；avd_verify 的 进程存活 非空、16KB 库加载=0 条；
 - 判负：任一门禁在 C++ 空壳上不过 → C0 记 No-Go(16KB 项)，重新决策"等上游 / 自编 shiboken"。
 
@@ -403,13 +403,13 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 
 为了给 C0-②′ 备环境，实测了两条获取路径，**都不通**（这本来就是 C0 要回答的"工具链问题"，提前踩掉了）：
 
-1. **Qt 官方在线仓库（download.qt.io）**：`online/qtsdkrepository/linux_x64/android/` 的 release kit **最高只到 6.7.3**
-   （目录只有 qt6_663*、qt6_7_0~7_3、qt6_dev*；无 qt6_68+/qt6_612*；`android/qt6_6120` 实测 404）。
+1. **Qt 官方在线仓库（download.qt.io）**：`online/qtsdkrepository/linux_x64/python/android/` 的 release kit **最高只到 6.7.3**
+   （目录只有 qt6_663*、qt6_7_0~7_3、qt6_dev*；无 qt6_68+/qt6_612*；`python/android/qt6_6120` 实测 404）。
    `desktop/qt6_612/`（附加库仓库）与 `desktop/qt6_6120/qt6_6120/` 组件清单里 **android 组件为 0 个**。
    即：**aqt / 在线安装器装不到 Qt 6.12 for Android**（aqt 报 "Failed to locate XML data" 的根因是目录缺失，不是镜像不同步——官方源同样没有）。
 2. **PySide6 Android wheel**（`~/jmcomic-build/wheelhouse/x86_64/pyside6-6.12.0-…-android_x86_64.whl`，87MB）：
    只含**运行时**——`lib/`（156 个 Qt .so，已验证 16384 对齐）、libexec、plugins、qml、translations；
-   **没有** include/、lib/cmake/、mkspecs、android/ gradle 模板、bin/ host 工具 → **不能**用于 C++ 交叉编译。
+   **没有** include/、lib/cmake/、mkspecs、python/android/ gradle 模板、bin/ host 工具 → **不能**用于 C++ 交叉编译。
 
 **留给 C0-②′ 的三条候选渠道（开工第一件事就是定这条）**：
 - ① 查 Qt 6.8+ 仓库结构调整后的真实位置（Qt 官方在线安装器在 6.8+ 确实仍提供 Android 组件，
@@ -434,8 +434,8 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 **结论：C 轨道绕开 shiboken 上游阻塞成立 —— C0-②′ 记 GO。**（另：6.12 起 Activity 绑定类改名
 `org.qtproject.qt.android.bindings.QtActivity`（不再是 qt5），取证脚本要注意。）
 
-踩坑全记录（已固化进 `android/c0_skeleton/build_wsl.sh` 的注释，工具链四件套齐了：Android kit + host Qt + platform-36 + Gradle 9.8.2）：
-1. kit 在 `all_os/android/` 新布局（aqt 旧版查不到）；host Qt 走清华镜像（官方源代理 3MB/min）；
+踩坑全记录（已固化进 `python/android/c0_skeleton/build_wsl.sh` 的注释，工具链四件套齐了：Android kit + host Qt + platform-36 + Gradle 9.8.2）：
+1. kit 在 `all_os/python/android/` 新布局（aqt 旧版查不到）；host Qt 走清华镜像（官方源代理 3MB/min）；
 2. host 的 androiddeployqt 借 PySide6 桌面轮子的 ICU 73（LD_LIBRARY_PATH）；
 3. JVM CA → `/opt/java-ca.jks`；gradle wrapper distributionUrl → 腾讯镜像；
 4. Qt 默认 compileSdk=android-34 被 androidx.core:1.17.0 拒收 → gradle.properties 改 android-36。
@@ -445,7 +445,7 @@ C0 的产出是数据（三条验证报告 + Go/No-Go）。16KB 这条新理由�
 
 ### 更新 21（2026-11-01，判定实验出结果）：**C0-③ 通过 —— `libsr_qnn.so` 被 Qt C++ 主程序直链并在 Android 17 上加载成功**
 
-实现（`android/c0_skeleton/`）：IMPORTED 共享库方式引入 `libs/<abi>/libsr_qnn.so`（与 Python repack
+实现（`python/android/c0_skeleton/`）：IMPORTED 共享库方式引入 `libs/<abi>/libsr_qnn.so`（与 Python repack
 同一批 0x4000 产物，`SRQ_LIBS_DIR` 可覆盖）+ `QT_ANDROID_EXTRA_LIBS` 兜底打包 + 启动时
 `dlopen("libsr_qnn.so", RTLD_NOLOAD)` 验证常驻，结果同时打 logcat（tag `C0Skeleton`）和显示在 UI 上。
 
@@ -477,7 +477,7 @@ dlopen 的）与 Qt 库无符号/ABI 冲突，C1 的"壳直接调超分"链路�
 | C API | `curl_easy_impersonate` 等 **1619 个 C 符号**全局导出（静态链接默认可见性） |
 | 耦合 | `_wrapper.abi3.so` NEEDED `libpython3.14.so`——它是 Python 扩展，**不是独立 C 库**；wheel 里没有单独的 libcurl-impersonate .so |
 | 覆盖 | PyPI(阿里云索引)只有 `android_24_arm64_v8a`（cp313/cp314），**无 x86_64 Android wheel** |
-| 应用指纹 | `src/server/server.py:243` 用 `impersonate="chrome110"`——0.16.3 支持 |
+| 应用指纹 | `python/src/server/server.py:243` 用 `impersonate="chrome110"`——0.16.3 支持 |
 
 **结论与定界（C0-① 记 GO，但含义变了）**：
 1. **"curl-impersonate 能在 Android 跑（TLS 指纹 + H3 + ECH）"已是事实**——生产 Python 轨道真机用户就在用；C0-① 原判据验证的"能力"不需要再证明。
@@ -496,8 +496,8 @@ dlopen 的）与 Qt 库无符号/ABI 冲突，C1 的"壳直接调超分"链路�
 
 用户要求核实后，在官方仓库新布局里找到了 kit（**更新 18 的"两条路都不通"结论作废**）：
 
-- 位置：`download.qt.io/online/qtsdkrepository/all_os/android/qt6_6120/`（6.8 起 Android kit 从
-  `linux_x64/android/` 搬到 **`all_os/android/`**；aqt 3.3.0 仍查旧路径，所以报 "Failed to locate XML data"）。
+- 位置：`download.qt.io/online/qtsdkrepository/all_os/python/android/qt6_6120/`（6.8 起 Android kit 从
+  `linux_x64/python/android/` 搬到 **`all_os/python/android/`**；aqt 3.3.0 仍查旧路径，所以报 "Failed to locate XML data"）。
 - 已下载解包（`$JM_WORK/qt-android-6.12/6.12.0/`，qtbase+qttools，Android_ANY 多 ABI 包）并验证四要素：
   ① `include/`（QtCore/QtWidgets 全）✅；② `lib/cmake/`（Qt6/Qt6Core/Qt6Widgets 主配置）✅；
   ③ host 工具 `qt-cmake`/`qmake` ✅（**无 androiddeployqt——6.12 官方移除了它**，
@@ -524,11 +524,11 @@ C 轨道用 CMake+Gradle，Qt 官方支持 Windows 作为 Android 构建宿主�
 
 | 改动 | 文件 | 要点 |
 |---|---|---|
-| 外部模型目录 | `src/tools/platform_mobile.py` | 新增 `GetExternalAppDir()`（`getExternalFilesDir(None)` 的父目录 = `/storage/emulated/0/Android/data/<pkg>`）；`GetAndroidModelDir()` 改为外部目录 `.../models`，取不到退回私有目录 |
-| 启动逻辑 | `android/main.py` `EnsureModels()` | **不再从 assets/private.tar 复制**；有则直接用、无则只建目录（env 仍设，下载器/用户投放共用一处）；老包升级时把私有目录 `waifu2x-models` 一次性迁移过来 |
-| 打包 | `android/tools/pin_min_sdk.sh` | `android.add_assets` 默认**不再注入**模型，仅 `JM_BUNDLE_MODELS=1` 时保留旧行为 |
+| 外部模型目录 | `python/src/tools/platform_mobile.py` | 新增 `GetExternalAppDir()`（`getExternalFilesDir(None)` 的父目录 = `/storage/emulated/0/Android/data/<pkg>`）；`GetAndroidModelDir()` 改为外部目录 `.../models`，取不到退回私有目录 |
+| 启动逻辑 | `python/android/main.py` `EnsureModels()` | **不再从 assets/private.tar 复制**；有则直接用、无则只建目录（env 仍设，下载器/用户投放共用一处）；老包升级时把私有目录 `waifu2x-models` 一次性迁移过来 |
+| 打包 | `python/android/tools/pin_min_sdk.sh` | `android.add_assets` 默认**不再注入**模型，仅 `JM_BUNDLE_MODELS=1` 时保留旧行为 |
 | 清单生成 | `script/gen_model_manifest.py` | 29 → **27 个模型 / 198.0MB**，含 size+sha256；同时输出 `gh release` 上传命令 |
-| 运行时仓库 | `src/component/sr/model_store.py` | 状态（installed/missing/**corrupt**）、sha256 校验、断点续传（Range+`.part`+原子改名）、`Probe()` 3s 探活、`ModelOffline` 单一异常；`../` 路径防护 |
+| 运行时仓库 | `python/src/component/sr/model_store.py` | 状态（installed/missing/**corrupt**）、sha256 校验、断点续传（Range+`.part`+原子改名）、`Probe()` 3s 探活、`ModelOffline` 单一异常；`../` 路径防护 |
 | 自检 | `script/test_model_store.py` | 10 项全过（缺失/已装/损坏/越界/续传/离线） |
 
 **顺带发现（数据质量）**：`models.txt` 有 4 条指向**不存在的文件**（`waifu2x_cunet_up1x_denoise0~3`），
@@ -591,10 +591,10 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 
 ### 更新 26（2026-11-02）：真实下载源接通（仓库目录双源）+ 模型覆盖核查
 
-**① 下载源（用户上传的仓库目录）**：`chiptrick/JMComic-qt-Android` 的 `android/sr_qnn/models`
+**① 下载源（用户上传的仓库目录）**：`chiptrick/JMComic-qt-Android` 的 `python/android/sr_qnn/models`
 （不是 Release，是仓库目录）→ 用 raw + jsDelivr 两个 CDN 直链，清单 v2 的 providers：
-1. `https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/android/sr_qnn/models/`（国内可达）
-2. `https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/android/sr_qnn/models/`（兜底）
+1. `https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/python/android/sr_qnn/models/`（国内可达）
+2. `https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/python/android/sr_qnn/models/`（兜底）
 
 实测：
 - 三方比对 **31 个 .onnx / 217.7MB，名字与大小 100% 一致**（无漏传、无多余、无大小差异）；
@@ -622,11 +622,11 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 **① Real-CUGAN：没有缺失档位**
 下载官方 `RealCUGAN_for_win10_torch1.10.0cu111_20220226.zip`（1.86+1.05 GiB，aria2c 8 线程，约 3 分钟）并解包，
 `weights_v3/` 只有 **11 个 SE 权重**（up2x 五档、up3x/up4x 各 3 档）——**没有 pro**。核对
-`android/tools/models_stage/README.md` 后确认：官方口径就是 **SE 11 + PRO 6 = 17**，pro 由
+`python/android/tools/models_stage/README.md` 后确认：官方口径就是 **SE 11 + PRO 6 = 17**，pro 由
 `nihui/realcugan-ncnn-vulkan` 的 ncnn 权重转换而来（`ncnn2torch_final.py`），我们已经全有。
 之前"denoise 中间档不全"的判断是**错的**：官方对 up3x/up4x 本就只出 denoise3x。
 
-**对账（新增 `android/tools/models_stage/verify_cugan_se.py`）**：用官方 SE 权重按导出数学前向，
+**对账（新增 `python/android/tools/models_stage/verify_cugan_se.py`）**：用官方 SE 权重按导出数学前向，
 与仓库 ONNX 输出比对：
 - 5 个 up2x：**0.001~0.002/255**（逐位等价）；
 - 3x/4x：与官方 `forward()` 的差异恒为 **0.5/255**——那是官方 forward 末尾 `round/clamp` 到 uint8 的量化步长，
@@ -685,7 +685,7 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 
 **量化方案**：QDQ 静态量化，**uint16 激活 + uint8 权重**（QNN HTP 原生支持；体积约为 float 的 23%）。
 标定集 16 张 App 真实截图（含漫画封面/阅读页），minmax 标定；工具 `script/*quant*`（临时脚本）
-+ 复用 `android/tools/prepare_models.py` 的量化逻辑。
++ 复用 `python/android/tools/prepare_models.py` 的量化逻辑。
 
 **结果（39/39 全部完成）**：
 - 交付 **32 个** q16 模型（PSNR ≥ 35dB，实测 35.3~52.9dB，平均 38.7dB），合计 **60.5MB**（float 262MB）；
@@ -698,7 +698,7 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 float 版（`ApplyQuantizedPreference`，`JM_SR_Q16=0` 可关）；**无 QNN 的机型保持 float**（QDQ 在 CPU 上更慢）。
 清单升到 **v3**，新增 `quantized` 段（base→q16 文件/size/sha256）+ `quantized_bytes`；
 `ModelStore` 增加 `Quantized()/QuantizedFor()/DownloadQuantized()`，自检新增 4 项（共 14 项全过）。
-C++ 已编译 + 宿主自检（`wsl_build_native.sh`）通过；`android/sr_qnn/__init__.py` 的 ModelNames 补齐
+C++ 已编译 + 宿主自检（`wsl_build_native.sh`）通过；`python/android/sr_qnn/__init__.py` 的 ModelNames 补齐
 general/SRMD 共 9 个名字（否则宿主断言"模型表数量"不过）。
 
 ## 0C. 非高通机型 GPU 超分（Vulkan）实施方案
@@ -726,7 +726,7 @@ Python 层 `sr_backend` 按能力选择：有 QNN → `libsr_qnn`；无 QNN 但�
 3. 首版只保证 `srmd_x{2,3,4}` + `realcugan_se_up2x` 四个模型（其余按需扩）；
 4. 性能预期：手机 Vulkan 上 CUGAN 单 192 tile 约 30~80ms（ncnn 社区实测区间），翻页可用。
 
-**已启动**：`android/tools/build_ncnn_android.sh`（ncnn tag `20240820`，`-DNCNN_VULKAN=ON`，NDK r30，
+**已启动**：`python/android/tools/build_ncnn_android.sh`（ncnn tag `20240820`，`-DNCNN_VULKAN=ON`，NDK r30，
 arm64-v8a；源码需在宿主 clone 后传到 WSL，因为 WSL 到 github 不通）。
 
 **验证记录：MuMu 12 模拟器支持 Vulkan（2026-11-02 实测）**
@@ -744,7 +744,7 @@ arm64-v8a；源码需在宿主 clone 后传到 WSL，因为 WSL 到 github 不�
 2. 未 strip 的 `libsr_vk.so` = **68.3MB**，`llvm-strip --strip-unneeded` 后 **3.1MB（4%）**——
    体积不是问题，构建脚本发布前必须 strip。
 
-**设备端探针**：`android/sr_qnn/cpp_vk/probe.cpp`（`dlopen` + 函数指针调真实 ABI，
+**设备端探针**：`python/android/sr_qnn/cpp_vk/probe.cpp`（`dlopen` + 函数指针调真实 ABI，
 输出 init 结果/设备名/模型表数量），构建产物 `sr_vk_probe`，使用方式：
 ```
 adb push libsr_vk.so sr_vk_probe /data/local/tmp/
@@ -756,7 +756,7 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./sr_vk_probe ./libsr_vk.so"
 - `sr_vk.cpp` 实现 `srq_add/srq_load/srq_free_result`（签名与 `sr_qnn.h` 完全一致：modelId/taskId/
   scale/target/tileSize、RGB888/RGBA、stride、SrqResult 结构体）。
 - 模型清单 `models_vk.txt`：`NAME|param|bin|scale|tile|in_channels`（样例见
-  `android/sr_qnn/cpp_vk/models_vk.sample.txt`）。
+  `python/android/sr_qnn/cpp_vk/models_vk.sample.txt`）。
 - 实测（MuMu / Adreno 740 虚拟 / SRMD_UP2X / 192×192 输入 → 384×384）：
   | 模式 | 与 ONNX 版对比 | 单 tile 耗时 |
   |---|---|---|
@@ -767,9 +767,9 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./sr_vk_probe ./libsr_vk.so"
 **M3+M4 完成（2026-11-02）：ncnn 模型按需下载 + 后端自动选择**
 
 M3（模型分发）：
-- 仓库新增 `android/sr_qnn/models_vk/`（SRMD 全 6 个 ncnn 模型，param+bin 共 12 文件，
+- 仓库新增 `python/android/sr_qnn/models_vk/`（SRMD 全 6 个 ncnn 模型，param+bin 共 12 文件，
   合计 17.5MB）+ `models_vk.txt`（含 in_channels 列）；已推 `chiptrick/JMComic-qt-Android`
-  的 `android/sr_qnn/models_vk/`（远端 13 文件 / 17.5MB）。
+  的 `python/android/sr_qnn/models_vk/`（远端 13 文件 / 17.5MB）。
 - 清单生成器增加 `--ncnn-dir` + `--ncnn-base-url`：ncnn 走**独立下载源**
   （`/models/` → `/models_vk/`），每个模型条目带 `providers`、`param/bin size/sha256`；
   `ModelStore.Download()` 支持条目级 providers（ONNX 主源仍不变）。
@@ -824,7 +824,7 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 
 ## 0E. C1 进展（2026-11-02）
 
-**W1 已落一版（工程骨架与出包链路）**：新增 `android/c1_shell/`（Qt 6.12 C++ 壳工程），
+**W1 已落一版（工程骨架与出包链路）**：新增 `cpp/shell/`（Qt 6.12 C++ 壳工程），
 复用 C0 已踩通的构建链路与门禁：
 
 - `CMakeLists.txt`：`c1shell`，包名 `org.jmcomic.c1shell`，版本 `0.1-c1`；
@@ -844,7 +844,7 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 | 运行日志 | `C1Shell: sr_qnn in link map OK (base=0x7cb38f903000)` |
 
 说明：x86 模拟器首帧数值只作"链路通了"的证据，不代表真机指标（W7 才做同机对照）。
-**W2 已落一版（本地阅读器骨架）**：`android/c1_shell/reader.{h,cpp}` + `main.cpp` 接入。
+**W2 已落一版（本地阅读器骨架）**：`cpp/shell/reader.{h,cpp}` + `main.cpp` 接入。
 
 - 目录来源：`QFileDialog`（用户手选）> `AppLocalDataLocation/reader`（免存储权限，
   冒烟用 `run-as` 投图）> `/sdcard/c1_shell`（用户手工投放）；只列 jpg/jpeg/png/webp/bmp/gif。
@@ -884,7 +884,7 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 - **W4 返回栈 + 标题栏 + 侧栏**：`main.cpp` 的 `ShellWindow.Push/Pop`，历史栈支持 Home/Reader/Settings
   三页切换；Back 在栈空时回 Home；标题栏跟随当前页（阅读页显示 `Reader n/m`）。
 - **W5 设置页（同格式 config.ini）**：`settings_page.{h,cpp}`，QSettings INI，
-  section/key 与 `src/config/setting.py` 完全同名（`GeneraSetting/ThemeIndex`、
+  section/key 与 `python/src/config/setting.py` 完全同名（`GeneraSetting/ThemeIndex`、
   `ProxySetting/IsUseHttps`、`DownloadSetting/SavePath`、`ReadSetting/LookReadMode`、
   `Waifu2xSetting/IsOpenWaifu`、`Other/UserId`）；`JM_C1_CONFIG_PATH` 可指向 Python 版的
   config.ini 做同机互通验证；默认路径是 `AppLocalDataLocation/config.ini`。
@@ -931,7 +931,7 @@ gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
 - **C2 业务切片**：`browse_page.{h,cpp}` 搜索→详情→章节→在线阅读整条链路；
   `reader.h` 新增 `LoadFiles()`（在线页序固定加载）。图片处理三个坑全部落地：
   webp 解码（见下）、按章节 id+文件名算切割数、单张失败跳过不终止整章。
-- **WebP 解码器内嵌**：Qt 6.12 的 android/mingw 包都不带 qwebp 插件（host 实测
+- **WebP 解码器内嵌**：Qt 6.12 的 python/android/mingw 包都不带 qwebp 插件（host 实测
   supportedImageFormats 无 webp），且 JM 的 CDN 对 .jpg 后缀回 502、只发 webp——
   内嵌 qtimageformats 6.12.0 的 libwebp 解码端（`3rdparty/libwebp`，BSD-3，仅 dec/dsp/utils，
   去 encoder dsp 文件；cpu.h 去掉 qglobal.h 依赖）。`jm_webp.{h,cpp}` 提供 RGBA→QImage，
@@ -973,13 +973,13 @@ W2 的下一步是本地阅读器（打开本地目录 → 翻页 → 缩放）�
 | P0-1 真机可见 | ❌ 阻塞 | `adb devices` 为空；MuMu 仅后台服务在跑，实例未启动 |
 | P0-3 唯一进度源 | ✅ | 本节即进度记录 |
 | P4-1 协议 v1 | ✅ | `docs/c1_bridge_protocol.md`；`bridge.py` 实现 net.request/net.status/net.close |
-| P4-2 请求层抽取 | ✅ | `android/c1_shell/net_client.py`（不依赖 Qt，复用 `Status` 词表） |
+| P4-2 请求层抽取 | ✅ | `cpp/shell/net_client.py`（不依赖 Qt，复用 `Status` 词表） |
 | P4-3 C++ NetRequest | ✅ | `python_bridge.{h,cpp}` 新增 NetRequest/NetStatus/NetClose |
 | P4-4 桌面闭环 | ✅ | `host_tests/` 链接真实 `python_bridge.cpp`：**17/17 PASS**；协议级 **24/24 PASS** |
 | P4-5 设备侧闭环 | 🟡 模拟器已完成，真机待做 | Android 15 AVD：`net OK 200 17143B 257ms`、`net.status` 报 py 3.14.8 / rss 23MB |
 | P4-6 异常场景 | 🟡 桌面已完成 | 超时/崩溃重启/未知方法/坏 JSON 全有断言；断网与 NAT 场景待真机 |
-| W7 回归脚本 | ✅ 就绪 | `android/tools/c1_w7_regression.sh`（真机到位后一条命令取证） |
-| W7 执行 | ⏳ 阻塞 | 报告已按"未执行"落盘：`android/build_logs/c1_w7_20261102-201118/report.md` |
+| W7 回归脚本 | ✅ 就绪 | `python/android/tools/c1_w7_regression.sh`（真机到位后一条命令取证） |
+| W7 执行 | ⏳ 阻塞 | 报告已按"未执行"落盘：`python/android/build_logs/c1_w7_20261102-201118/report.md` |
 
 #### P4 设备侧实测（x86_64 / Android 15 AVD，`emulator-5554`）
 
@@ -1046,8 +1046,8 @@ C1Shell  : py 3.14.8 rss=23084KB up=15748ms
 #### 验证命令
 
 ```bash
-bash android/c1_shell/host_tests/run_host_tests.sh    # 24/24 + 17/17，退出码 0
-bash android/tools/c1_w7_regression.sh --apk <apk>    # 真机到位后跑；无设备时 exit 3 并落盘阻塞证据
+bash cpp/shell/host_tests/run_host_tests.sh    # 24/24 + 17/17，退出码 0
+bash python/android/tools/c1_w7_regression.sh --apk <apk>    # 真机到位后跑；无设备时 exit 3 并落盘阻塞证据
 ```
 
 ### 0E-2. C1 网络改由 C++ 实现，移除 Python 运行时（2026-11-02 第三轮，用户拍板）
@@ -1095,7 +1095,7 @@ NDK 30 / JDK 21 / Gradle 9.8.2 也都在本机。
 
 | 项 | 结果 |
 |---|---|
-| 入口 | `powershell -File android/c1_shell/build_windows.ps1 -Abi arm64-v8a` |
+| 入口 | `powershell -File cpp/shell/build_windows.ps1 -Abi arm64-v8a` |
 | 依赖缓存 | `C:\Users\WQ159\jmcomic-build\deps\{libs,openssl}\<abi>`（不入库，脚本校验） |
 | arm64 OpenSSL | 源码 3.3.1 交叉编译，`SONAME=libssl.so`、`p_align=0x4000`（16KB） |
 | 产物 | `JMComic-c1-0.2-arm64-v8a-debug.apk` **68MB** |
@@ -1115,7 +1115,7 @@ NDK 30 / JDK 21 / Gradle 9.8.2 也都在本机。
 | 翻页耗时 p95 | **6.7ms**（≈149fps，长采样 7.6ms） | — |
 
 **遗留**：
-1. ~~人工 checklist~~ → 已自动化为 `android/tools/c1_w7_manual_check.py`，
+1. ~~人工 checklist~~ → 已自动化为 `python/android/tools/c1_w7_manual_check.py`，
    AVD 上 8/8 PASS（F2/F3/F4/F5/F6/F7/S2/S3）；真机待复跑，捏合手势仍需人工双指；
    过程中修掉两个真实缺陷（进入阅读器标题不显示页码、点过工具条后键盘失效）；
 2. CI 恢复（`378532840/841/843`）；
@@ -1152,7 +1152,7 @@ NDK 30 / JDK 21 / Gradle 9.8.2 也都在本机。
    判负 → 记录分解（Qt 库/解码缓存/位图），不达标不得掩盖。
 3. **翻页**：`bench_reader` 同类场景改为设备侧人工帧率采样（FrameTick p50/p95），要求 p95 ≥110fps；
    判负 → 先查是否误把解码放回主线程。
-4. **16KB**：`python android/tools/check_elf_page_align.py <apk>` → 未对齐 0；`check_pybundle_align.py` → N/A 或 0。
+4. **16KB**：`python python/android/tools/check_elf_page_align.py <apk>` → 未对齐 0；`check_pybundle_align.py` → N/A 或 0。
 5. **功能对齐**：W8 的人工 checklist（阅读器 12 项 + 设置 8 项 + 导航 6 项），逐项 PASS/FAIL，不接受"基本可用"。
 
 ### 0B.4 三条中止条件（任一触发即停 C1、退回 Python 轨道）
@@ -1181,22 +1181,22 @@ NDK 30 / JDK 21 / Gradle 9.8.2 也都在本机。
 | #   | 方案/历史说法                                                        | 仓库实况                                                                                                                                                                                                                                                                                           | 影响                                                                                                                                     |
 | --- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | D1  | 三个基准脚本 `script/bench_*.py`                                     | ~~`script/` 只有 4 个 build 脚本，bench 只在 `.workbuddy/tmp/`~~ → **【已更新】工程师已入仓** `script/bench_{startup,pipeline,reader,common}.py`，统一 CLI、口径写在 `--help`                                                                                                                                             | 0.6 由"新增 2 人日"改为 **已完成，剩口径校准**；见 §0.1 更新 2                                                                                             |
-| D2  | `task_multi.py`                                                | 实际路径 `src/task/task_multi.py`（`consumer()` 在 L31）                                                                                                                                                                                                                                              | 路径订正                                                                                                                                   |
-| D3  | `sr_model_table.py` 41 个模型条目                                   | 实际 `src/component/widget/sr_model_table.py`（970 行）；模型清单在 `android/sr_qnn/models/models.txt`，**47 条非注释行 / 32 个唯一 .onnx**，目录 `du -sh` = **199 MB**                                                                                                                                               | A3 的清单与"已装/未装"判定以 `models.txt` 为准；199 MB 与方案"APK -150MB"量级吻合                                                                           |
-| D4  | A1 只需改 `src/start.py` 的 `import images_rc`                     | 6 处：`src/start.py:78`（注释"此处不能删除"）+ `src/interface/{ui_book_info,ui_help,ui_login_new,ui_sr_select_widget,ui_title_bar}.py`，后者由 `pyside6-uic` 依据 `ui/*.ui` 的 5 处 `<include location=".../images.qrc"/>` 自动生成（其中 `ui/ui_book_info.ui:843` 还引用了不存在的 `../../pybika-new/res/images.qrc`）            | A1 工作量 0.5 天 → **2 人日**；且必须改 `script/build_ui.py` 或 `.ui` 本身，否则回归                                                                      |
-| D5  | 从未提到 `.rcc` 的 Android 打包                                       | `android/tools/patch_buildozer_spec.py` 的 `RuntimeExts = ["onnx","txt","qsb"]`，**无 `rcc`**                                                                                                                                                                                                     | A1 的隐藏阻塞点，必须加白名单                                                                                                                       |
-| D6  | 桌面解码分支需改 `SegmentationPicture`                                 | `src/task/task_qimage.py` 已有 QImage 直通路径（`_SegmentQImage` / `ConverQImage(info, q)`），仅被 `IsAndroid()` 门控                                                                                                                                                                                       | A2 工作量 ≈1 人日，风险从"高"降到"中"                                                                                                               |
-| D7  | `requirements_android_ci.txt`                                  | 实际在 `android/app_src/requirements_android_ci.txt` 与 `src/requirements_android_ci.txt` 两处                                                                                                                                                                                                       | 0.4 要改两处                                                                                                                               |
+| D2  | `task_multi.py`                                                | 实际路径 `python/src/task/task_multi.py`（`consumer()` 在 L31）                                                                                                                                                                                                                                              | 路径订正                                                                                                                                   |
+| D3  | `sr_model_table.py` 41 个模型条目                                   | 实际 `python/src/component/widget/sr_model_table.py`（970 行）；模型清单在 `python/android/sr_qnn/models/models.txt`，**47 条非注释行 / 32 个唯一 .onnx**，目录 `du -sh` = **199 MB**                                                                                                                                               | A3 的清单与"已装/未装"判定以 `models.txt` 为准；199 MB 与方案"APK -150MB"量级吻合                                                                           |
+| D4  | A1 只需改 `python/src/start.py` 的 `import images_rc`                     | 6 处：`python/src/start.py:78`（注释"此处不能删除"）+ `python/src/interface/{ui_book_info,ui_help,ui_login_new,ui_sr_select_widget,ui_title_bar}.py`，后者由 `pyside6-uic` 依据 `ui/*.ui` 的 5 处 `<include location=".../images.qrc"/>` 自动生成（其中 `ui/ui_book_info.ui:843` 还引用了不存在的 `../../pybika-new/res/images.qrc`）            | A1 工作量 0.5 天 → **2 人日**；且必须改 `script/build_ui.py` 或 `.ui` 本身，否则回归                                                                      |
+| D5  | 从未提到 `.rcc` 的 Android 打包                                       | `python/android/tools/patch_buildozer_spec.py` 的 `RuntimeExts = ["onnx","txt","qsb"]`，**无 `rcc`**                                                                                                                                                                                                     | A1 的隐藏阻塞点，必须加白名单                                                                                                                       |
+| D6  | 桌面解码分支需改 `SegmentationPicture`                                 | `python/src/task/task_qimage.py` 已有 QImage 直通路径（`_SegmentQImage` / `ConverQImage(info, q)`），仅被 `IsAndroid()` 门控                                                                                                                                                                                       | A2 工作量 ≈1 人日，风险从"高"降到"中"                                                                                                               |
+| D7  | `requirements_android_ci.txt`                                  | 实际在 `python/android/app_src/requirements_android_ci.txt` 与 `python/src/requirements_android_ci.txt` 两处                                                                                                                                                                                                       | 0.4 要改两处                                                                                                                               |
 | D8  | JDK 17~24 是当前基线                                                | `versions.env` 已写 `JM_JDK_MAX:=25`、`JM_GRADLE_MIN:=9.1.0`（注释称"0.88 起"）；`resolve_jdk.sh` 头注释仍写 17~24                                                                                                                                                                                            | 0.4 的实质是"消除版本事实源与文档的冲突"                                                                                                                |
 | D9  | CI 需新建 PR 门禁                                                   | `.github/workflows/{CI,android,release}.yml` 已存在，`android.yml` 已在 PR 上跑宿主回归                                                                                                                                                                                                                    | W2 缩水为"补 3 道门"，并需处理 CI 与 APK 环境版本不一致                                                                                                   |
-| D10 | AVD 为 Pixel_9_Pro_XL                                           | `~/.android/avd/` 只有 `Pixel_9a`（android-37.2，google_apis_ps16k，x86_64）与 `Pixel_8a`（android-36.1，google_apis_ps16k，x86_64），**均为 16KB 页镜像**（实测 `getconf PAGE_SIZE=16384`）。~~android-37 装 targetSdk=34 的行为待确认~~ → **【已关闭】能装**（§0A 更新 8，`adb install` Success，`dumpsys` 显示 minSdk=34/targetSdk=34） | 对 0.1 验证是加分；16KB 验证不需要真机                                                                                                               |
-| D11 | 0.1 的 recipe 产物"随之重编"                                          | `android/recipes/` 只有 `curl_cffi` / `jmcomic`；openssl/libffi/sqlite/jpeg/png/freetype/turbojpeg 是 **p4a 内置 recipe**                                                                                                                                                                            | 0.1b 必须走 dist 全量重建，不是改本仓库文件                                                                                                            |
-| D12 | 无                                                              | `src/images_rc.py` = **23 MB 明文**，`res/` = 14 MB                                                                                                                                                                                                                                               | A1 的 -22MB APK 收益可信；也解释了 py 编译期开销                                                                                                      |
-| D13 | 无                                                              | 已有 30+ 个 `android/tools/host_test_*.py` 宿主测试，其中 `host_test_image_pipeline.py`（看图链路回归，含 webp 真数据闭环）、`host_test_sr_model_list.py`、`host_test_sr_proc.py` 正好是 **A2 / A3 的现成验收挂载点**                                                                                                                | 可省 2~3 人日的验收工具开发                                                                                                                       |
+| D10 | AVD 为 Pixel_9_Pro_XL                                           | `~/.python/android/avd/` 只有 `Pixel_9a`（android-37.2，google_apis_ps16k，x86_64）与 `Pixel_8a`（android-36.1，google_apis_ps16k，x86_64），**均为 16KB 页镜像**（实测 `getconf PAGE_SIZE=16384`）。~~android-37 装 targetSdk=34 的行为待确认~~ → **【已关闭】能装**（§0A 更新 8，`adb install` Success，`dumpsys` 显示 minSdk=34/targetSdk=34） | 对 0.1 验证是加分；16KB 验证不需要真机                                                                                                               |
+| D11 | 0.1 的 recipe 产物"随之重编"                                          | `python/android/recipes/` 只有 `curl_cffi` / `jmcomic`；openssl/libffi/sqlite/jpeg/png/freetype/turbojpeg 是 **p4a 内置 recipe**                                                                                                                                                                            | 0.1b 必须走 dist 全量重建，不是改本仓库文件                                                                                                            |
+| D12 | 无                                                              | `python/src/images_rc.py` = **23 MB 明文**，`res/` = 14 MB                                                                                                                                                                                                                                               | A1 的 -22MB APK 收益可信；也解释了 py 编译期开销                                                                                                      |
+| D13 | 无                                                              | 已有 30+ 个 `python/android/tools/host_test_*.py` 宿主测试，其中 `host_test_image_pipeline.py`（看图链路回归，含 webp 真数据闭环）、`host_test_sr_model_list.py`、`host_test_sr_proc.py` 正好是 **A2 / A3 的现成验收挂载点**                                                                                                                | 可省 2~3 人日的验收工具开发                                                                                                                       |
 | D14 | 无                                                              | 构建工具链已有 `wsl_start_detached_build.sh` / `wsl_build_status.sh` / `wsl_wait_build.sh` / `wsl_collect_apk.sh` / `wsl_verify_new_apk.sh` / `wsl_save_build_cache.sh` → 长构建可以放到后台跑，不必占住人                                                                                                            | 关键路径的时间可以被并行工作填掉                                                                                                                       |
-| D15 | 无                                                              | `android/build_android.sh:730` 的 ABI 循环是**串行**的（`for abi in ${ABIS_STR}`，内部 `tee` 到各自日志）                                                                                                                                                                                                       | 两 ABI 必须顺序构建；不建议并发两次调用（共享 `libs/`、`dist/` 与 p4a 缓存）                                                                                    |
-| D16 | 无                                                              | `src/start.py` 设了 `QT_IMAGEIO_MAXALLOC` 为超大值 + `QImageReader.setAllocationLimit(0)`                                                                                                                                                                                                            | 与"内存峰值 +≤30MB"这条验收直接相关，B1 设计时不能忘                                                                                                       |
-| D17 | 0.2 写 `android/build_logs/unaligned_override.json`；0.5 用现成 APK | **`.gitignore:168` 忽略了 `android/build_logs/`，`.gitignore:159` 忽略了 `android/*.apk`**；`src/images_rc.py` 是**已跟踪**文件                                                                                                                                                                              | 两处必须修订：① 0.2 的审计记录写进被 git 忽略的目录 = 清缓存即失、"可审计"名存实亡，需另找可跟踪的归档位置；② 0.5 的设备侧 before 数据所依赖的两个 0.87 APK **既未入库又在忽略路径下**，极易被清理，必须在批次 1 第一步就转存 |
+| D15 | 无                                                              | `python/android/build_android.sh:730` 的 ABI 循环是**串行**的（`for abi in ${ABIS_STR}`，内部 `tee` 到各自日志）                                                                                                                                                                                                       | 两 ABI 必须顺序构建；不建议并发两次调用（共享 `libs/`、`dist/` 与 p4a 缓存）                                                                                    |
+| D16 | 无                                                              | `python/src/start.py` 设了 `QT_IMAGEIO_MAXALLOC` 为超大值 + `QImageReader.setAllocationLimit(0)`                                                                                                                                                                                                            | 与"内存峰值 +≤30MB"这条验收直接相关，B1 设计时不能忘                                                                                                       |
+| D17 | 0.2 写 `python/android/build_logs/unaligned_override.json`；0.5 用现成 APK | **`.gitignore:168` 忽略了 `python/android/build_logs/`，`.gitignore:159` 忽略了 `python/android/*.apk`**；`python/src/images_rc.py` 是**已跟踪**文件                                                                                                                                                                              | 两处必须修订：① 0.2 的审计记录写进被 git 忽略的目录 = 清缓存即失、"可审计"名存实亡，需另找可跟踪的归档位置；② 0.5 的设备侧 before 数据所依赖的两个 0.87 APK **既未入库又在忽略路径下**，极易被清理，必须在批次 1 第一步就转存 |
 | D18 | 16KB 不修"只是退回兼容模式"                                              | **16KB 镜像上实测：`dlopen failed: libc++_shared.so program alignment (4096) cannot be smaller than system page size (16384)` → QtLoader `UnsatisfiedLinkError` → 进程未存活**                                                                                                                            | **Q4 已答：一票否决级。`libc++_shared.so` 是 p4a dist 产物 → 只有 0.1b 能修，0.1a 不解决启动问题。0.1b 升为全项目第一优先级**                                             |
 | D19 | CI 用 6.11.2 只是"版本略旧"                                           | **PySide6 6.12.0 + Python 3.11 实测 finalize GC 崩溃**：`Fatal Python error: none_dealloc: deallocating None`（6.11.2 同代码不崩）                                                                                                                                                                         | CI/host_test 的退出码可能是 134；断言必须"退出码 + 产物 + logcat 关键字"三者合判；Q7 从纸面问题变成正在发生的假红/假绿                                                          |
 | D20 | 方案基线 998ms/138MB/39.6ms/154ms 可直接用作对照                          | 工程师在 WSL/offscreen/9p 下测得 7254.9 / 267.9 / 18.01 / 5.07 —— **口径与环境双重差异**，其中 39.6ms 很可能含"PIL 重编码"而新脚本不含                                                                                                                                                                                         | **0.5 基线必须在原生桌面取**；**A2 验收前必须加 `--legacy-pil` 对照分支**，否则"去掉 PIL 的收益"测不出来（Q15）                                                           |
@@ -1211,17 +1211,17 @@ NDK 30 / JDK 21 / Gradle 9.8.2 也都在本机。
 
 ### 2.1 A1「资源二进制化」的真实改动面
 
-方案写的是"`script/build_qrc.py` 改成 `--binary`，`src/start.py` 换掉 import"，实际链条是：
+方案写的是"`script/build_qrc.py` 改成 `--binary`，`python/src/start.py` 换掉 import"，实际链条是：
 
 ```
 ui/*.ui (5 个文件含 <include location="../res/images.qrc"/>)
-    └─ pyside6-uic ─→ src/interface/ui_*.py  (自动生成 `import images_rc`)
+    └─ pyside6-uic ─→ python/src/interface/ui_*.py  (自动生成 `import images_rc`)
                           └─ 这 5 个文件未被纳入 .gitignore？→ 待确认，但它们在仓库里且有 import
-src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除"
+python/src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除"
 
 改 --binary 后：
-  src/images.rcc (二进制)
-  必须 QResource.registerResource("src/images.rcc") + QResource.addSearchPath(...)
+  python/src/images.rcc (二进制)
+  必须 QResource.registerResource("python/src/images.rcc") + QResource.addSearchPath(...)
   → 所有 `:/png/...` 路径才能解析
   → 6 处 `import images_rc` 全部失效（ModuleNotFoundError 或残留 py 文件导致行为不一致）
   → Android: private.tar 里必须存在 images.rcc，否则图标静默消失
@@ -1229,13 +1229,13 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 **设计结论（推荐方案）**：
 
-- 新建一个薄封装 `src/tools/res_loader.py`，暴露 `EnsureResources()`：内部按 `JM_USE_PYC_RES` 环境变量二分（`1` → `import images_rc`；否则 → `QResource.registerResource` + `addSearchPath`）。
-- `src/start.py` 的 `import images_rc` 换成 `from tools.res_loader import EnsureResources; EnsureResources()`。
-- 5 个 `src/interface/ui_*.py` 的 `import images_rc` **不能靠手改**（会被 `pyside6-uic` 覆盖）。两条路：
+- 新建一个薄封装 `python/src/tools/res_loader.py`，暴露 `EnsureResources()`：内部按 `JM_USE_PYC_RES` 环境变量二分（`1` → `import images_rc`；否则 → `QResource.registerResource` + `addSearchPath`）。
+- `python/src/start.py` 的 `import images_rc` 换成 `from tools.res_loader import EnsureResources; EnsureResources()`。
+- 5 个 `python/src/interface/ui_*.py` 的 `import images_rc` **不能靠手改**（会被 `pyside6-uic` 覆盖）。两条路：
   - **推荐**：改 `ui/*.ui`，删掉 `<include location="../res/images.qrc"/>` 与散落的 `resource="../res/images.qrc"` 属性，让 uic 不再生成该 import；
   - 备选：在 `script/build_ui.py` 里加后处理（生成后统一替换/删除该行）。但 `build_ui.py` 现在是裸 `os.system` 循环、无返回值检查，**做后处理前必须先让它可失败**（否则改坏了没人知道）。
-- `android/tools/patch_buildozer_spec.py` 的 `RuntimeExts` 增加 `"rcc"`。
-- 回退：`JM_USE_PYC_RES=1` 时走旧 `.py` 路径，但**要求 `src/images_rc.py` 仍在树上**（不要一起删），这条要通过文档明确，否则回退开关形同虚设。
+- `python/android/tools/patch_buildozer_spec.py` 的 `RuntimeExts` 增加 `"rcc"`。
+- 回退：`JM_USE_PYC_RES=1` 时走旧 `.py` 路径，但**要求 `python/src/images_rc.py` 仍在树上**（不要一起删），这条要通过文档明确，否则回退开关形同虚设。
 
 ### 2.2 A2「桌面解码去 PIL」的契约设计与推荐解
 
@@ -1243,18 +1243,18 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 | 函数                               | 位置                            | 返回                                                       | 消费者                                                                    |
 | -------------------------------- | ----------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `ToolUtil.SegmentationQImage`    | `src/tools/tool.py:1099`      | `QImage` 或 `None`                                        | 目前只有 `task_qimage._SegmentQImage()`（Android 分支）                        |
+| `ToolUtil.SegmentationQImage`    | `python/src/tools/tool.py:1099`      | `QImage` 或 `None`                                        | 目前只有 `task_qimage._SegmentQImage()`（Android 分支）                        |
 | `ToolUtil.SegmentationPictureQt` | `tool.py:1200`                | `bytes`（内部调 `SegmentationQImage` 再 `_SaveQImageToBytes`） | `SegmentationPicture` 的 Android 分支                                     |
 | `ToolUtil.SegmentationPicture`   | `tool.py:1271`                | `bytes`（PIL 路径 encode 回字节）                               | `task_multi.consumer()`（跨进程 pickle）、`mobile_ui_diag.py:1122/1203/1237` |
-| `TaskQImage.ConverQImage`        | `src/task/task_qimage.py:154` | `QImage`                                                 | 看图线程；`img` 参数非空时**直接用，跳过 loadFromData**                                |
+| `TaskQImage.ConverQImage`        | `python/src/task/task_qimage.py:154` | `QImage`                                                 | 看图线程；`img` 参数非空时**直接用，跳过 loadFromData**                                |
 
 即：**"还原→编码→再解码"的往返只发生在单线程看图路径上（`TaskQImage`），而那正是用户可见的卡顿所在**；进程池 worker 天生必须回传 bytes（`multiprocessing.Queue` + pickle），改 QImage 共享内存是 B1 的活，不该混进 A2。
 
 **推荐解：双入口 + 看图线程走 QImage 域（最小改动、收益全拿）**
 
-1. `src/task/task_qimage.py:97` 去掉 `if platform_mobile.IsAndroid():` 门控 → 所有平台先试 `_SegmentQImage`；失败（返回 None）时**原样回退**到 `TaskMulti().GetJmPicResultsResult(...)`。这一步天然保留了 bytes 契约，`task_multi.py` / `mobile_ui_diag.py` **零改动**。
+1. `python/src/task/task_qimage.py:97` 去掉 `if platform_mobile.IsAndroid():` 门控 → 所有平台先试 `_SegmentQImage`；失败（返回 None）时**原样回退**到 `TaskMulti().GetJmPicResultsResult(...)`。这一步天然保留了 bytes 契约，`task_multi.py` / `mobile_ui_diag.py` **零改动**。
 2. `SegmentationPicture` （bytes 契约）**不动**，避免影响 `task_waifu2x.py:113`、`user_handler.py:1103/1106`。
-3. 验收工具：扩展 `android/tools/host_test_image_pipeline.py`，加"新旧路径逐像素比对"段（对同一样本分别走 PIL 与 Qt 路径，比 `QImage` 像素）。该文件已支持 `QT_QPA_PLATFORM=offscreen` 与 `JM_REAL_WEBP` 真机样本注入。
+3. 验收工具：扩展 `python/android/tools/host_test_image_pipeline.py`，加"新旧路径逐像素比对"段（对同一样本分别走 PIL 与 Qt 路径，比 `QImage` 像素）。该文件已支持 `QT_QPA_PLATFORM=offscreen` 与 `JM_REAL_WEBP` 真机样本注入。
 4. 回滚：恢复那一行 `IsAndroid()` 判断（单行 revert）。
 
 **残留风险**：桌面 Pillow 支持 webp/avif 等，Qt 6 的 imageformat 插件集合是否覆盖用户会遇到的全部格式需要实测（尤其是 AVIF/HEIF 与动图）。这是 Q2 的实质。
@@ -1308,8 +1308,8 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### 0.0 16KB 不合规库归因清点（方案未覆盖）
 
 - **目标**：在动手重编前，把"哪些库不对齐、由谁编、重编代价多大"变成一张确定的表。
-- **改动文件**：无代码改动。产出 `docs/16kb_audit_2026-11.md`。可选：给 `android/tools/check_elf_page_align.py` 加 `--group` 输出（按"CMake 自编 / p4a dist / p4a recipe"分组）。
-- **做法**：对 `android/JMComic-0.87-arm64-v8a-debug.apk`、`android/JMComic-0.87-x86_64-debug.apk` 各跑一次页对齐检查，拿全量 15/14 库名单，逐个标注来源。
+- **改动文件**：无代码改动。产出 `docs/16kb_audit_2026-11.md`。可选：给 `python/android/tools/check_elf_page_align.py` 加 `--group` 输出（按"CMake 自编 / p4a dist / p4a recipe"分组）。
+- **做法**：对 `python/android/JMComic-0.87-arm64-v8a-debug.apk`、`python/android/JMComic-0.87-x86_64-debug.apk` 各跑一次页对齐检查，拿全量 15/14 库名单，逐个标注来源。
 - **前置**：无（只读操作）。
 - **验收**：文档列出三组清单，每组给出"重编触发方式 + 预计机时"；`libsr_qnn.so` / `libsr_qnn_proc.so` 是否对齐有明确结论。
 - **回滚**：删文档。
@@ -1319,16 +1319,16 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 #### 0.1a 本项目自编原生库重编（0.1 拆分）——**代码已改，但必须按 ABI 显式编译**
 
-> **⚠ 2026-11-09 深夜订正**（详见 §0A 更新 13）：我一度写成"0.1a 已完成"。**实际是"CMake 已改（`foreach` 覆盖两个 target），但编译必须显式执行"** —— 因为 `android/tools/wsl_build_apk.sh:93-99` **只 warn 不编译**（注释原文："libsr_qnn.so 要编译，只提示不自动跑"）。真正编译的是 `android/tools/wsl_build_native.sh:65-76`。  
-> **⇒ 完成判定 = 对 `arm64-v8a` 与 `x86_64` 各显式跑一次 `JM_ABI=<abi> bash android/tools/wsl_build_native.sh`，并各自验证 PT_LOAD=0x4000。少跑一个 ABI，那个 ABI 就还是 4096。**
+> **⚠ 2026-11-09 深夜订正**（详见 §0A 更新 13）：我一度写成"0.1a 已完成"。**实际是"CMake 已改（`foreach` 覆盖两个 target），但编译必须显式执行"** —— 因为 `python/android/tools/wsl_build_apk.sh:93-99` **只 warn 不编译**（注释原文："libsr_qnn.so 要编译，只提示不自动跑"）。真正编译的是 `python/android/tools/wsl_build_native.sh:65-76`。  
+> **⇒ 完成判定 = 对 `arm64-v8a` 与 `x86_64` 各显式跑一次 `JM_ABI=<abi> bash python/android/tools/wsl_build_native.sh`，并各自验证 PT_LOAD=0x4000。少跑一个 ABI，那个 ABI 就还是 4096。**
 
 - **目标**：把 `libsr_qnn.so` / `libsr_qnn_proc.so` 编成 16KB 对齐。
 - **执行命令（必须逐 ABI 显式跑）**：
   ```bash
-  JM_ABI=arm64-v8a bash android/tools/wsl_build_native.sh
-  JM_ABI=x86_64     bash android/tools/wsl_build_native.sh
+  JM_ABI=arm64-v8a bash python/android/tools/wsl_build_native.sh
+  JM_ABI=x86_64     bash python/android/tools/wsl_build_native.sh
   ```
-- **改动文件**：`android/sr_qnn/cpp/CMakeLists.txt`（已改：`foreach` 覆盖两个 target）、`android/build_android.sh`（L482-501 的 CMake 调用段）、必要时 `android/tools/versions.env`。
+- **改动文件**：`python/android/sr_qnn/cpp/CMakeLists.txt`（已改：`foreach` 覆盖两个 target）、`python/android/build_android.sh`（L482-501 的 CMake 调用段）、必要时 `python/android/tools/versions.env`。
 - **前置**：NDK ≥ r28（本机 `30.0.16248370` 已装，`JM_NDK_MIN_MAJOR:=28`）。不依赖 0.1b。
 - **验收**：两个 ABI 的 `libsr_qnn*.so` 均 `p_align=16384`（注意 Hexagon skel 会被脚本自动跳过，属预期）；**X86_64 侧此后 `lib/` 应为 1 个未对齐（只剩 0）、arm64 侧需另行处理 `libc++` 重复副本**。
 - **回滚**：`SKIP_NATIVE=1` 沿用旧 `.so`。
@@ -1341,12 +1341,12 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 > **升格过程**：第一轮实测把它从"关键路径之一"升为"整条链的唯一入口"（`dlopen failed: libc++_shared.so program alignment (4096)`）。**第二轮 dist 实况又把它的工作量砍了一半**：NDK 30 重编后 Qt/p4a 侧**已经合规**，剩下的具体是——
 >
 > - **x86_64**：只剩 `libsr_qnn_proc.so`（归 0.1a 处理）；
-> - **arm64**：`libc++_shared.so` 与 `libc++_shared-d523468d.so` **是同一份库的两个名字**（同尺寸 1330832、md5 均 `4c038ab17e9e4c24c3e35daa13f1f7ac`；后者来自 `curl_cffi` wheel 的 `curl_cffi.libs/`，由 `android/recipes/curl_cffi` 复制），两个名字**都在 0.87 的未对齐名单里**。
+> - **arm64**：`libc++_shared.so` 与 `libc++_shared-d523468d.so` **是同一份库的两个名字**（同尺寸 1330832、md5 均 `4c038ab17e9e4c24c3e35daa13f1f7ac`；后者来自 `curl_cffi` wheel 的 `curl_cffi.libs/`，由 `python/android/recipes/curl_cffi` 复制），两个名字**都在 0.87 的未对齐名单里**。
 >
 > **我原文档最担心的风险（p4a 只保证 NDK ≤28c，可能编不过）没有发生。工作量 2 人日 + 高风险 → 1 人日 + 中风险。**
 
 - **目标**：arm64 侧两个同名 `libc++` 都变成 16KB 对齐；产出两个能启动的 APK。
-- **改动文件**：`android/tools/versions.env`、`android/build_android.sh`、**`android/recipes/curl_cffi`（推荐：不再复制那份旧的 `libc++_shared-d523468d.so`，从根上少一份 1.3 MB，而不是覆盖两份）**。
+- **改动文件**：`python/android/tools/versions.env`、`python/android/build_android.sh`、**`python/android/recipes/curl_cffi`（推荐：不再复制那份旧的 `libc++_shared-d523468d.so`，从根上少一份 1.3 MB，而不是覆盖两份）**。
 - **前置**：WSL/Linux 宿主。**不依赖 0.1a、不依赖 0.5**（可全部并行）。
 - **验收**（按优先级）：
   1. **16KB AVD 上能启动并存活**（`avd_verify.sh` PASS）——这是本任务存在的理由；
@@ -1373,9 +1373,9 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 - **目标**：把"16KB 合规"从一条门禁改成**两条门禁**，并处置 shiboken 这一例。
 - **改动文件**：
-  - `android/tools/check_elf_page_align.py`（**新增 bundle 扫描模式**：识别 `libpybundle.so` 是容器而非 ELF，解开后逐个解析内部 `.so` 的程序头；或在 `skipped["notelf"]` 里显式标注"此文件内含 N 个未检查的 ELF"，**让跳过变成有数字的告警而不是静默**）
-  - `android/tools/check_16kb_device.sh` / `android/tools/avd_verify.sh`（判定从"`lib/` 对齐"改为"`lib/` + bundle 双绿"）
-  - 可能涉及：`android/tools/wsl_fetch_android_wheels.sh`（若需换 PySide6 wheel 版本）、`android/tools/versions.env`
+  - `python/android/tools/check_elf_page_align.py`（**新增 bundle 扫描模式**：识别 `libpybundle.so` 是容器而非 ELF，解开后逐个解析内部 `.so` 的程序头；或在 `skipped["notelf"]` 里显式标注"此文件内含 N 个未检查的 ELF"，**让跳过变成有数字的告警而不是静默**）
+  - `python/android/tools/check_16kb_device.sh` / `python/android/tools/avd_verify.sh`（判定从"`lib/` 对齐"改为"`lib/` + bundle 双绿"）
+  - 可能涉及：`python/android/tools/wsl_fetch_android_wheels.sh`（若需换 PySide6 wheel 版本）、`python/android/tools/versions.env`
 - **前置**：0.1a、0.1b（`lib/` 侧先归零，否则分不清是哪一侧没修好）。
 - **验收（两条门禁，缺一不算过）**：
   1. **`lib/<abi>/` 页对齐**：`check_elf_page_align.py <apk>` 报 0 未对齐；
@@ -1391,10 +1391,10 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### 0.2 门禁审计落盘
 
 - **目标**：`ALLOW_UNALIGNED=1` 从"喊一句就放行"变成"必须留痕才能放行"。
-- **改动文件**：`android/build_android.sh:706-712`（唯一改动点）。
+- **改动文件**：`python/android/build_android.sh:706-712`（唯一改动点）。
 - **前置**：无。
 - **验收**：`ALLOW_UNALIGNED=1` 且给 `JM_UNALIGNED_REASON` 时，审计记录被写入，含 `{ts, operator, abi, apk_sha256, misaligned:[...], reason}`；未给 reason 时构建直接失败。**一次构建两个 ABI 要生成两条记录（或数组），不能后写覆盖前写**（ABI 循环是串行的，容易踩）。
-- **⚠ 归档位置必须改名**：方案指定写 `android/build_logs/`，但该目录被 `.gitignore:168` 忽略 → 记录只存在于本地，清缓存或换机器即失。**建议写入一个被跟踪的目录（如 `android/audit/unaligned_override.jsonl`，追加式 jsonl），构建日志仍留在 `build_logs/`。** 这一条决定了"可审计"是不是真的。
+- **⚠ 归档位置必须改名**：方案指定写 `python/android/build_logs/`，但该目录被 `.gitignore:168` 忽略 → 记录只存在于本地，清缓存或换机器即失。**建议写入一个被跟踪的目录（如 `python/android/audit/unaligned_override.jsonl`，追加式 jsonl），构建日志仍留在 `build_logs/`。** 这一条决定了"可审计"是不是真的。
 - **回滚**：还原该 `if` 分支。
 - **风险**：低。
 - **AVD**：否。
@@ -1403,7 +1403,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### 0.4 版本事实源与文档一致性
 
 - **目标**：消除"`versions.env` 说 17~~25 / 文档说 17~~24"这类会直接坑下一个人（和未来的自己）的冲突。
-- **改动文件**：`android/tools/resolve_jdk.sh` 头注释（17~~24 → 17~~25，并补"Java 25 需 Gradle ≥9.1.0"的成对约束说明）、`android/app_src/requirements_android_ci.txt`、`src/requirements_android_ci.txt`、`android/README.md` 中相关段落；可选：把"文档与 versions.env 一致"做成 `android/tools/check_scripts.py` 的一条断言（该脚本已存在）。
+- **改动文件**：`python/android/tools/resolve_jdk.sh` 头注释（17~~24 → 17~~25，并补"Java 25 需 Gradle ≥9.1.0"的成对约束说明）、`python/android/app_src/requirements_android_ci.txt`、`python/src/requirements_android_ci.txt`、`python/android/README.md` 中相关段落；可选：把"文档与 versions.env 一致"做成 `python/android/tools/check_scripts.py` 的一条断言（该脚本已存在）。
 - **前置**：无。
 - **验收**：全仓 `grep -n "17~24"` 零命中；`check_scripts.py` 退出 0；`versions.env` 的 `JM_JDK_MIN/MAX`、`JM_GRADLE_MIN`、`JM_NDK_MIN_MAJOR`、`JM_API_LEVEL` 与所有文档零冲突。
 - **回滚**：文档级。
@@ -1413,7 +1413,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 #### 0.6 基准脚本入仓与口径固化（方案未覆盖）——**【已完成，剩校准】**
 
-> **状态更新（2026-11-09）**：工程师已交付 `script/bench_startup.py` / `bench_pipeline.py` / `bench_reader.py` / `bench_common.py`，统一 CLI（`--runs`/`--json`/`--out`/`--src`/`--python`），口径写在各脚本 `--help`。首帧判定复用 `src/start.py` 的 `Run(afterShow=...)` 扩展点，**未改动被测业务代码**（这点很关键：0.5 的基线不会因为"为了测量而改了被测对象"而失真）。**注意实际路径是 `script/bench_*.py` 平铺，不是我原设计的 `script/bench/` 子目录**，文档与 CI 引用时按实际路径写。
+> **状态更新（2026-11-09）**：工程师已交付 `script/bench_startup.py` / `bench_pipeline.py` / `bench_reader.py` / `bench_common.py`，统一 CLI（`--runs`/`--json`/`--out`/`--src`/`--python`），口径写在各脚本 `--help`。首帧判定复用 `python/src/start.py` 的 `Run(afterShow=...)` 扩展点，**未改动被测业务代码**（这点很关键：0.5 的基线不会因为"为了测量而改了被测对象"而失真）。**注意实际路径是 `script/bench_*.py` 平铺，不是我原设计的 `script/bench/` 子目录**，文档与 CI 引用时按实际路径写。
 >
 > 本卡片剩余工作量 **0.5 人日**，只剩两件事：
 >
@@ -1428,25 +1428,25 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 #### 0.7 AVD 验收通道（方案未覆盖）
 
-> **状态更新（2026-11-09）**：`android/tools/avd_verify.sh` **已存在**且已在 16KB 模拟器上跑出 FAIL(4 项)（见 §0.1 更新 1）。本任务从"新建脚本"降为"补齐判定规则与回归用例文档"。
+> **状态更新（2026-11-09）**：`python/android/tools/avd_verify.sh` **已存在**且已在 16KB 模拟器上跑出 FAIL(4 项)（见 §0.1 更新 1）。本任务从"新建脚本"降为"补齐判定规则与回归用例文档"。
 
 - **目标**：把"每阶段暂停 + AVD 基础功能验证"从"一条能跑的命令"升级为"一条判定可信的命令"。
 - **改动文件**：
-  - `android/tools/avd_verify.sh`（**已有，需改判定逻辑**）：PASS/FAIL 不能只看进程退出码。必须"退出码 + 产物（截图/日志/PSS）+ logcat 关键字"三者合判——因为 **PySide6 6.12 + Python 3.11 在 finalize 阶段会因 GC 崩出退出码 134**（§0.1 更新 3），只看退出码会把"跑完了但崩在退出时"判成 FAIL，也会把"真挂了但退出码 0"判成 PASS。
-  - `android/tools/avd_cases.md`（新）：每个批次要验哪几条、判定阈值、已知无害的 logcat 噪音清单。
+  - `python/android/tools/avd_verify.sh`（**已有，需改判定逻辑**）：PASS/FAIL 不能只看进程退出码。必须"退出码 + 产物（截图/日志/PSS）+ logcat 关键字"三者合判——因为 **PySide6 6.12 + Python 3.11 在 finalize 阶段会因 GC 崩出退出码 134**（§0.1 更新 3），只看退出码会把"跑完了但崩在退出时"判成 FAIL，也会把"真挂了但退出码 0"判成 PASS。
+  - `python/android/tools/avd_cases.md`（新）：每个批次要验哪几条、判定阈值、已知无害的 logcat 噪音清单。
   - 复用 `tools/check_16kb_device.sh`、`tools/appshot.sh`、`tools/dump_ui.py`。
-- **前置**：`~/.android/avd/{Pixel_8a,Pixel_9a}`（均已确认，**均为 16KB 镜像**）；x86_64 APK；adb。
+- **前置**：`~/.python/android/avd/{Pixel_8a,Pixel_9a}`（均已确认，**均为 16KB 镜像**）；x86_64 APK；adb。
 - **验收**：对 0.87 x86_64 包给出 FAIL(4 项) 且**失败原因可读**（应指出 `libc++_shared.so` 页对齐）；对修好后的包给出 PASS；两类结论都不受退出码 134 干扰。
 - **✅ 已完成的部分（2026-11-09 第二轮）**：
   - 新增独立判定行 **`16KB 库加载`**：扫 `dlopen failed:.*program alignment` 与 `UnsatisfiedLinkError`，各 0 条才 PASS；实测 0.87 → `2 条 FAIL` 并直接打印那两行。
   - 新增 **`退出码 134/SIGABRT`** 行：命中时**进程仍存活 → INFO**（已知 6.12 finalize GC 缺陷，跑完才死、产物齐全）；**进程已死 → FAIL**（配合 pidof 双保险）。
   - **把"应用被标记为 16KB 兼容模式"从 `check_16kb_device.sh` 的 WARN 提升为 FAIL** —— 这条很关键，否则"设备是 16KB → 全部检查项绿 → 但应用其实在兼容模式跑"会伪造绿光。
   - `--help` 补了"判定口径：退出码 + 产物 + 日志关键字三者合判"。
-  - `android/tools/avd_cases.md` 已建：每批次必验 6 条 + 判定顺序 + **已知无害 logcat 噪音清单**（`android.hardwar` 的 SIGABRT、`propagateSizeHints`、`grclass/EGL` 噪声等）。
+  - `python/android/tools/avd_cases.md` 已建：每批次必验 6 条 + 判定顺序 + **已知无害 logcat 噪音清单**（`android.hardwar` 的 SIGABRT、`propagateSizeHints`、`grclass/EGL` 噪声等）。
 - **回滚**：脚本级。
 - **风险**：~~中~~ **低**。原风险"`Pixel_9a`（android-37.2）装 targetSdk=34 包行为待确认" **已关闭**：`adb install -r` → Success，`dumpsys` 显示 `minSdk=34 targetSdk=34 primaryCpuAbi=x86_64`。
 - **AVD**：是（本任务就是通道）。
-- **✅ 补充（2026-11-09 晚）**：`android/README.md` 的 **§11.3「两条命令」已补全**——明确 **16KB AVD 即可、无需真机**（镜像名含 `16k`、`getconf PAGE_SIZE=16384`，实测即 `sdk_gphone16k_x86_64`），并加入 `tools/avd_verify.sh --apk ... --abi x86_64`，注释里写死三条硬判据（① `dlopen failed: .*program alignment` / `UnsatisfiedLinkError` 必须 0 条 ② 不能被标记 16KB 兼容模式 ③ `pidof` 非空）＋一句关键提示：**"页对齐只证明编对了，能启动存活才证明能跑"**。这一条把"两条命令"从"读者会以为必须真机"纠正过来了，属于文档层的重要修复。
+- **✅ 补充（2026-11-09 晚）**：`python/android/README.md` 的 **§11.3「两条命令」已补全**——明确 **16KB AVD 即可、无需真机**（镜像名含 `16k`、`getconf PAGE_SIZE=16384`，实测即 `sdk_gphone16k_x86_64`），并加入 `tools/avd_verify.sh --apk ... --abi x86_64`，注释里写死三条硬判据（① `dlopen failed: .*program alignment` / `UnsatisfiedLinkError` 必须 0 条 ② 不能被标记 16KB 兼容模式 ③ `pidof` 非空）＋一句关键提示：**"页对齐只证明编对了，能启动存活才证明能跑"**。这一条把"两条命令"从"读者会以为必须真机"纠正过来了，属于文档层的重要修复。
 - **工作量**：~~2~~ **0（已完成）**。剩余只是"随每批次补充 case 条目"的维护工作。
 
 #### 0.8 16KB 闪退实证（方案未覆盖，0.1 的决策证据）——**【已完成，结论：闪退】**
@@ -1465,14 +1465,14 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
   - 设备侧 before 有前提问题：0.87 在 16KB AVD 上起不来（§0.1 更新 1）→ **见 Q14**，需用户决定"新建非 16KB AVD / 上真机 / 放弃设备侧 before 只留 after"。
   - §1.4 各项附"测什么机器 / 哪个 AVD / 哪份样本 / 重复几次"。
 - **回滚**：文档级。
-- **风险**：中。最大风险：**两个 0.87 APK 既未被 git 跟踪、又落在 `.gitignore:159` 的 `android/*.apk` 忽略路径下**，一次 `git clean -xdf` 即失。**本任务第一步就转存到 `docs/bench_raw/0.87/` 并记录 sha256。**
+- **风险**：中。最大风险：**两个 0.87 APK 既未被 git 跟踪、又落在 `.gitignore:159` 的 `python/android/*.apk` 忽略路径下**，一次 `git clean -xdf` 即失。**本任务第一步就转存到 `docs/bench_raw/0.87/` 并记录 sha256。**
 - **AVD**：是（但受 Q14 约束）。
 - **工作量**：1.5 人日。
 
 #### 0.3 build-info 落盘（并入 0.1b 构建）
 
 - **目标**：从 APK 反查工具链，终结"这个包是什么环境编的"这类考古。
-- **改动文件**：`android/build_android.sh`（打包末尾写 `assets/build-info.json` 或 `res/raw/build_info.json`）、`android/tools/patch_buildozer_spec.py`（若走 res/raw 需处理资源）、`src/start.py` 或"关于"页读取并显示。
+- **改动文件**：`python/android/build_android.sh`（打包末尾写 `assets/build-info.json` 或 `res/raw/build_info.json`）、`python/android/tools/patch_buildozer_spec.py`（若走 res/raw 需处理资源）、`python/src/start.py` 或"关于"页读取并显示。
 - **前置**：0.1b（**同一次构建完成，省 4~6 h 机时**）。
 - **验收**：解包 APK 能看到 `build-info.json`，字段含 JDK / NDK / Gradle / AGP / Qt / p4a / CPython / git sha / 构建时间 / ABI / 是否 ALLOW_UNALIGNED 放行；"关于"页能显示其中至少 git sha 与构建时间。
 - **回滚**：删写入段（不影响功能）。
@@ -1484,17 +1484,17 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 - **目标**：启动 -196 ms、RSS -75 MB、APK -22 MB。
 - **改动文件**（比方案多 4 类，见 §2.1）：
-  - `script/build_qrc.py`（`pyside6-rcc --binary -o src/images.rcc`）
-  - `src/tools/res_loader.py`（新，薄封装 + `JM_USE_PYC_RES` 二分）
-  - `src/start.py:76-78`
-  - `src/interface/{ui_book_info,ui_help,ui_login_new,ui_sr_select_widget,ui_title_bar}.py`（5 处 `import images_rc`）
+  - `script/build_qrc.py`（`pyside6-rcc --binary -o python/src/images.rcc`）
+  - `python/src/tools/res_loader.py`（新，薄封装 + `JM_USE_PYC_RES` 二分）
+  - `python/src/start.py:76-78`
+  - `python/src/interface/{ui_book_info,ui_help,ui_login_new,ui_sr_select_widget,ui_title_bar}.py`（5 处 `import images_rc`）
   - `ui/*.ui`（5 个文件里的 `<include location="../res/images.qrc"/>`；顺带修掉 `ui_book_info.ui:843` 那条指向不存在的 `../../pybika-new/res/images.qrc`）
   - `script/build_ui.py`（若采用后处理路线，**先让它能失败**：检查 `os.system` 返回码）
-  - `android/tools/patch_buildozer_spec.py`（`RuntimeExts` 加 `"rcc"`）
-  - `.gitignore`（`src/images.rcc` 是否入库需决定；建议**入库**——因为 Android 打包与单测都依赖它，而生成只需要一次）
+  - `python/android/tools/patch_buildozer_spec.py`（`RuntimeExts` 加 `"rcc"`）
+  - `.gitignore`（`python/src/images.rcc` 是否入库需决定；建议**入库**——因为 Android 打包与单测都依赖它，而生成只需要一次）
 - **前置**：0.5（要有 before 数值）、0.1b（共用构建）。
 - **验收**：冷启相对基线 -196 ms ±20%；空壳 RSS -75 MB ±20%；APK -22 MB ±15%；**8 个含图标的界面逐页截图与基线逐像素比对零差异**（这是防"图标静默消失"的唯一手段）；`JM_USE_PYC_RES=1` 启动正常。
-- **回滚**：`JM_USE_PYC_RES=1`（要求 `src/images_rc.py` 保留在树上）。
+- **回滚**：`JM_USE_PYC_RES=1`（要求 `python/src/images_rc.py` 保留在树上）。
 - **风险**：中。最大一条：**Android 上 `.rcc` 若未进 `private.tar`，`QResource.registerResource` 静默失败、图标全部消失但不报错**——必须靠截图回归发现，所以 A1 的验收必须包含视觉比对，不能只看"没崩"。
 - **AVD**：是（截图比对 + 启动时间 + 全部含图标界面）。
 - **工作量**：2 人日（方案 0.5 天 → 修订见 §7）。
@@ -1502,7 +1502,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### A2 桌面解码去 PIL
 
 - **目标**：去掉"PIL 解码 → 重编码 → Qt 再解码"的往返，单页目标 ≤26 ms，桌面与 Android 走同一条解码栈。
-- **改动文件**：`src/task/task_qimage.py:97`（去 `IsAndroid()` 门控，保留 bytes 回退）、`src/tools/tool.py`（**不改**，双入口已存在）、`android/tools/host_test_image_pipeline.py`（加逐像素比对段）。**明确不改**：`src/task/task_multi.py`、`src/tools/mobile_ui_diag.py`、`src/task/task_waifu2x.py`、`src/server/user_handler.py`。
+- **改动文件**：`python/src/task/task_qimage.py:97`（去 `IsAndroid()` 门控，保留 bytes 回退）、`python/src/tools/tool.py`（**不改**，双入口已存在）、`python/android/tools/host_test_image_pipeline.py`（加逐像素比对段）。**明确不改**：`python/src/task/task_multi.py`、`python/src/tools/mobile_ui_diag.py`、`python/src/task/task_waifu2x.py`、`python/src/server/user_handler.py`。
 - **前置**：0.5、A1（共用构建）。~~额外硬前置：`--legacy-pil` 必须先就位~~ → **已就位（`--legacy-pil` + `--both`）**。
 - **✅ 收益已量化且已排除唯一风险（三轮修订后的最终口径）**：
   - **CPU 总成本**：legacy-pil 37.46 ms/页 → Qt 直通 **16.08 ms/页**（−21.4 ms）；
@@ -1524,11 +1524,11 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### A4 清理死重量
 
 - **目标**：APK -17.7 MB，去掉无人使用的 Qt6Multimedia + FFmpeg。
-- **改动文件**：`android/tools/patch_buildozer_spec.py`（`QtModuleBlacklist` 扩到 `Multimedia`；`DropQtModulesFromExtraArgs` 已具备从 `--qt-libs=` 剔除的能力）、wheel 拷贝清单所在脚本（待定位）、`android/tools/check_apk_qt_libs.py`（加断言：APK 内不得出现 `libQt6Multimedia*` / `libav*` / `libsw*`）。
+- **改动文件**：`python/android/tools/patch_buildozer_spec.py`（`QtModuleBlacklist` 扩到 `Multimedia`；`DropQtModulesFromExtraArgs` 已具备从 `--qt-libs=` 剔除的能力）、wheel 拷贝清单所在脚本（待定位）、`python/android/tools/check_apk_qt_libs.py`（加断言：APK 内不得出现 `libQt6Multimedia*` / `libav*` / `libsw*`）。
 - **前置**：A1、A2（共用构建）。  
   |  |  |  |  |  
   | --- | --- | --- | --- |
-- **必须先做的事**：`grep -rn "QtMultimedia\|QMediaPlayer\|QVideoWidget\|QAudio" src/ android/` 确认为零，否则**运行时才炸**。
+- **必须先做的事**：`grep -rn "QtMultimedia\|QMediaPlayer\|QVideoWidget\|QAudio" python/src/ python/android/` 确认为零，否则**运行时才炸**。
 - **验收**：APK -17.7 MB；`check_apk_qt_libs.py` 断言通过；封面动图/动画覆盖层（`.qsb`）功能不受影响。
 - **回滚**：从黑名单移除一行。
 - **风险**：低-中。最大一条：若有隐藏的动态调用（如属性动画走 Multimedia），只会在特定界面触发。
@@ -1539,12 +1539,12 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 
 - **目标**：让"哪些模型已装/未装、怎么下、怎么校验"这件事成立，而**不改动打包内容**（此阶段 APK 体积不变，回滚代价为零）。
 - **改动文件**：
-  - `src/tools/sr_model_store.py`（新：模型清单解析、已装判定、sha256 校验、断点续传下载、安装目录 = `files/state/models/`）
-  - `src/component/widget/sr_model_table.py`（970 行，加"未安装"状态与触发下载）
-  - `src/tools/sr_backend.py`、`src/tools/platform_mobile.py:GetAndroidModelDir()`
-  - `android/tools/verify_sr_models.py`（新：从 `android/sr_qnn/models/` 生成 `models-manifest.json`，含 name/onnx 文件/sha256/size/URL）
-  - `android/main.py:198 EnsureModels()`（"从 assets 兜底复制"→"校验 + 缺失提示"）
-  - `android/tools/host_test_sr_model_list.py`（扩展：清单解析 + 未装状态的单元测试）
+  - `python/src/tools/sr_model_store.py`（新：模型清单解析、已装判定、sha256 校验、断点续传下载、安装目录 = `files/state/models/`）
+  - `python/src/component/widget/sr_model_table.py`（970 行，加"未安装"状态与触发下载）
+  - `python/src/tools/sr_backend.py`、`python/src/tools/platform_mobile.py:GetAndroidModelDir()`
+  - `python/android/tools/verify_sr_models.py`（新：从 `python/android/sr_qnn/models/` 生成 `models-manifest.json`，含 name/onnx 文件/sha256/size/URL）
+  - `python/android/main.py:198 EnsureModels()`（"从 assets 兜底复制"→"校验 + 缺失提示"）
+  - `python/android/tools/host_test_sr_model_list.py`（扩展：清单解析 + 未装状态的单元测试）
 - **前置**：0.5、A1（体积口径变了）。
 - **验收**：`models-manifest.json` 覆盖 `models.txt` 的 47 条非注释行 / 32 个唯一 onnx；断网中断 3 次后能续传成功；UI 上未装模型明确显示"未安装"且点击可触发下载；本阶段结束时 APK 体积**与 A4 之后一致**（证明没有提前裁剪）。
 - **回滚**：删新模块，`sr_model_table` 恢复。
@@ -1555,7 +1555,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### A3b 模型分包裁剪 + 默认模型 + 离线回退
 
 - **目标**：APK 433 → ≤285 MB（arm64），且离线可用。
-- **改动文件**：`android/tools/patch_buildozer_spec.py`（`--models` 分支只放行默认 2~3 个 onnx；`RuntimeExts` 保持 onnx/txt）、模型准备脚本 `android/tools/prepare_models.py`、`android/main.py`、`src/tools/sr_backend.py`（"仅默认模型"降级）、`android/tools/host_test_sr_proc.py`。
+- **改动文件**：`python/android/tools/patch_buildozer_spec.py`（`--models` 分支只放行默认 2~3 个 onnx；`RuntimeExts` 保持 onnx/txt）、模型准备脚本 `python/android/tools/prepare_models.py`、`python/android/main.py`、`python/src/tools/sr_backend.py`（"仅默认模型"降级）、`python/android/tools/host_test_sr_proc.py`。
 - **前置**：A3a。
 - **验收**：arm64 APK ≤285 MB（叠加 A1 后 ≤260 MB）；**断网冷装后首次启动不报错、超分入口可用但只列默认模型**；`JM_BUNDLE_ALL_MODELS=1` 能出旧的全量包；真机 arm64 上 NUMA/NPU 超分可用（`qnn_manifest.py verify-apk` + 真机跑一次超分）。
 - **回滚**：`JM_BUNDLE_ALL_MODELS=1`。
@@ -1566,7 +1566,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### B1s 解码并发方案 spike（决策门，2 天硬性）
 
 - **目标**：用实测数据决定 B1 走"进程池 + 共享内存回传 QImage"还是"pybind11 把 QImageReader 搬出 GIL"。
-- **改动文件**：**主要是"跑数 + 出结论"，可能不需要新代码** —— 现有 `script/bench_pipeline.py --both --main-thread` 已能给出判据字段；如需补充跨进程 IPC 分布才写 `script/bench_ipc.py`（复用 `android/tools/host_probe_proc.py`）。**原计划的 `bench_ipc.py` 从"必写"降为"按需"。**
+- **改动文件**：**主要是"跑数 + 出结论"，可能不需要新代码** —— 现有 `script/bench_pipeline.py --both --main-thread` 已能给出判据字段；如需补充跨进程 IPC 分布才写 `script/bench_ipc.py`（复用 `python/android/tools/host_probe_proc.py`）。**原计划的 `bench_ipc.py` 从"必写"降为"按需"。**
 - **前置**：0.5、A2（A2 之后单线程已是最优，并发收益才干净）。
 - **⚠ 第三轮实测后的下调（2026-11-09）**：原担心"主线程被 10×18.77ms 占满"**已被否定** —— A2 之后主线程阻塞只有 17.08 ms/页（10 页 171 ms，优于现状 399 ms）。因此 **B1s 不再是"可能推翻 A2"的决策门，而是一个纯增益评估**：
   - 现状主线程已不再是瓶颈（阻塞 −57% 后），B1 的空间在于"**把 23 ms/页的子进程 CPU 并行化**"以及"在 171 ms 阻塞上再压缩"；
@@ -1601,9 +1601,9 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 > **建议（与工程师一致）：先只花 2~3 人日做 B1s，用实测决定那 12 人日要不要花。** 本任务的优先级因此降为 **P2**，其"是否开工"由 B1s 的实测数据回答，而非默认执行。
 
 - **目标（重新表述）**：在 A2 之后的 **171 ms 阻塞** 基线上继续压缩首屏；量化目标由 B1s 给出（不在本任务开工前预设）。
-- **改动文件**（进程池路线）：`src/task/task_qimage.py`、`src/task/task_multi.py`、`src/tools/tool.py`；（pybind11 路线）新增 `native/qimage_reader/`（CMakeLists + pybind11 module）、`android/build_android.sh`（加入编译与 `--load-local-libs`）、`android/tools/patch_buildozer_spec.py`（保证新 .so 进加载清单）。
+- **改动文件**（进程池路线）：`python/src/task/task_qimage.py`、`python/src/task/task_multi.py`、`python/src/tools/tool.py`；（pybind11 路线）新增 `native/qimage_reader/`（CMakeLists + pybind11 module）、`python/android/build_android.sh`（加入编译与 `--load-local-libs`）、`python/android/tools/patch_buildozer_spec.py`（保证新 .so 进加载清单）。
 - **前置**：B1s（**且 B1s 结论必须明确"值得"**）、A2。
-- **验收**：由 B1s 给出基线后确定；固定的两条为——① 内存峰值 +≤30 MB（注意 `src/start.py` 已设 `QT_IMAGEIO_MAXALLOC` 超大 + `setAllocationLimit(0)`，会放大峰值，需统一口径）；② **主线程阻塞不劣化**（这是 A2 的核心成果，不能被 B1 还回去）。
+- **验收**：由 B1s 给出基线后确定；固定的两条为——① 内存峰值 +≤30 MB（注意 `python/src/start.py` 已设 `QT_IMAGEIO_MAXALLOC` 超大 + `setAllocationLimit(0)`，会放大峰值，需统一口径）；② **主线程阻塞不劣化**（这是 A2 的核心成果，不能被 B1 还回去）。
 - **回滚**：开关切回单线程（建议从第一天就做成 `JM_DECODE_CONCURRENCY` 可关）。
 - **风险**：**高**。两条并列：① **pybind11 路线会引入新的原生构建物**，ABI/NEON/16KB 对齐三条门禁都要重新过——等于把 0.1 的验证再来一遍；② **收益可能已被 A2 吃掉大半**，15 人日换 100 ms 量级，性价比需在 B1s 后用数据判断，而不是靠预期。
 - **AVD**：是。
@@ -1612,7 +1612,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### B2 列表去 widget-per-item
 
 - **目标**：首屏 60 条 ≤150 ms，滚动 p95 ≥110 fps。
-- **改动文件**：`src/component/widget/comic_list_widget.py`（`ComicItemWidget` / `AddBookItem` → `QStyledItemDelegate` 自绘）、相关 QSS 收敛（现状每项约 15 个子控件 + 5 处 QSS）。
+- **改动文件**：`python/src/component/widget/comic_list_widget.py`（`ComicItemWidget` / `AddBookItem` → `QStyledItemDelegate` 自绘）、相关 QSS 收敛（现状每项约 15 个子控件 + 5 处 QSS）。
 - **前置**：0.5（要有 before）、0.7（AVD 滚动帧率采集通道）；与 B3 相互独立，可并行。
 - **验收**：首屏 60 条 ≤150 ms；滚动 p95 ≥110 fps；**视觉回归截图逐像素比对**（需要 0.5 阶段就建好基线截图集，见 Q11）。
 - **回滚**：保留旧 widget 实现，用开关切换（建议 `JM_LIST_DELEGATE=1`）。
@@ -1629,13 +1629,13 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 > **B3 的真实价值只剩内存**：方案另一条"+8 MB / 60 页"仍然成立——60 个 `QGraphicsProxyWidget` + `QLabel` 的固定开销不会因为建场快就消失。**因此本任务应按"降内存"重新立项，或整体后延/砍掉。在用户拍板前，B3 不应排进关键路径（优先级 P1 → P2）。**
 
 - **目标（若按内存重新立项）**：60 页建场内存 -8 MB；时间口径改为"建场 p50 不劣化"（`initall` 口径，现 10 ms，回退红线 12 ms）。
-- **改动文件**：`src/view/read/read_graphics.py`（`InitAllQLabel` 的 `QGraphicsProxyWidget`+`QLabel` → 自绘 `QGraphicsItem::drawImage`，保留 `SetPixIem` 对外接口）。
+- **改动文件**：`python/src/view/read/read_graphics.py`（`InitAllQLabel` 的 `QGraphicsProxyWidget`+`QLabel` → 自绘 `QGraphicsItem::drawImage`，保留 `SetPixIem` 对外接口）。
 - **前置**：0.5、0.7；建议在 B1 之后（解码并发稳定后再动显示层）。
 - **验收（重写）**：
   - **内存**：60 页建场 RSS **-8 MB**（这是本任务唯一成立的核心指标）；
   - **时间**：`bench_reader.py --mode initall` p50 **不劣化**（≤12 ms），**不设"≤60ms"目标**——原目标已失去意义；
   - 解码性能单列在 `bench_pipeline.py`，不属于本任务验收范围；
-  - 双指缩放/平移不回退（`android/tools/host_test_pinch.py` 已有现成用例）。
+  - 双指缩放/平移不回退（`python/android/tools/host_test_pinch.py` 已有现成用例）。
 - **回滚**：开关切回 proxy 实现。
 - **风险**：**高**。最大一条：缩放/平移的手势与焦点行为在 proxy 下有 Qt 兜底，改成自绘后要自己实现命中与坐标变换，容易在真机触摸上出问题。
 - **AVD**：是（触摸缩放/平移必测 + 内存采集）。
@@ -1644,7 +1644,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### W1a JDK25/Gradle9 收口验证
 
 - **目标**：确认 `versions.env` 里"0.88 起 JDK25 + Gradle 9.x"这个声明是真的能构建的。
-- **改动文件**：`android/tools/versions.env`（只读确认）、`android/tools/resolve_jdk.sh`、`android/tools/wsl_patch_gradle_mem.sh`、`android/build_android.sh`（环境检查段）。
+- **改动文件**：`python/android/tools/versions.env`（只读确认）、`python/android/tools/resolve_jdk.sh`、`python/android/tools/wsl_patch_gradle_mem.sh`、`python/android/build_android.sh`（环境检查段）。
 - **前置**：无。
 - **验收**：用 JDK 25 + Gradle ≥9.1 出一次包，`build-info`（0.3 之后）确认版本；`resolve_jdk.sh --check` 输出符合区间。
 - **回滚**：`JM_JDK_MAX`/`JM_GRADLE_MIN` 回退。
@@ -1659,7 +1659,7 @@ src/start.py:78  import images_rc   ← 手工加的，注释"此处不能删除
 #### W2 CI 补 3 道门 + 环境版本对齐
 
 - **目标**：把"回归靠人记"变成"PR 必过"。
-- **改动文件**：`.github/workflows/android.yml`（已存在宿主回归）、`.github/workflows/CI.yml`、新增/修改 `android/tools/check_*`（页对齐干跑、体积预算）。
+- **改动文件**：`.github/workflows/android.yml`（已存在宿主回归）、`.github/workflows/CI.yml`、新增/修改 `python/android/tools/check_*`（页对齐干跑、体积预算）。
 - **要补的三道门**：① 页对齐干跑（不构建 APK，对已编译 `.so` 或对构建产物做 check）；② 体积预算（APK 超阈值直接红，需要 0.5 的基线数值）；③ 夜间 x86_64 构建（成本待评估，因为冷构建几十分钟）。
 - **前置**：0.2（审计）、0.6（bench 脚本可被 CI 调用）、0.5（体积预算阈值）。
 - **验收**：故意引入一个不对齐的 .so / 超预算的体积，PR 变红；正常 PR 绿灯。
@@ -1893,7 +1893,7 @@ graph TD
 | --- | -------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | B-1 | **0.1b p4a dist 用 NDK r30 编不过 / 编过但仍不对齐**（p4a 只保证 ≤28c）        | **整条链的全部下游**（0.3/A1/A2/A3/B2/B3 都无法在 AVD/真机验证） | `build-<abi>.log` 报 libpython/openssl 编译错误；或编过但 `avd_verify.sh` 仍报 `libc++_shared.so program alignment (4096)` | ① `JM_NDK_VERSION=28.2.13676358` 回退（方案已留，r28 起默认 16KB 对齐，**这是首选，因为它最可能一次成功**）；② **手动用 r28+ 重编 `libc++_shared.so` 并替换进 p4a dist**（实测已定位元凶就是它，可直接定点手术）；③ 检查是否两份 libc++ 并存（Qt 官方库用 r27.2 编，方案 N3），删掉旧的那份；④ 最坏 `ALLOW_UNALIGNED=1` + 0.2 审计记录先发给非 16KB 设备用户，把合规债挂着 |
 | B-2 | **AVD 装不上包**（`Pixel_9a` 是 android-37.2，包是 targetSdk/minSdk 34） | 所有 AVD 验证、每批的暂停点                               | `adb install` 返回 `INSTALL_FAILED_*`                                                                            | ① 固定用 `Pixel_8a`（android-36.1）；② 临时把 `JM_MIN_SDK` 下调一档专门出测试包；③ 实在不行改用 arm64 真机 + `JM_API_LEVEL` 对齐的真机验证（成本更高，且失去"可重复"）                                                                                                                                         |
-| B-3 | **0.6 基准脚本无法脱离临时环境**                                           | 0.5、所有性能验收、W2 的体积预算                            | 脚本在干净环境跑不起来 / 三项指标 CV > 5%                                                                                     | ① 先只做"最小可信子集"（冷启、单页解码、开章 3 项），用 `time.perf_counter` 手写；② 复用 `android/tools/host_test_*.py` 里已有的计时逻辑；③ 最坏：用"人工 + 录屏帧率"做验收，并在文档里声明精度局限                                                                                                                           |
+| B-3 | **0.6 基准脚本无法脱离临时环境**                                           | 0.5、所有性能验收、W2 的体积预算                            | 脚本在干净环境跑不起来 / 三项指标 CV > 5%                                                                                     | ① 先只做"最小可信子集"（冷启、单页解码、开章 3 项），用 `time.perf_counter` 手写；② 复用 `python/android/tools/host_test_*.py` 里已有的计时逻辑；③ 最坏：用"人工 + 录屏帧率"做验收，并在文档里声明精度局限                                                                                                                           |
 | B-4 | **A3 模型下载源不可达 / 无合规托管**                                        | A3b 全期（2~3 周的最大单项收益）                           | 无法提供稳定的 `models-manifest.json` URL                                                                             | ① A3a 先只做"本地导入"（用户手动放模型到 `files/state/models/`），把"网络下载"推后一期；② 用打包外的 CDN/对象存储；③ 若都不行，A3 降级为"只裁掉永不使用的模型"（收益从 -150MB 降到 -30~50MB）                                                                                                                                 |
 | B-5 | **B1 pybind11 分支**                                             | B1 工期从 3 周变成 5~6 周，且要重跑 16KB 门禁                | B1s 得出"IPC > 5 ms"                                                                                             | ① 优先在进程池里做"共享内存 + QImage 稳定缓冲"避免 pickle 大块数据；② 若必须 pybind11，把"新 .so 过门禁"作为独立子任务排进关键路径（不要藏在 B1 里）；③ 兜底：只做"预取 + 解码流水线重叠"，不做跨线程并行（收益减半但零新增原生物）                                                                                                                    |
 | B-6 | **视觉回归基线缺失**                                                   | A1（图标静默消失）、B2（1px 差异）                          | 无法做逐像素比对                                                                                                       | ① 在批次 1 就建基线截图集（8 个界面 × 2 分辨率），成本 1 人日；② 若来不及，退化为"人工目视 8 个界面"并在验收标准里降级说明                                                                                                                                                                                       |
@@ -1915,13 +1915,13 @@ graph TD
 
 ### Q1【度量能力】基准脚本缺失，怎么办？——**已解决，剩口径校准**
 
-- **结论（2026-11-09）**：方案 A 被采纳且已执行 —— 工程师交付了 `script/bench_{startup,pipeline,reader,common}.py`，统一 CLI、口径写在 `--help`，首帧判定复用 `src/start.py` 的 `Run(afterShow=...)` 而**未改动被测业务代码**（这点很重要，避免了"为了测量而改被测对象"的失真）。
+- **结论（2026-11-09）**：方案 A 被采纳且已执行 —— 工程师交付了 `script/bench_{startup,pipeline,reader,common}.py`，统一 CLI、口径写在 `--help`，首帧判定复用 `python/src/start.py` 的 `Run(afterShow=...)` 而**未改动被测业务代码**（这点很重要，避免了"为了测量而改被测对象"的失真）。
 - **剩余待办 0.5 人日**：① 加 `--legacy-pil` 分支（转 Q15）；② 澄清 60 页建场的口径（5.07ms vs 方案 154ms 差 30 倍，B3 的 ≤60ms 阈值依赖它）。
 - **新增注意**：三脚本依赖装了 `curl_cffi` 的解释器（`venv-test` 或系统 python3）；`venv311` 会在 preflight 阶段 exit 2。
 
 ### Q2【A2 契约】`SegmentationPicture` 的 bytes 契约要不要动？
 
-- 背景：`SegmentationQImage` 返回 `QImage`，`SegmentationPicture` 返回 `bytes`，调用方（`src/task/task_multi.py:31` 跨进程 pickle、`src/tools/mobile_ui_diag.py:1122/1203/1237` 按字节数打印）都按 bytes 消费。但**看图线程 `TaskQImage` 已经有 QImage 直通路径，只是被 `IsAndroid()` 挡着**。
+- 背景：`SegmentationQImage` 返回 `QImage`，`SegmentationPicture` 返回 `bytes`，调用方（`python/src/task/task_multi.py:31` 跨进程 pickle、`python/src/tools/mobile_ui_diag.py:1122/1203/1237` 按字节数打印）都按 bytes 消费。但**看图线程 `TaskQImage` 已经有 QImage 直通路径，只是被 `IsAndroid()` 挡着**。
 - 方案 A（推荐）：**双入口、只放开看图线程的门控**。`SegmentationPicture` 保持 bytes 契约零改动；`TaskQImage` 先试 `_SegmentQImage`，失败回退 bytes 路径。理由：收益全在单线程看图路径上；进程池本该回传 bytes（跨进程 pickle QImage 是 B1 的活）；改动量 = 一行 + 兜底分支，回滚 = 一行 revert。
 - 方案 B：全局改成返回 QImage，所有调用方跟着改。会波及 `task_waifu2x.py:113`、`user_handler.py:1103/1106`、`mobile_ui_diag` 三处诊断，且跨进程路径必须引入共享内存 → **等于把 B1 提前做**，A2 会从 1 人日变成 5+ 人日。
 - 方案 C：只在 `SegmentationPicture` 内部换解码器（PIL→Qt），仍返回 bytes。会多一次 encode/decode，**大概率吃掉全部收益**（这正是 `SegmentationPictureQt` 现在的做法）。
@@ -1951,7 +1951,7 @@ graph TD
 
 ### Q5【A3 产品决策】模型按需下载，接受多大程度的离线退化？——**问题要改成"可回答"的形式**
 
-- 背景：`android/sr_qnn/models/` 实测 **199 MB**（`models.txt` 47 条非注释行 / 32 个唯一 onnx）。方案建议只带 2~3 个默认模型（waifu2x cunet up2x + realcugan se up2x），其余首次使用时下载。
+- 背景：`python/android/sr_qnn/models/` 实测 **199 MB**（`models.txt` 47 条非注释行 / 32 个唯一 onnx）。方案建议只带 2~3 个默认模型（waifu2x cunet up2x + realcugan se up2x），其余首次使用时下载。
 - **⚠ 提问方式的修正（来自工程师，我认为很关键）**：**"要不要做 A3" 不是一个能回答的问题**——它没有判据，用户只能凭感觉答"做/不做"。而 A3 是**只剩的产品决策**（B1/B3 都已被实测削弱），所以它必须被问成一个具体的、能据此决策的形式。
 - **建议改成下面这一组具体问题（每条都有明确答案是/否）**：
   1. **离线首屏/首次超分的等待时间上限是多少？** 例如"首次超分需联网下载 5~17 MB/模型，耗时约 1.5 s 能否接受"——若可接受，A3 走"全按需"；若不可接受，A3 必须带更多默认模型（直接改变 A3b 体积目标）。
@@ -1991,13 +1991,13 @@ graph TD
 - 我给的方案 A（`source.include_exts` 走 private.tar）/ B（`res/raw/`）**都没被采纳**。
 - **实际实现（更优）**：
   - 打包侧走 `android.add_assets`，但**只含 json**（不是模型那种 45MB 副本，体积可忽略）；
-  - 读取端 `src/config/build_info.py` 双路径：Android 优先 `assets:/build-info.json`（Qt `QFile` 的 assets scheme），桌面回退读 `android/build_logs/build-info.json`；
+  - 读取端 `python/src/config/build_info.py` 双路径：Android 优先 `assets:/build-info.json`（Qt `QFile` 的 assets scheme），桌面回退读 `python/android/build_logs/build-info.json`；
   - 好处：**`unzip` 就能看到 build-info，不必解 private.tar**——正是"从 APK 反查工具链"这个原始需求想要的效果；同时桌面开发环境也能读到。
 - **结论：Q8 关闭。** 印证了一条：当"两个方案都不完美"时，正确答案往往是"两条路都留、按平台选"，而不是二选一。
 
 ### Q9【A1 的 `.rcc` 与 `images_rc.py` 是否入库】
 
-- 方案 A（推荐）：`src/images.rcc` **入库**（14MB，生成只需一次，但 Android 打包与宿主测试都依赖它）；`src/images_rc.py` **保留**（回退开关要用），但**从 p4a 打包白名单里排除**以拿到体积收益。
+- 方案 A（推荐）：`python/src/images.rcc` **入库**（14MB，生成只需一次，但 Android 打包与宿主测试都依赖它）；`python/src/images_rc.py` **保留**（回退开关要用），但**从 p4a 打包白名单里排除**以拿到体积收益。
 - 方案 B：两者都不入库（构建时生成）。风险：新克隆的人一跑就崩，CI 要加生成步骤。
 - **不决定的后果**：A1 的 -22MB 收益可能拿不到（如果 `.py` 仍在包内），或回退开关失效（如果 `.py` 被删）。
 
@@ -2080,7 +2080,7 @@ graph TD
 
 - 原文：0.1 是一项任务，"用 NDK ≥ r28 重编 4 个库 + recipe 产物"。
 - 修订：0.1a（本项目 CMake 自编的 `libsr_qnn*`，分钟级，风险低-中）/ 0.1b（p4a dist 全量重建，4~6 小时机时，风险高）。
-- 理由：`android/recipes/` 里只有 `curl_cffi`/`jmcomic`，其余是 p4a 内置配方；两半的失败模式与代价完全不同。合并成一项会让"卡住的到底哪一半"不可见。
+- 理由：`python/android/recipes/` 里只有 `curl_cffi`/`jmcomic`，其余是 p4a 内置配方；两半的失败模式与代价完全不同。合并成一项会让"卡住的到底哪一半"不可见。
 
 ### 修订 3：0.3 并入 0.1b 的同一次构建
 
@@ -2125,17 +2125,17 @@ graph TD
   2. **B2 / B3 不得把绘制逻辑写进数据模型**（delegate 与 item 都要保持"模型只出数据"），否则 C++ 侧无法复用模型层。
   3. **A1 的资源机制不得依赖 Python import 时机**（`QResource.registerResource` 是可迁移的，`import images_rc` 不是）→ 这正好和 A1 的推荐方案一致。
 
-### 修订 11：0.2 的审计归档位置从 `android/build_logs/` 改为被跟踪目录 ——**已被实现采纳**
+### 修订 11：0.2 的审计归档位置从 `python/android/build_logs/` 改为被跟踪目录 ——**已被实现采纳**
 
-- 原文：`android/build_logs/unaligned_override.json`。
-- 问题：`.gitignore:168` 忽略了整个 `android/build_logs/`。记录写在那里等于"本地私有"，一次 `git clean -xdf` 或换机器就没了——恰好违背了 0.2 "任何放行都能被审计"的目标。
+- 原文：`python/android/build_logs/unaligned_override.json`。
+- 问题：`.gitignore:168` 忽略了整个 `python/android/build_logs/`。记录写在那里等于"本地私有"，一次 `git clean -xdf` 或换机器就没了——恰好违背了 0.2 "任何放行都能被审计"的目标。
 - 修订：审计记录写入**被跟踪**的追加式文件。
-- **实现结果（2026-11-09）**：新增 `android/tools/record_unaligned_override.py` 采用**双写**——`build_logs/unaligned_override.json`（就地可见）+ `docs/build_audit/unaligned_overrides.jsonl`（仓库内追加主档），并在文件头注释里写明了"`build_logs` 被 gitignore、清缓存就没了"这个理由。
+- **实现结果（2026-11-09）**：新增 `python/android/tools/record_unaligned_override.py` 采用**双写**——`build_logs/unaligned_override.json`（就地可见）+ `docs/build_audit/unaligned_overrides.jsonl`（仓库内追加主档），并在文件头注释里写明了"`build_logs` 被 gitignore、清缓存就没了"这个理由。
 - **⚠ 唯一残留缺口**：`docs/build_audit/` 目录**至今未被创建**（脚本会在第一次放行时临场 mkdir）→ 那一刻它是个未跟踪目录，仍暴露在 `git clean -df` 下。**必须现在就提交一个 `docs/build_audit/README.md`**，让审计主档的"家"从第一天起就在版本库里。
 
 ### 修订 12：批次 1 的第一步是"保全 before 证据"
 
-- 两个 0.87 APK 既未入库、又在 `.gitignore:159` 的 `android/*.apk` 忽略范围内。**在跑任何重编之前**，先转存到 `docs/bench_raw/0.87/`（或任何被跟踪的位置）并记录 sha256。这是 0.5 能否成立的前提，成本 10 分钟。
+- 两个 0.87 APK 既未入库、又在 `.gitignore:159` 的 `python/android/*.apk` 忽略范围内。**在跑任何重编之前**，先转存到 `docs/bench_raw/0.87/`（或任何被跟踪的位置）并记录 sha256。这是 0.5 能否成立的前提，成本 10 分钟。
 
 ### 修订 13（2026-11-09 实测后）：0.1b 从"关键路径之一"升为"整条链的唯一入口"，0.1a 摘出关键路径
 
@@ -2173,8 +2173,8 @@ graph TD
 - 第二轮 dist 实况显示：x86_64 已是 `194 对齐 / 1 未对齐`，**唯一未对齐的正是 `libsr_qnn_proc.so`** → **0.1a 回调为 P0**（它很可能就是 x86_64 启动修复的最后一块）。
 - 同时 0.1b 的工作量从"p4a dist 全量重建（2 人日 + 高风险）"收窄为"覆盖 arm64 两份同名 libc++（1 人日 + 中风险）"，因为 **NDK 30 重编后 Qt/p4a 侧已合规**，我原先最担心的"N1：p4a 只保证 ≤28c"没有发生。
 - **新增硬规则**：**dist 目录的对齐状态 ≠ APK 的对齐状态**（APK 里还有从 wheel 拷入的库）。0.1a/0.1b 的完成判定**只认 `check_elf_page_align.py` 对 APK 的结果**，不认 dist 目录的统计。
-- arm64 侧推荐修法：让 `android/recipes/curl_cffi` **不再复制**那份 `libc++_shared-d523468d.so`（同 md5 的重复副本），而不是"把两份都覆盖一遍"——从根上少一份 1.3 MB，也少一处将来会再次跑偏的地方。
-- **第三轮补充**：`android/sr_qnn/cpp/CMakeLists.txt` 用 `foreach` 覆盖两个 target，两 ABI 重编后 **PT_LOAD 全 `0x4000`** → **0.1a 已完成**；x86_64 侧预期 `194 对齐 / 0 未对齐 / 1 跳过`。**0.1 这一大项至此收口**，剩余唯一待确认项是 APK 级复验。
+- arm64 侧推荐修法：让 `python/android/recipes/curl_cffi` **不再复制**那份 `libc++_shared-d523468d.so`（同 md5 的重复副本），而不是"把两份都覆盖一遍"——从根上少一份 1.3 MB，也少一处将来会再次跑偏的地方。
+- **第三轮补充**：`python/android/sr_qnn/cpp/CMakeLists.txt` 用 `foreach` 覆盖两个 target，两 ABI 重编后 **PT_LOAD 全 `0x4000`** → **0.1a 已完成**；x86_64 侧预期 `194 对齐 / 0 未对齐 / 1 跳过`。**0.1 这一大项至此收口**，剩余唯一待确认项是 APK 级复验。
 
 ### 修订 18（第三轮实测后）：A2 的判据改为"主线程 CPU + 主线程阻塞"双指标
 
@@ -2198,13 +2198,13 @@ graph TD
 ### 修订 20（2026-11-09，含一次自我订正）：本机私有配置——机制早已存在，缺的只是文档
 
 - **我最初的说法（错误，已订正）**：我写"`local.env` 的'不 git add'只是注释里的口头约定，没有任何机制阻止 `git add -A` 带走它"。
-- **实测反驳**（`git check-ignore -v android/tools/local.env`）：
+- **实测反驳**（`git check-ignore -v python/android/tools/local.env`）：
   ```
-  .gitignore:178:android/tools/local.env    android/tools/local.env
+  .gitignore:178:python/android/tools/local.env    python/android/tools/local.env
   ```
   且 `.gitignore:177` 就带着注释"本机路径配置（模板 `local.env.example` 入库，实际配置不入库）"，`git status` 里也无该文件痕迹。**机制早在项目里就有了，`git add -A` 不会带走被忽略的文件（除非 `-f`）。我的"缺失"判断是错的。**
-- **真正缺的是文档**：`grep -n local.env android/tools/README.md` 原本 0 命中 → 新人不知道这条纪律的存在，也就不会在改写它时保持同样的纪律。**机制能防住工具，防不住人；文档才能防住人。**
-- **修订（已由工程师落地）**：`android/tools/README.md` 的"约定"节补四条——① `tools/local.env` 是本机唯一不入库的配置文件，模板入库；② **缺省时一切回退 `versions.env` 默认值**（新人不建它也能跑）；③ 为什么必须忽略：提交后别人拿到"指向我机器"的路径，**不报错、只在他机器上静默失效**；④ 改它时不要 `git add -A`，示例写进 `.example`。
+- **真正缺的是文档**：`grep -n local.env python/android/tools/README.md` 原本 0 命中 → 新人不知道这条纪律的存在，也就不会在改写它时保持同样的纪律。**机制能防住工具，防不住人；文档才能防住人。**
+- **修订（已由工程师落地）**：`python/android/tools/README.md` 的"约定"节补四条——① `tools/local.env` 是本机唯一不入库的配置文件，模板入库；② **缺省时一切回退 `versions.env` 默认值**（新人不建它也能跑）；③ 为什么必须忽略：提交后别人拿到"指向我机器"的路径，**不报错、只在他机器上静默失效**；④ 改它时不要 `git add -A`，示例写进 `.example`。
 - **方法论教训（这条比结论本身重要）**：**任何"缺少某机制"的判断，必须用 `git check-ignore -v <path>` / 实际命令验证，不能从"我以为没有"或"没在 grep 结果里看到"推断。** 这一轮工程师把 git 语义说反了（加 ignore 会不会加重风险），我把"机制是否存在"说反了（其实早已存在）——**两处错误的共同点都是"凭印象推断工具行为"，而工具的正确行为都是一条命令就能验证的。** 这跟"不测就断言性能有收益"是同一类问题：**在这个项目里，凡涉及工具/度量的事实，一律先跑一条命令再说。**
 
 ### 修订 21（2026-11-09）：每条验收判据必须落到"一条命令 + 一个字段"

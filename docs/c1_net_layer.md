@@ -2,7 +2,7 @@
 
 - 版本：v2（取代 v1 的"Python 子进程桥"）
 - 日期：2026-11-02
-- 代码：`android/c1_shell/net_client.{h,cpp}`；CA：`android/c1_shell/assets/cacert.pem`
+- 代码：`cpp/shell/net_client.{h,cpp}`；CA：`cpp/shell/assets/cacert.pem`
 - 决策依据：用户拍板"把 C3 提前，一次性去掉 Python 运行时"
 
 ---
@@ -114,7 +114,7 @@ signals:
 | `SSLErr` | TLS 握手失败（含缺 CA、域名不匹配） |
 | `NetError` | 其它传输层错误 |
 
-词表与 `src/tools/status.py` 的 `Status` 同名，Python 版的日志经验可直接复用。
+词表与 `python/src/tools/status.py` 的 `Status` 同名，Python 版的日志经验可直接复用。
 
 ## 5. 自检钩子（W7 取证入口）
 
@@ -138,8 +138,8 @@ URL 可用环境变量 `JM_C1_NET_URL` 覆盖（默认 `https://www.baidu.com/`�
 
 | 层 | 命令 | 覆盖 |
 |---|---|---|
-| 桌面 | `bash android/c1_shell/host_tests/run_host_tests.sh` | 200 / 404 / 超时 / 截断 / POST / 拒连重试 / 非法 URL / 单通道（9 项） |
-| 设备 | `bash android/tools/c1_w7_regression.sh --apk <apk>` | 安装、启动、`net_selftest`、PSS、gfxinfo、两条门禁 |
+| 桌面 | `bash cpp/shell/host_tests/run_host_tests.sh` | 200 / 404 / 超时 / 截断 / POST / 拒连重试 / 非法 URL / 单通道（9 项） |
+| 设备 | `bash python/android/tools/c1_w7_regression.sh --apk <apk>` | 安装、启动、`net_selftest`、PSS、gfxinfo、两条门禁 |
 | 门禁 | `build_wsl.sh` 内置 | APK 含 `assets/cacert.pem`、`lib/<abi>/libssl.so`、`libcrypto.so`、`libplugins_tls_qopensslbackend_<abi>.so`；16KB 对齐；`libsr_qnn.so` 直链 |
 
 ### 实测（2026-11-02）

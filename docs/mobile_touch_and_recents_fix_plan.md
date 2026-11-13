@@ -1,9 +1,9 @@
 # 真机问题定位与修复方案（表格触控 / 搜索记录 / 后台任务）
 
 > 面向 0.52 版本真机反馈的 4 个问题。全部结论都落到具体文件与行号，修复方案按"最小改动 + 同源逻辑一次收口"给出。
-> 涉及的核心模块：`src/tools/mobile_ui_touch.py`（触控路由）、`src/tools/mobile_ui_base.py`（判定阈值/窗口类型）、
-> `src/component/tab/base_table_widget.py`、`src/component/line_edit/*`、`android/java/org/jmcomic/SafService.java`、
-> `android/tools/patch_android_manifest.py`。
+> 涉及的核心模块：`python/src/tools/mobile_ui_touch.py`（触控路由）、`python/src/tools/mobile_ui_base.py`（判定阈值/窗口类型）、
+> `python/src/component/tab/base_table_widget.py`、`python/src/component/line_edit/*`、`python/android/java/org/jmcomic/SafService.java`、
+> `python/android/tools/patch_android_manifest.py`。
 
 ## 落地状态（2026-10-26，0.53 构建）
 
@@ -39,15 +39,15 @@
 
 | 位置 | 现状 | 问题 |
 |---|---|---|
-| `src/tools/mobile_ui_touch.py:1475-1487` `MakeScrollable()` | 只写了 `area.setVerticalScrollMode(ScrollPerPixel)` | **`setHorizontalScrollMode` 全仓库从未被设置过**（唯一的 `ui_book_info.py:423` 是书页列表，不是表格） |
-| `src/component/tab/base_table_widget.py:15` | 只设垂直逐像素 | 水平仍是按列跳 |
-| `src/interface/ui_sr_select_widget.py:41` | 裸 `QTableWidget`，连垂直都没设 | 全靠 `MakeScrollable` 兜底补垂直，水平必然按列跳 |
-| `src/interface/ui_download.py:32` | 裸 `QTableWidget`（11 列），两个方向都没设 | 同上，问题最重 |
+| `python/src/tools/mobile_ui_touch.py:1475-1487` `MakeScrollable()` | 只写了 `area.setVerticalScrollMode(ScrollPerPixel)` | **`setHorizontalScrollMode` 全仓库从未被设置过**（唯一的 `ui_book_info.py:423` 是书页列表，不是表格） |
+| `python/src/component/tab/base_table_widget.py:15` | 只设垂直逐像素 | 水平仍是按列跳 |
+| `python/src/interface/ui_sr_select_widget.py:41` | 裸 `QTableWidget`，连垂直都没设 | 全靠 `MakeScrollable` 兜底补垂直，水平必然按列跳 |
+| `python/src/interface/ui_download.py:32` | 裸 `QTableWidget`（11 列），两个方向都没设 | 同上，问题最重 |
 
 **为什么问题恰好在"左右滑动"上暴露**：这两个表的横向内容都超出竖屏，横向滚动才是主用方向——
 
 * 超分模型选择表：`setting_sr_select_view.py:29-32` 固定列宽 `200+150+100+100 = 550px`，
-  而真机逻辑宽只有 **480px**（`android/build_logs/waifu2x_page2.png` 实测），必然横向滚动；
+  而真机逻辑宽只有 **480px**（`python/android/build_logs/waifu2x_page2.png` 实测），必然横向滚动；
 * 下载列表：`download_view.py:42-83` 11 列，只有第 1 列 200px、第 2 列 300px 被显式设宽，
   其余列取默认 100px ⇒ 总宽 ≈ **1100px+**（还叠加竖表头约 30px），必须横向滚动才能看到右侧列。
   于是"轻轻一划就冲到最后一列、中间列永远停不住" = 既"不跟手"，又"信息看不全"。
@@ -65,7 +65,7 @@
 **P0（真正解决"不跟手"，一行级改动，覆盖所有表格）**
 
 ```python
-# src/tools/mobile_ui_touch.py  MakeScrollable()
+# python/src/tools/mobile_ui_touch.py  MakeScrollable()
 if isinstance(area, QAbstractItemView):
     # 逐像素滚动是 QScroller 能 1:1 跟手的前提：ScrollPerItem 下
     # 一个手指像素 = 一整行/一整列（见文件头说明）。垂直、水平都要设。
@@ -74,7 +74,7 @@ if isinstance(area, QAbstractItemView):
 ```
 
 ```python
-# src/component/tab/base_table_widget.py  __init__
+# python/src/component/tab/base_table_widget.py  __init__
 self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
 self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)   # 新增
 ```
@@ -106,13 +106,13 @@ self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)   # 新增
 
 | 文件 | 改动 |
 |---|---|
-| `src/tools/mobile_ui_touch.py` | `MakeScrollable()` 补 `setHorizontalScrollMode`；新增 `MakeItemViewsPixelScroll()`；`_TuneScroller()` 手感参数 |
-| `src/component/tab/base_table_widget.py` | 补水平逐像素 |
-| `src/tools/mobile_ui_hooks.py` | Apply/OnShown 调 `MakeItemViewsPixelScroll` + `FitTablesForPortrait` |
-| `src/tools/mobile_ui_touch.py`（`_ScrollWatcher.Flush`） | 新表建出来时补逐像素 + 排版 |
-| `src/tools/mobile_ui_layout.py` | 新增 `FitTablesForPortrait()` |
-| `src/view/download/download_view.py` | 列宽改自适应 + 竖屏隐藏列；去掉无效的 Stretch 调用 |
-| `src/view/setting/setting_sr_select_view.py` | 列宽改"名称 Stretch + 其余按内容"，并夹到屏宽内 |
+| `python/src/tools/mobile_ui_touch.py` | `MakeScrollable()` 补 `setHorizontalScrollMode`；新增 `MakeItemViewsPixelScroll()`；`_TuneScroller()` 手感参数 |
+| `python/src/component/tab/base_table_widget.py` | 补水平逐像素 |
+| `python/src/tools/mobile_ui_hooks.py` | Apply/OnShown 调 `MakeItemViewsPixelScroll` + `FitTablesForPortrait` |
+| `python/src/tools/mobile_ui_touch.py`（`_ScrollWatcher.Flush`） | 新表建出来时补逐像素 + 排版 |
+| `python/src/tools/mobile_ui_layout.py` | 新增 `FitTablesForPortrait()` |
+| `python/src/view/download/download_view.py` | 列宽改自适应 + 竖屏隐藏列；去掉无效的 Stretch 调用 |
+| `python/src/view/setting/setting_sr_select_view.py` | 列宽改"名称 Stretch + 其余按内容"，并夹到屏宽内 |
 
 ---
 
@@ -120,7 +120,7 @@ self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)   # 新增
 
 ### 2.1 根因 A（决定性）：`indexAt()` 用错了坐标系
 
-`src/tools/mobile_ui_touch.py:420-424`：
+`python/src/tools/mobile_ui_touch.py:420-424`：
 
 ```python
 local = view.mapFromGlobal(QPoint(...))     # ← 表格自身坐标系（含表头/边框）
@@ -192,7 +192,7 @@ press = seq["press"]          # 点按的命中一律用按下点（与 Qt 原�
 
 ### 3.1 根因 A：搜索记录弹层是一个**独立顶层窗口**（Qt.ToolTip）
 
-`src/component/line_edit/search_line_edit.py:30-42`：
+`python/src/component/line_edit/search_line_edit.py:30-42`：
 
 ```python
 self.widget = QWidget()
@@ -298,7 +298,7 @@ class SearchLineEdit(QLineEdit):
 
 ### 4.1 根因：SAF 选择器的 Intent 把 `EXCLUDE_FROM_RECENTS` 打到了**主任务**上
 
-`android/java/org/jmcomic/SafService.java:185-203`：
+`python/android/java/org/jmcomic/SafService.java:185-203`：
 
 ```java
 Intent intent = new Intent(SafService.this, SafPickActivity.class);
@@ -327,7 +327,7 @@ startActivity(intent);
    让 `NEW_TASK` 真的开一个新任务，`excludeFromRecents` 只影响这个一次性任务：
 
 ```xml
-<!-- android/tools/patch_android_manifest.py  ComponentsXml -->
+<!-- python/android/tools/patch_android_manifest.py  ComponentsXml -->
 <activity android:name="org.jmcomic.SafPickActivity"
           android:exported="false"
           android:process=":saf"
@@ -390,7 +390,7 @@ Python 主线程结束后 Activity 可能已不再属于任何任务，而 `:saf
 SurfaceView 的内容画在一块**独立的 Surface** 上，**不属于 View 树**，
 而 Android 的任务快照 / 截屏 / 多任务预览是按 **View 层级**合成抓取的 ——
 抓不到这块独立 Surface，于是整张卡片是全黑（表现为"没有本应用的后台视图"）。
-仓库里上一次排查留下的 `android/build_logs/repro_home.png` 是一张全黑图，正是同一现象。
+仓库里上一次排查留下的 `python/android/build_logs/repro_home.png` 是一张全黑图，正是同一现象。
 
 旁证：视频/相机类应用"最近任务缩略图一块黑"是同一机制；
 Qt 6.10+ 为此提供了 `QT_ANDROID_SURFACE_CONTAINER_TYPE` 覆盖容器类型
@@ -399,12 +399,12 @@ TextureView 通过 SurfaceTexture 把画面合成进 View 树，快照/截屏都
 
 ### 4.6 修复
 
-1. **`android/main.py`**：新增 `ApplySurfaceContainer()`，在 `QApplication` **之前**
+1. **`python/android/main.py`**：新增 `ApplySurfaceContainer()`，在 `QApplication` **之前**
    把 `QT_ANDROID_SURFACE_CONTAINER_TYPE` 默认设为 `1`（TextureView）；该变量在窗口
    初始化时只读一次，晚设无效。`<AppDataDir>/sr_env.txt` 里写同名键可覆盖
    （想退回 SurfaceView 就写 `QT_ANDROID_SURFACE_CONTAINER_TYPE=0`）。
    `DumpDiagnostics` 会把实际取值打进启动日志。
-2. **`src/tools/mobile_ui_hooks.InstallAppStateHook()`**（`Apply` 里安装）：
+2. **`python/src/tools/mobile_ui_hooks.InstallAppStateHook()`**（`Apply` 里安装）：
    - `ApplicationInactive`（≈onPause，画面还在）→ `repaint()` 把当前这一帧推出去，
      保证系统抓快照时拿到的是"当前这一屏"；
    - `ApplicationActive` → `OnShown()` 重排 + 强制重绘（顺带修"从多任务切回来黑屏"）；
@@ -413,7 +413,7 @@ TextureView 通过 SurfaceTexture 把画面合成进 View 树，快照/截屏都
 ### 4.7 取证工具（下次真机一条命令定性）
 
 ```bash
-bash android/tools/check_recents.sh          # 按 HOME 切后台之后再跑
+bash python/android/tools/check_recents.sh          # 按 HOME 切后台之后再跑
 ```
 输出分 5 段：Activity 栈里有没有 `Task{...#N A=...:org.jmcomic.jmcomic}`、
 `dumpsys activity recents` 里有没有记录与 `thumbnailStatus/hasValidSnapshot`、
@@ -457,12 +457,12 @@ Android 在应用**离开前台那一刻**抓任务快照，抓的是窗口里�
 
 ### 4.10 修复（0.55/0.56）
 
-1. **把首帧提前**(`src/start.py` + `android/main.py`)：`Run()` 新增 `afterShow` 回调，
+1. **把首帧提前**(`python/src/start.py` + `python/android/main.py`)：`Run()` 新增 `afterShow` 回调，
    `main.show()` 之后先 `app.processEvents()` 把首帧真正送出去，再跑
    `EnsureModels / InstallQnnCompat / InitSrEngine / DumpDiagnostics`（都在
    `Main.Init()` 之前，`config.CanWaifu2x` 的时序不变）。
    真机实测：**第 1 秒就已经是应用画面/启动图**（修复前第 1 秒是白屏）。
-2. **窗口背景兜底**(`android/tools/patch_android_manifest.py`)：给 Activity 主题补
+2. **窗口背景兜底**(`python/android/tools/patch_android_manifest.py`)：给 Activity 主题补
    `android:windowBackground` → `res/drawable/jm_window_bg.xml`（深色 `#141414` +
    180dp 居中应用图标）。万一还是抓在首帧之前，卡片上也是"应用启动图"，不再是白块。
    主题模板与 bootstrap 的 `res/drawable` 都由构建脚本幂等写入。
@@ -479,7 +479,7 @@ Android 在应用**离开前台那一刻**抓任务快照，抓的是窗口里�
 | 正常使用 8s 后按 HOME | — | 应用真实界面（顶栏/标签页/加载中吉祥物） |
 | 正常使用 18s（封面已加载）后按 HOME | — | 应用首页**完整画面**（封面/标题/更新时间都在） |
 
-`bash android/tools/check_recents.sh` 可作为后续回归取证。
+`bash python/android/tools/check_recents.sh` 可作为后续回归取证。
 
 ### 4.12 仍存在的客观限制
 
@@ -511,7 +511,7 @@ Android 在应用**离开前台那一刻**抓任务快照，抓的是窗口里�
 
 ## 回归建议（沿用仓库既有宿主回归风格）
 
-新增 2 个 `android/tools/host_test_*.py`（对照 `host_test_tap_gate.py` 的写法，
+新增 2 个 `python/android/tools/host_test_*.py`（对照 `host_test_tap_gate.py` 的写法，
 用 `QTouchEvent` 直接喂事件，不依赖真机）—— **均已实现并通过**：
 
 1. `host_test_table_touch.py`（4 组）：A 滚动计量单位（含"改回 ScrollPerItem 就会
@@ -526,27 +526,27 @@ Android 在应用**离开前台那一刻**抓任务快照，抓的是窗口里�
 
 | 文件 | 改动 |
 |---|---|
-| `src/tools/mobile_ui_touch.py` | `MakeScrollable()` 补 `setHorizontalScrollMode(ScrollPerPixel)`；新增 `MakeItemViewsPixelScroll()` 并在 `EnableTouchScroll()` 里先跑一遍；`_ActivateItemView()` 改用 `viewport()` 坐标；`_finalize()` 的 spin/activate 命中改用手按下点 |
-| `src/tools/mobile_ui_base.py` | `_InPopup()` 把 `Qt.ToolTip` 也算作弹窗（防"候选列表被当普通控件认领"） |
-| `src/tools/mobile_ui_layout.py` | 新增 `FitTableForPortrait()` / `FitTablesForPortrait()`（列宽策略、隐藏低价值列、ElideRight、压缩表头下限）；`ReflowPortrait()` 末尾调用 |
-| `src/tools/mobile_ui_window.py` | `_MobileFilter` 增加 `ClampInnerWidth()`：遮罩对话框内容宽度不超过窗口（Show 时夹宽 + adjustSize，Resize 时只夹宽，避免递归） |
-| `src/component/tab/base_table_widget.py` | 补水平逐像素 |
-| `src/component/line_edit/popup_list.py`（新） | 候选列表图层：手机端子控件图层 + 桌面端原 ToolTip 浮层，几何统一夹紧；`_OutsideHider` 负责点别处收起 |
-| `src/component/line_edit/search_line_edit.py` | 改用 `popup_list`；删掉 `QLabel("asdasdasdasd")` + 第二次 `QHBoxLayout`；`HideListView/ShowListView/CheckClick` 转发 |
-| `src/component/line_edit/tip_line_edit.py` | 同上（DoH 地址 / 代理地址 / 域名候选列表） |
-| `src/view/download/download_view.py` | 竖屏列策略：隐藏 id/时间/速度/转换章节/转换耗时，标题列 Stretch |
-| `src/view/download/download_all_view.py` | 竖屏列策略：隐藏分类，名称列 Stretch |
-| `src/view/download/download_some_view.py` | 竖屏列策略：标题列 Stretch，其余压窄 |
-| `src/view/setting/setting_sr_select_view.py` | 竖屏列策略（隐藏"耗时"）+ 对话框内容宽度夹到窗口内 |
-| `android/java/org/jmcomic/SafService.java` | 去掉 `FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS` |
-| `android/tools/patch_android_manifest.py` | `SafPickActivity` 加 `android:taskAffinity=""`（独立任务） |
-| `android/java/org/jmcomic/SafPickActivity.java` | 注释与实现对齐（说明 taskAffinity 为什么必须） |
-| `android/main.py` | 新增 `ApplySurfaceContainer()`：默认 `QT_ANDROID_SURFACE_CONTAINER_TYPE=1`（TextureView，见 4.5），取值写进启动诊断 |
-| `src/tools/mobile_ui_hooks.py` | 新增 `InstallAppStateHook()`：进后台刷最后一帧 / 回前台重排重绘 / `appState:` 日志 |
-| `android/tools/check_recents.sh`（新） | 多任务取证：任务在不在、快照状态、是否被排除、进程存活、渲染容器类型 |
-| `src/start.py`（0.55） | `Run()` 新增 `afterShow` 回调：`main.show()` 之后先 `processEvents()` 把首帧送出去，再跑重活（见 4.10） |
-| `android/main.py`（0.55） | 新增 `DeferredStartup()`：`EnsureModels` / `InstallQnnCompat` / `InitSrEngine` / `DumpDiagnostics` 全部挪到首帧之后 |
-| `android/tools/patch_android_manifest.py`（0.55/0.56） | 给 Activity 主题补 `android:windowBackground`→`@drawable/jm_window_bg`；幂等写入 bootstrap 的 `res/drawable`（深色 + 180dp 居中图标） |
+| `python/src/tools/mobile_ui_touch.py` | `MakeScrollable()` 补 `setHorizontalScrollMode(ScrollPerPixel)`；新增 `MakeItemViewsPixelScroll()` 并在 `EnableTouchScroll()` 里先跑一遍；`_ActivateItemView()` 改用 `viewport()` 坐标；`_finalize()` 的 spin/activate 命中改用手按下点 |
+| `python/src/tools/mobile_ui_base.py` | `_InPopup()` 把 `Qt.ToolTip` 也算作弹窗（防"候选列表被当普通控件认领"） |
+| `python/src/tools/mobile_ui_layout.py` | 新增 `FitTableForPortrait()` / `FitTablesForPortrait()`（列宽策略、隐藏低价值列、ElideRight、压缩表头下限）；`ReflowPortrait()` 末尾调用 |
+| `python/src/tools/mobile_ui_window.py` | `_MobileFilter` 增加 `ClampInnerWidth()`：遮罩对话框内容宽度不超过窗口（Show 时夹宽 + adjustSize，Resize 时只夹宽，避免递归） |
+| `python/src/component/tab/base_table_widget.py` | 补水平逐像素 |
+| `python/src/component/line_edit/popup_list.py`（新） | 候选列表图层：手机端子控件图层 + 桌面端原 ToolTip 浮层，几何统一夹紧；`_OutsideHider` 负责点别处收起 |
+| `python/src/component/line_edit/search_line_edit.py` | 改用 `popup_list`；删掉 `QLabel("asdasdasdasd")` + 第二次 `QHBoxLayout`；`HideListView/ShowListView/CheckClick` 转发 |
+| `python/src/component/line_edit/tip_line_edit.py` | 同上（DoH 地址 / 代理地址 / 域名候选列表） |
+| `python/src/view/download/download_view.py` | 竖屏列策略：隐藏 id/时间/速度/转换章节/转换耗时，标题列 Stretch |
+| `python/src/view/download/download_all_view.py` | 竖屏列策略：隐藏分类，名称列 Stretch |
+| `python/src/view/download/download_some_view.py` | 竖屏列策略：标题列 Stretch，其余压窄 |
+| `python/src/view/setting/setting_sr_select_view.py` | 竖屏列策略（隐藏"耗时"）+ 对话框内容宽度夹到窗口内 |
+| `python/android/java/org/jmcomic/SafService.java` | 去掉 `FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS` |
+| `python/android/tools/patch_android_manifest.py` | `SafPickActivity` 加 `android:taskAffinity=""`（独立任务） |
+| `python/android/java/org/jmcomic/SafPickActivity.java` | 注释与实现对齐（说明 taskAffinity 为什么必须） |
+| `python/android/main.py` | 新增 `ApplySurfaceContainer()`：默认 `QT_ANDROID_SURFACE_CONTAINER_TYPE=1`（TextureView，见 4.5），取值写进启动诊断 |
+| `python/src/tools/mobile_ui_hooks.py` | 新增 `InstallAppStateHook()`：进后台刷最后一帧 / 回前台重排重绘 / `appState:` 日志 |
+| `python/android/tools/check_recents.sh`（新） | 多任务取证：任务在不在、快照状态、是否被排除、进程存活、渲染容器类型 |
+| `python/src/start.py`（0.55） | `Run()` 新增 `afterShow` 回调：`main.show()` 之后先 `processEvents()` 把首帧送出去，再跑重活（见 4.10） |
+| `python/android/main.py`（0.55） | 新增 `DeferredStartup()`：`EnsureModels` / `InstallQnnCompat` / `InitSrEngine` / `DumpDiagnostics` 全部挪到首帧之后 |
+| `python/android/tools/patch_android_manifest.py`（0.55/0.56） | 给 Activity 主题补 `android:windowBackground`→`@drawable/jm_window_bg`；幂等写入 bootstrap 的 `res/drawable`（深色 + 180dp 居中图标） |
 
 宿主回归：`host_test_table_touch.py`、`host_test_search_popup.py`、`host_test_app_state.py` 全绿；
 `host_test_tap_gate / input_focus / spin_focus / text_select / sr_layout / widget_guard_audit` 无回归。
@@ -565,7 +565,7 @@ Android 在应用**离开前台那一刻**抓任务快照，抓的是窗口里�
    a. 正常用一会儿 → HOME → 多任务卡片显示**应用当前界面**；
    b. 点开应用**立刻**（1~2s 内）按 HOME → 卡片显示**启动图**（深色+图标），不再是白块；
    c. 若某次仍是空白卡片：切回应用再按一次 HOME 即刷新（快照按"前台→后台"重抓）。
-   异常时跑 `bash android/tools/check_recents.sh`，按脚本末尾判读口径定位
+   异常时跑 `bash python/android/tools/check_recents.sh`，按脚本末尾判读口径定位
    （任务在不在 / 快照是否为空 / 进程是否存活 / 渲染容器类型）。
    想临时退回 SurfaceView：在 `<AppDataDir>/sr_env.txt` 写 `QT_ANDROID_SURFACE_CONTAINER_TYPE=0`
    （注意：0.54 的实测表明容器类型不是本问题的成因，改它不影响多任务画面）。

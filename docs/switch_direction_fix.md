@@ -57,7 +57,7 @@ self.SwitchWidgetByIndex(target)         # ← 此时才判断方向
 
 ## 4. 验证
 
-### 4.1 宿主回归（`android/tools/host_test_switch_direction.py`）
+### 4.1 宿主回归（`python/android/tools/host_test_switch_direction.py`）
 
 ```
 [1] 完整栈上的方向推导：前进 / 面包屑后退        ok（LeftToRight / RightToLeft）
