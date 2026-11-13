@@ -1,0 +1,28 @@
+ninja: Entering directory `build'
+[1/13] Automatic MOC for target jmcomic_ui
+[2/13] Building CXX object CMakeFiles/jmcomic_ui.dir/ui_pages_extra.cpp.obj
+[3/13] Building CXX object CMakeFiles/jmcomic_ui.dir/ui_pages_library.cpp.obj
+[4/13] Building CXX object CMakeFiles/jmcomic_ui.dir/ui_kit.cpp.obj
+[5/13] Building CXX object CMakeFiles/jmcomic_ui.dir/ui_pages_browse.cpp.obj
+[6/13] Building CXX object CMakeFiles/jmcomic_ui.dir/comic_view.cpp.obj
+[7/13] Building CXX object CMakeFiles/jmcomic_ui.dir/proxy_page.cpp.obj
+[8/13] Building CXX object CMakeFiles/jmcomic_ui.dir/cover_cache.cpp.obj
+[9/13] Building CXX object CMakeFiles/jmcomic_ui.dir/jmcomic_ui_autogen/mocs_compilation.cpp.obj
+[10/13] Building CXX object CMakeFiles/jmcomic_ui.dir/ui_pages_misc.cpp.obj
+[11/13] Building CXX object CMakeFiles/jmcomic_ui.dir/main_desktop.cpp.obj
+[12/13] Building CXX object CMakeFiles/jmcomic_ui.dir/ui_main_window.cpp.obj
+C:/Users/WQ159/source/repos/JMComic-qt/cpp/shell/ui/ui_main_window.cpp:22: warning: "NOMINMAX" redefined
+   22 | #define NOMINMAX
+      | 
+In file included from C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/x86_64-w64-mingw32/bits/c++config.h:679,
+                 from C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/type_traits:38,
+                 from C:/Qt/6.12.0/mingw_64/include/QtCore/qglobal.h:14,
+                 from C:/Qt/6.12.0/mingw_64/include/QtGui/qtguiglobal.h:8,
+                 from C:/Qt/6.12.0/mingw_64/include/QtGui/qpixmap.h:8,
+                 from C:/Qt/6.12.0/mingw_64/include/QtGui/QPixmap:1,
+                 from C:/Users/WQ159/source/repos/JMComic-qt/cpp/shell/ui/ui_main_window.h:9,
+                 from C:/Users/WQ159/source/repos/JMComic-qt/cpp/shell/ui/ui_main_window.cpp:1:
+C:/Qt/Tools/mingw1310_64/lib/gcc/x86_64-w64-mingw32/13.1.0/include/c++/x86_64-w64-mingw32/bits/os_defines.h:45: note: this is the location of the previous definition
+   45 | #define NOMINMAX 1
+      | 
+[13/13] Linking CXX executable jmcomic_ui.exe; copy onnxruntime.dll next to jmcomic_ui; copy waifu2x model next to jmcomic_ui; Copying OpenSSL 4.x runtime DLLs

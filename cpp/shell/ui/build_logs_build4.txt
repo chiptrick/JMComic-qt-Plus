@@ -1,0 +1,5 @@
+ninja: Entering directory `build'
+[1/5] Automatic MOC for target jmcomic_ui
+[2/4] Building CXX object CMakeFiles/jmcomic_ui.dir/main_desktop.cpp.obj
+[3/4] Building CXX object CMakeFiles/jmcomic_ui.dir/C_/Users/WQ159/source/repos/JMComic-qt/cpp/shell/reader.cpp.obj
+[4/4] Linking CXX executable jmcomic_ui.exe; copy onnxruntime.dll next to jmcomic_ui; copy waifu2x model next to jmcomic_ui; Copying OpenSSL 4.x runtime DLLs

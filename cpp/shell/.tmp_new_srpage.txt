@@ -1,0 +1,548 @@
+// ============================================================ 超分
+namespace {
+
+QString SrBytes(qint64 n)
+{
+    if (n <= 0)
+        return QStringLiteral("-");
+    if (n >= qint64(1024) * 1024)
+        return QStringLiteral("%1 MB").arg(double(n) / (1024.0 * 1024.0), 0, 'f', 1);
+    return QStringLiteral("%1 KB").arg(double(n) / 1024.0, 0, 'f', 0);
+}
+
+QString SrArchLabel(const QString &arch)
+{
+    if (arch == QLatin1String("waifu2x"))
+        return QStringLiteral("waifu2x");
+    if (arch == QLatin1String("realcugan"))
+        return QStringLiteral("Real-CUGAN");
+    if (arch == QLatin1String("realesrgan"))
+        return QStringLiteral("Real-ESRGAN");
+    if (arch == QLatin1String("srmd"))
+        return QStringLiteral("SRMD");
+    return arch;
+}
+
+}  // namespace
+
+SrPage::SrPage(QWidget *parent) : PageBase(parent)
+{
+    watcher_ = new QFutureWatcher<SrEngine::Result>(this);
+    connect(watcher_, &QFutureWatcher<SrEngine::Result>::finished, this, [this] {
+        const SrEngine::Result r = watcher_->result();
+        busy_ = false;
+        if (runBtn_)
+            runBtn_->setEnabled(true);
+        if (progress_) {
+            progress_->setVisible(false);
+            progress_->setValue(0);
+        }
+        if (r.image.isNull()) {
+            result_ = QImage();
+            resultMs_ = 0.0;
+            if (detail_)
+                detail_->setText(QStringLiteral("超分失败：%1").arg(
+                    r.error.isEmpty() ? QStringLiteral("未知错误") : r.error));
+            if (saveBtn_)
+                saveBtn_->setEnabled(false);
+            UpdatePreviewImage();
+            emit Toast(QStringLiteral("超分失败：%1").arg(
+                r.error.isEmpty() ? QStringLiteral("未知错误") : r.error));
+            return;
+        }
+        result_ = r.image;
+        resultMs_ = r.ms;
+        if (saveBtn_)
+            saveBtn_->setEnabled(true);
+        UpdatePreviewImage();
+        emit Toast(QStringLiteral("超分完成：%1→%2 · %3ms")
+                       .arg(source_.width())
+                       .arg(result_.width())
+                       .arg(r.ms, 0, 'f', 0));
+    });
+
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    auto *body = PageBody(this);
+    auto *lay = BodyLayout(body);
+
+    QHBoxLayout *header = nullptr;
+    auto *head = MakeHeader(QStringLiteral("图片超分"),
+                            QStringLiteral("选择本地超分模型"), body, &header);
+    lay->addWidget(head);
+    auto *bench = new QPushButton(QStringLiteral("测速"), body);
+    bench->setObjectName(QStringLiteral("Ghost"));
+    bench->setCursor(Qt::PointingHandCursor);
+    header->addWidget(bench);
+    connect(bench, &QPushButton::clicked, this, [this] {
+        // 测速用固定 64x64 小图跑当前模型：给出"每块/整图"的真实耗时，
+        // 而不是伪造一个进度条。失败时如实说原因。
+        if (busy_) {
+            emit Toast(QStringLiteral("上一次超分还在跑"));
+            return;
+        }
+        UpdateStatusLine();
+        if (!SrEngine::Available()) {
+            emit Toast(SrEngine::Status());
+            return;
+        }
+        QImage probe(64, 64, QImage::Format_RGB888);
+        for (int y = 0; y < 64; ++y) {
+            uchar *line = probe.scanLine(y);
+            for (int x = 0; x < 64; ++x) {
+                line[x * 3 + 0] = uchar(x * 4);
+                line[x * 3 + 1] = uchar(y * 4);
+                line[x * 3 + 2] = uchar((x + y) * 2);
+            }
+        }
+        const SrEngine::Result r = SrEngine::Upscale(probe);
+        if (r.image.isNull()) {
+            emit Toast(QStringLiteral("测速失败：%1").arg(r.error));
+            return;
+        }
+        if (detail_)
+            detail_->setText(QStringLiteral("测速：64x64 → %1x%2 · %3ms · %4")
+                                 .arg(r.image.width())
+                                 .arg(r.image.height())
+                                 .arg(r.ms, 0, 'f', 0)
+                                 .arg(r.model));
+        emit Toast(QStringLiteral("测速 %1ms（%2）").arg(r.ms, 0, 'f', 0).arg(r.model));
+    });
+
+    status_ = new QLabel(body);
+    status_->setObjectName(QStringLiteral("SectionHint"));
+    status_->setWordWrap(true);
+    status_->setMinimumWidth(0);
+    lay->addWidget(status_);
+
+    // 算法筛选（模型有 30+ 个，不分档会排成一堵墙）。
+    auto *chips = new QWidget(body);
+    auto *cl = new QHBoxLayout(chips);
+    cl->setContentsMargins(0, 0, 0, 0);
+    cl->setSpacing(8);
+    const QStringList arches = {QStringLiteral("全部"), QStringLiteral("waifu2x"),
+                                QStringLiteral("Real-CUGAN"), QStringLiteral("Real-ESRGAN"),
+                                QStringLiteral("SRMD")};
+    for (const QString &label : arches) {
+        auto *chip = new Chip(label, true, chips);
+        chip->setChecked(label == QStringLiteral("全部"));
+        cl->addWidget(chip);
+        connect(chip, &QPushButton::clicked, this, [this, chips, chip, label] {
+            for (auto *b : chips->findChildren<Chip *>())
+                b->setChecked(b == chip);
+            filter_ = label == QStringLiteral("全部") ? QString() : label;
+            BuildModelRows();
+        });
+    }
+    count_ = new QLabel(chips);
+    count_->setObjectName(QStringLiteral("RowMeta"));
+    count_->setMinimumWidth(0);
+    cl->addWidget(count_, 1);
+    lay->addWidget(chips);
+
+    // 手机窄屏：左右两栏并排会把页面撑到 714px（360 宽视口 hmax=354），
+    // 锁定横向平移后右侧会被裁掉。窄屏改为纵向堆叠（模型在上、预览在下）。
+    const bool stackSr = Touch::IsTouchMode();
+    auto *top = new QWidget(body);
+    auto *tl = new QBoxLayout(stackSr ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight, top);
+    tl->setContentsMargins(0, 0, 0, 0);
+    tl->setSpacing(stackSr ? 12 : 18);
+
+    auto *left = new QVBoxLayout();
+    left->setSpacing(10);
+    left->addWidget(new SectionHeader(QStringLiteral("模型"), QStringLiteral("选择一个即可开始"),
+                                      QString(), top));
+    modelsHost_ = new QWidget(top);
+    models_ = new QVBoxLayout(modelsHost_);
+    models_->setContentsMargins(0, 0, 0, 0);
+    models_->setSpacing(8);
+    auto *listScroll = new QScrollArea(top);
+    listScroll->setWidgetResizable(true);
+    listScroll->setFrameShape(QFrame::NoFrame);
+    listScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    listScroll->setWidget(modelsHost_);
+    if (stackSr) {
+        // 手机上不再套一层滚动（嵌套滚动抢手势），直接跟随页面滚
+        left->addWidget(modelsHost_);
+        listScroll->deleteLater();
+    } else {
+        listScroll->setFixedHeight(UiStyle::Fpx(360));
+        left->addWidget(listScroll);
+    }
+    left->addStretch(1);
+    tl->addLayout(left, stackSr ? 0 : 3);
+
+    auto *right = new QVBoxLayout();
+    right->setSpacing(10);
+    right->addWidget(new SectionHeader(QStringLiteral("预览"), QString(), QString(), top));
+    preview_ = new QLabel(top);
+    preview_->setFixedHeight(200);
+    if (stackSr) {
+        preview_->setMinimumWidth(0);
+        preview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    } else {
+        preview_->setFixedSize(300, 200);
+    }
+    preview_->setAlignment(Qt::AlignCenter);
+    preview_->setStyleSheet(QStringLiteral(
+        "background:%1; border:1px solid %2; border-radius:%3px; color:%4; font-size:12px;")
+                                .arg(T().surface.name(), T().border.name())
+                                .arg(UiStyle::Radius)
+                                .arg(T().textFaint.name()));
+    preview_->setText(QStringLiteral("选择图片后显示结果"));
+    right->addWidget(preview_, 0, Qt::AlignTop);
+
+    detail_ = new QLabel(top);
+    detail_->setObjectName(QStringLiteral("RowMeta"));
+    detail_->setWordWrap(true);
+    detail_->setMinimumWidth(0);
+    detail_->setText(QStringLiteral("尚未选择图片"));
+    right->addWidget(detail_);
+
+    progress_ = new QProgressBar(top);
+    progress_->setObjectName(QStringLiteral("RowProgress"));
+    progress_->setRange(0, 100);
+    progress_->setTextVisible(false);
+    progress_->setVisible(false);
+    right->addWidget(progress_);
+
+    auto *btns = new QHBoxLayout();
+    btns->setSpacing(8);
+    pickBtn_ = new QPushButton(QStringLiteral("选择图片…"), top);
+    pickBtn_->setObjectName(QStringLiteral("Ghost"));
+    pickBtn_->setCursor(Qt::PointingHandCursor);
+    runBtn_ = new QPushButton(QStringLiteral("开始超分"), top);
+    runBtn_->setObjectName(QStringLiteral("Primary"));
+    runBtn_->setCursor(Qt::PointingHandCursor);
+    runBtn_->setEnabled(false);
+    saveBtn_ = new QPushButton(QStringLiteral("保存结果"), top);
+    saveBtn_->setObjectName(QStringLiteral("Ghost"));
+    saveBtn_->setCursor(Qt::PointingHandCursor);
+    saveBtn_->setEnabled(false);
+    btns->addWidget(pickBtn_);
+    btns->addWidget(runBtn_);
+    btns->addWidget(saveBtn_);
+    btns->addStretch(1);
+    right->addLayout(btns);
+    right->addStretch(1);
+    tl->addLayout(right, stackSr ? 0 : 2);
+
+    lay->addWidget(top);
+    lay->addStretch(1);
+    root->addWidget(WrapScroll(body, this));
+
+    connect(pickBtn_, &QPushButton::clicked, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(
+            this, QStringLiteral("选择要超分的图片"), QString(),
+            QStringLiteral("图片 (*.png *.jpg *.jpeg *.webp *.bmp)"));
+        if (!path.isEmpty())
+            SetSourceForTest(path);
+    });
+    connect(runBtn_, &QPushButton::clicked, this, [this] {
+        if (sourcePath_.isEmpty() || source_.isNull()) {
+            emit Toast(QStringLiteral("先选一张图片"));
+            return;
+        }
+        StartUpscale(sourcePath_);
+    });
+    connect(saveBtn_, &QPushButton::clicked, this, &SrPage::SaveResult);
+
+    ReloadModels();
+}
+
+void SrPage::OnEnter() { ReloadModels(); }
+
+void SrPage::ReloadModels()
+{
+    // 选的模型：内存里的当前模型 > ui.ini 的 srModelName > 第一个可用
+    model_ = SrEngine::CurrentModel();
+    BuildModelRows();
+    UpdateStatusLine();
+}
+
+void SrPage::UpdateStatusLine()
+{
+    if (!status_)
+        return;
+    const QVector<SrEngine::ModelInfo> installed = SrEngine::InstalledModels();
+    const QVector<SrEngine::ModelInfo> all = SrEngine::Catalog();
+    if (installed.isEmpty()) {
+        status_->setText(QStringLiteral("没有可用模型：%1")
+                             .arg(SrEngine::Status()));
+        return;
+    }
+    QString line;
+    if (SrEngine::Available())
+        line = QStringLiteral("引擎就绪 · %1").arg(SrEngine::Status());
+    else
+        line = QStringLiteral("引擎不可用：%1").arg(SrEngine::Status());
+    if (all.size() > installed.size()) {
+        line += QStringLiteral(" · 已安装 %1/%2 个模型（缺的可在 sr_models/ 补文件）")
+                    .arg(installed.size())
+                    .arg(all.size());
+    } else {
+        line += QStringLiteral(" · 已安装 %1/%1 个模型").arg(installed.size());
+    }
+    status_->setText(line);
+}
+
+void SrPage::BuildModelRows()
+{
+    if (!models_ || !modelsHost_)
+        return;
+    while (QLayoutItem *item = models_->takeAt(0)) {
+        if (QWidget *w = item->widget())
+            w->deleteLater();
+        delete item;
+    }
+    const QVector<SrEngine::ModelInfo> installed = SrEngine::InstalledModels();
+    int shown = 0;
+    for (const SrEngine::ModelInfo &m : installed) {
+        const QString arch = SrArchLabel(m.arch);
+        if (!filter_.isEmpty() && arch != filter_)
+            continue;
+        ++shown;
+        auto *row = new QWidget(modelsHost_);
+        row->setObjectName(QStringLiteral("ListRow"));
+        auto *rl = new QHBoxLayout(row);
+        rl->setContentsMargins(12, 8, 12, 8);
+        rl->setSpacing(10);
+
+        auto *name = new QLabel(m.name, row);
+        name->setObjectName(QStringLiteral("RowTitle"));
+        name->setMinimumWidth(0);
+        rl->addWidget(name);
+
+        const QString meta = QStringLiteral("%1 · %2 · 降噪%3 · %4")
+                                 .arg(arch)
+                                 .arg(QStringLiteral("%1×").arg(m.scale))
+                                 .arg(m.denoise)
+                                 .arg(SrBytes(m.bytes));
+        auto *note = new QLabel(meta, row);
+        note->setObjectName(QStringLiteral("RowMeta"));
+        note->setWordWrap(true);
+        note->setMinimumWidth(0);
+        name->setToolTip(m.note);
+        if (Touch::IsTouchMode()) {
+            note->hide();
+        } else {
+            note->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            rl->addWidget(note, 1);
+        }
+
+        auto *pick = new QPushButton(m.name == model_ ? QStringLiteral("已选择")
+                                                      : QStringLiteral("使用"),
+                                     row);
+        pick->setObjectName(m.name == model_ ? QStringLiteral("Primary")
+                                             : QStringLiteral("Ghost"));
+        pick->setCursor(Qt::PointingHandCursor);
+        pick->setFixedHeight(26);
+        pick->setProperty("srModel", m.name);
+        rl->addWidget(pick);
+        connect(pick, &QPushButton::clicked, this, [this, m] { SelectModel(m.name); });
+
+        models_->addWidget(row);
+    }
+    if (shown == 0) {
+        models_->addWidget(new EmptyState(
+            QStringLiteral("这个分类下没有已安装模型"),
+            QStringLiteral("模型随安装包分发；也可以在 sr_models/ 里补充同名 onnx 后点“重新扫描”。"),
+            QString(), modelsHost_));
+    }
+    if (count_) {
+        count_->setText(QStringLiteral("已安装 %1 个 · 当前显示 %2 个")
+                            .arg(installed.size())
+                            .arg(shown));
+    }
+}
+
+bool SrPage::SelectModel(const QString &name)
+{
+    if (name.isEmpty())
+        return false;
+    if (!SrEngine::SetModel(name)) {
+        emit Toast(QStringLiteral("切换到 %1 失败：%2").arg(name, SrEngine::Status()));
+        return false;
+    }
+    model_ = name;
+    UiPrefs::Set(QStringLiteral("srModelName"), name);
+    result_ = QImage();   // 换模型后旧结果不再对应当前模型
+    resultMs_ = 0.0;
+    if (saveBtn_)
+        saveBtn_->setEnabled(false);
+    BuildModelRows();
+    UpdateStatusLine();
+    UpdatePreviewImage();
+    emit Toast(QStringLiteral("已选择 %1").arg(name));
+    return true;
+}
+
+QString SrPage::CurrentModelName() const
+{
+    return model_;
+}
+
+QString SrPage::Report() const
+{
+    const QVector<SrEngine::ModelInfo> installed = SrEngine::InstalledModels();
+    return QStringLiteral("sr-page: models=%1 engine=%2 selected=%3 source=%4x%5 result=%6x%7 "
+                          "ms=%8 busy=%9")
+        .arg(installed.size())
+        .arg(int(SrEngine::Available()))
+        .arg(model_.isEmpty() ? QStringLiteral("-") : model_)
+        .arg(source_.width())
+        .arg(source_.height())
+        .arg(result_.width())
+        .arg(result_.height())
+        .arg(resultMs_, 0, 'f', 0)
+        .arg(int(busy_));
+}
+
+void SrPage::SetSourceForTest(const QString &path)
+{
+    QImage img(path);
+    if (img.isNull()) {
+        emit Toast(QStringLiteral("读不了这张图：%1").arg(QFileInfo(path).fileName()));
+        return;
+    }
+    source_ = img;
+    sourcePath_ = path;
+    result_ = QImage();
+    resultMs_ = 0.0;
+    if (runBtn_)
+        runBtn_->setEnabled(!busy_);
+    if (saveBtn_)
+        saveBtn_->setEnabled(false);
+    UpdatePreviewImage();
+    if (detail_)
+        detail_->setText(QStringLiteral("原图 %1x%2 · %3 · 模型 %4")
+                             .arg(img.width())
+                             .arg(img.height())
+                             .arg(QFileInfo(path).fileName(), model_));
+}
+
+void SrPage::UpdatePreviewImage()
+{
+    if (!preview_)
+        return;
+    const QImage &img = result_.isNull() ? source_ : result_;
+    if (img.isNull()) {
+        preview_->setPixmap(QPixmap());
+        preview_->setText(QStringLiteral("选择图片后显示结果"));
+        return;
+    }
+    const QSize box = preview_->size().isEmpty() ? QSize(300, 200) : preview_->size();
+    const QPixmap pm = QPixmap::fromImage(
+        img.scaled(box - QSize(8, 8), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    preview_->setPixmap(pm);
+    UpdatePreviewText();
+}
+
+void SrPage::UpdatePreviewText()
+{
+    if (!detail_)
+        return;
+    if (source_.isNull())
+        return;
+    if (result_.isNull()) {
+        detail_->setText(QStringLiteral("原图 %1x%2 · 模型 %3 · 点“开始超分”")
+                             .arg(source_.width())
+                             .arg(source_.height())
+                             .arg(model_));
+        return;
+    }
+    detail_->setText(QStringLiteral("%1 · %2x%3 → %4x%5 · %6ms")
+                         .arg(model_)
+                         .arg(source_.width())
+                         .arg(source_.height())
+                         .arg(result_.width())
+                         .arg(result_.height())
+                         .arg(resultMs_, 0, 'f', 0));
+}
+
+void SrPage::StartUpscale(const QString &path)
+{
+    if (busy_)
+        return;
+    QImage img(path);
+    if (img.isNull()) {
+        emit Toast(QStringLiteral("读不了这张图"));
+        return;
+    }
+    if (!SrEngine::Available()) {
+        emit Toast(QStringLiteral("超分不可用：%1").arg(SrEngine::Status()));
+        return;
+    }
+    source_ = img;
+    sourcePath_ = path;
+    busy_ = true;
+    if (runBtn_)
+        runBtn_->setEnabled(false);
+    if (saveBtn_)
+        saveBtn_->setEnabled(false);
+    if (progress_) {
+        progress_->setRange(0, 100);
+        progress_->setValue(0);
+        progress_->setVisible(true);
+    }
+    if (detail_)
+        detail_->setText(QStringLiteral("%1 · 处理中… %2x%3（%4×）")
+                             .arg(model_)
+                             .arg(img.width())
+                             .arg(img.height())
+                             .arg(SrEngine::CurrentScale()));
+    const QString useModel = model_;
+    QPointer<SrPage> guard(this);
+    auto progressCb = [guard](int done, int total) {
+        if (!guard || total <= 0)
+            return;
+        const int pct = int(100.0 * done / total);
+        QMetaObject::invokeMethod(
+            guard,
+            [guard, pct, done, total] {
+                if (!guard || !guard->progress_)
+                    return;
+                guard->progress_->setValue(qBound(0, pct, 100));
+                if (guard->detail_)
+                    guard->detail_->setText(QStringLiteral("处理中… %1/%2 行")
+                                                .arg(done)
+                                                .arg(total));
+            },
+            Qt::QueuedConnection);
+    };
+    watcher_->setFuture(QtConcurrent::run([img, useModel, progressCb] {
+        return SrEngine::UpscaleEx(img, useModel, progressCb, nullptr);
+    }));
+}
+
+bool SrPage::StartUpscaleForTest()
+{
+    if (sourcePath_.isEmpty() || source_.isNull() || busy_)
+        return false;
+    StartUpscale(sourcePath_);
+    return true;
+}
+
+void SrPage::SaveResult()
+{
+    if (result_.isNull()) {
+        emit Toast(QStringLiteral("还没有可保存的结果"));
+        return;
+    }
+    const QString base = sourcePath_.isEmpty()
+                             ? QStringLiteral("sr")
+                             : QFileInfo(sourcePath_).completeBaseName() + QStringLiteral("_sr");
+    const QString suggested =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation))
+            .filePath(base + QStringLiteral(".png"));
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存超分结果"),
+                                                      suggested,
+                                                      QStringLiteral("PNG (*.png)"));
+    if (path.isEmpty())
+        return;
+    if (result_.save(path))
+        emit Toast(QStringLiteral("已保存到 %1").arg(QFileInfo(path).fileName()));
+    else
+        emit Toast(QStringLiteral("保存失败：%1").arg(path));
+}
+

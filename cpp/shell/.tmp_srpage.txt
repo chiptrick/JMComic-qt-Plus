@@ -1,0 +1,110 @@
+// ============================================================ 超分
+SrPage::SrPage(QWidget *parent) : PageBase(parent)
+{
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    auto *body = PageBody(this);
+    auto *lay = BodyLayout(body);
+
+    QHBoxLayout *header = nullptr;
+    auto *head = MakeHeader(QStringLiteral("图片超分"),
+                            QStringLiteral("选择本地超分模型"), body, &header);
+    lay->addWidget(head);
+    auto *bench = new QPushButton(QStringLiteral("测速"), body);
+    bench->setObjectName(QStringLiteral("Ghost"));
+    bench->setCursor(Qt::PointingHandCursor);
+    header->addWidget(bench);
+    connect(bench, &QPushButton::clicked, this, [this] {
+        emit Toast(QStringLiteral("超分后端尚未接入，无法测速"));
+    });
+
+    // 手机窄屏：左右两栏并排会把页面撑到 714px（360 宽视口 hmax=354），
+    // 锁定横向平移后右侧会被裁掉。窄屏改为纵向堆叠（模型在上、预览在下）。
+    const bool stackSr = Touch::IsTouchMode();
+    auto *top = new QWidget(body);
+    auto *tl = new QBoxLayout(stackSr ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight, top);
+    tl->setContentsMargins(0, 0, 0, 0);
+    tl->setSpacing(stackSr ? 12 : 18);
+
+    auto *left = new QVBoxLayout();
+    left->setSpacing(10);
+    left->addWidget(new SectionHeader(QStringLiteral("模型"), QStringLiteral("按画风选择"), QString(), top));
+    auto *modelsHost = new QWidget(top);
+    models_ = new QVBoxLayout(modelsHost);
+    models_->setContentsMargins(0, 0, 0, 0);
+    models_->setSpacing(8);
+    left->addWidget(modelsHost);
+    left->addStretch(1);
+    tl->addLayout(left, stackSr ? 0 : 3);
+
+    auto *right = new QVBoxLayout();
+    right->setSpacing(10);
+    right->addWidget(new SectionHeader(QStringLiteral("预览"), QString(), QString(), top));
+    preview_ = new QLabel(top);
+    preview_->setFixedHeight(200);
+    if (stackSr) {
+        preview_->setMinimumWidth(0);
+        preview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    } else {
+        preview_->setFixedSize(300, 200);
+    }
+    preview_->setAlignment(Qt::AlignCenter);
+    preview_->setStyleSheet(QStringLiteral(
+        "background:%1; border:1px solid %2; border-radius:%3px; color:%4; font-size:12px;")
+                                .arg(T().surface.name(), T().border.name())
+                                .arg(UiStyle::Radius)
+                                .arg(T().textFaint.name()));
+    preview_->setText(QStringLiteral("选择图片后显示对比"));
+    right->addWidget(preview_, 0, Qt::AlignTop);
+    right->addStretch(1);
+    tl->addLayout(right, stackSr ? 0 : 2);
+
+    lay->addWidget(top);
+
+    for (const SrModel &m : SupportedSrModels()) {
+        auto *row = new QWidget(modelsHost);
+        row->setObjectName(QStringLiteral("ListRow"));
+        auto *rl = new QHBoxLayout(row);
+        rl->setContentsMargins(12, 8, 12, 8);
+        rl->setSpacing(10);
+
+        auto *name = new QLabel(m.name, row);
+        name->setObjectName(QStringLiteral("RowTitle"));
+        rl->addWidget(name);
+
+        auto *note = new QLabel(m.note, row);
+        note->setObjectName(QStringLiteral("RowMeta"));
+        note->setWordWrap(true);
+        note->setMinimumWidth(0);
+        if (stackSr) {
+            // 窄屏：13 字说明会把行撑到 372px，收进 tooltip，行内只留名称/徽标/按钮
+            note->hide();
+            name->setToolTip(m.note);
+        } else {
+            note->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            rl->addWidget(note, 1);
+        }
+
+        auto *badge = new QLabel(m.npu ? QStringLiteral("NPU") : QStringLiteral("CPU"), row);
+        badge->setObjectName(m.npu ? QStringLiteral("Tag") : QStringLiteral("TagDim"));
+        rl->addWidget(badge);
+
+        auto *pick = new QPushButton(QStringLiteral("使用"), row);
+        pick->setObjectName(QStringLiteral("Ghost"));
+        pick->setCursor(Qt::PointingHandCursor);
+        pick->setFixedHeight(26);
+        rl->addWidget(pick);
+        connect(pick, &QPushButton::clicked, this, [this, m] {
+            // 选择项写进偏好（设置页读取同一键），模型推理本身尚未接入。
+            UiPrefs::Set(QStringLiteral("srModelName"), m.name);
+            emit Toast(QStringLiteral("已选择 %1（推理后端尚未接入）").arg(m.name));
+            preview_->setText(QStringLiteral("%1 · %2×").arg(m.name).arg(m.scale));
+        });
+
+        models_->addWidget(row);
+    }
+
+    lay->addStretch(1);
+    root->addWidget(WrapScroll(body, this));
+}
+

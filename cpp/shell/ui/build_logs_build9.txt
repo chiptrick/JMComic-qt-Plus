@@ -1,0 +1,11 @@
+ninja: Entering directory `build'
+[0/1] Re-running CMake...
+-- Could NOT find WrapVulkanHeaders (missing: Vulkan_INCLUDE_DIR) 
+-- Could NOT find WrapVulkanHeaders (missing: Vulkan_INCLUDE_DIR) 
+-- UI: HTTP/3 over QUIC enabled (C:/Users/WQ159/jmcomic-build/deps/quic-mingw)
+-- Configuring done (6.5s)
+-- Generating done (1.0s)
+-- Build files have been written to: C:/Users/WQ159/source/repos/JMComic-qt/cpp/shell/ui/build
+[1/7] Automatic MOC for target jmwebp
+[2/5] Automatic MOC for target jmcomic_ui
+[3/4] Linking CXX executable jmcomic_ui.exe; copy onnxruntime.dll next to jmcomic_ui; copy waifu2x model next to jmcomic_ui; Copying OpenSSL 4.x runtime DLLs
