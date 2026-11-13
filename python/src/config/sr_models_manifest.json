@@ -1,5 +1,5 @@
 {
-  "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models/",
+  "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models/",
   "generated_at": "2026-11-02T17:01:47+0800",
   "models": [
     {
@@ -365,8 +365,8 @@
       "param_sha256": "1a240d786ad57398230cdae674185a0b5848af4a6dc1bbf56648e04b26a8bc62",
       "param_size": 1230,
       "providers": [
-        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models_vk/",
-        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models_vk/"
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models_vk/"
       ],
       "scale": 2,
       "tile": 192
@@ -381,8 +381,8 @@
       "param_sha256": "ddfa92c2824f2449b97eaf02f69cae660981bd07a52e0d74c0d53f26860e5a4a",
       "param_size": 1230,
       "providers": [
-        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models_vk/",
-        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models_vk/"
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models_vk/"
       ],
       "scale": 3,
       "tile": 192
@@ -397,8 +397,8 @@
       "param_sha256": "2dcde0224b30ad4a65638df1f1a822915d3e9393791ff104d39cdf77fb1153fa",
       "param_size": 1230,
       "providers": [
-        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models_vk/",
-        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models_vk/"
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models_vk/"
       ],
       "scale": 4,
       "tile": 192
@@ -413,8 +413,8 @@
       "param_sha256": "975e36fcc252583773bbbc691672e68b71e9c8e452b3055cb2cf523c75ecdae9",
       "param_size": 1230,
       "providers": [
-        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models_vk/",
-        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models_vk/"
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models_vk/"
       ],
       "scale": 2,
       "tile": 192
@@ -429,8 +429,8 @@
       "param_sha256": "f68036764d84081ae6e1ed316d4c50955c91a5a1b56548f19ba3135a726473d2",
       "param_size": 1230,
       "providers": [
-        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models_vk/",
-        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models_vk/"
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models_vk/"
       ],
       "scale": 3,
       "tile": 192
@@ -445,8 +445,8 @@
       "param_sha256": "b661e34f0b16b9df50436c5c9793e7773b8873ff91e1dc8efc19dbdb5b208b87",
       "param_size": 1230,
       "providers": [
-        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models_vk/",
-        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models_vk/"
+        "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models_vk/",
+        "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models_vk/"
       ],
       "scale": 4,
       "tile": 192
@@ -454,12 +454,12 @@
   ],
   "ncnn_bytes": 18393516,
   "ncnn_providers": [
-    "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models_vk/",
-    "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models_vk/"
+    "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models_vk/",
+    "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models_vk/"
   ],
   "providers": [
-    "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/android/sr_qnn/models/",
-    "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/android/sr_qnn/models/"
+    "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models/",
+    "https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models/"
   ],
   "quantized": [
     {

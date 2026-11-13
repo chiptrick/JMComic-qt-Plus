@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # coding:utf-8
-""" 生成 sr 模型清单（A3a）：models.txt + *.onnx -> src/config/sr_models_manifest.json
+""" 生成 sr 模型清单（A3a）：models.txt + *.onnx -> python/src/config/sr_models_manifest.json
 
 为什么需要这份清单：
 - 模型不再随 APK 分发（199MB 移出），运行时要靠它知道"有哪些模型、多大、sha256 多少"；
@@ -8,10 +8,10 @@
 - 下载完成后用它做完整性校验（sha256），避免半包/被篡改的 .onnx 让 QNN 崩在底层。
 
 用法：
-    python script/gen_model_manifest.py \
-        --models android/sr_qnn/models \
+    python python/script/gen_model_manifest.py \
+        --models python/android/sr_qnn/models \
         --base-url https://github.com/<owner>/<repo>/releases/download/models-v1/ \
-        --out src/config/sr_models_manifest.json
+        --out python/src/config/sr_models_manifest.json
 
 base_url 约定：Release 里文件名与本地一致（basename），下载时直接 base_url + file。
 """
@@ -98,7 +98,7 @@ def parse_models_txt(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", default="android/sr_qnn/models")
+    ap.add_argument("--models", default="python/android/sr_qnn/models")
     ap.add_argument("--base-url", action="append", default=[],
                     help="可重复：运行时按顺序尝试的下载源；第一个为主源")
     ap.add_argument("--ncnn-dir", default="",
@@ -107,7 +107,7 @@ def main():
                     help="ncnn 下载源，可重复；缺省时把 --base-url 的 /models/ 替换为 /models_vk/")
     ap.add_argument("--quantized-suffix", default="_q16.onnx",
                     help="量化版文件名后缀；存在则登记到 quantized 段（不占模型列表）")
-    ap.add_argument("--out", default="src/config/sr_models_manifest.json")
+    ap.add_argument("--out", default="python/src/config/sr_models_manifest.json")
     args = ap.parse_args()
 
     if not os.path.isdir(args.models):
