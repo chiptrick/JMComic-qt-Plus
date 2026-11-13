@@ -4,12 +4,12 @@ name: android
 # 也不需要 Qualcomm QNN SDK。
 #
 # 用与 APK 里相同的 Qt 大版本（PySide6-Essentials 6.12.0，见
-# src/requirements_android_ci.txt）+ 构建宿主 Python 3.11（Qt offscreen），执行 android/tools/
+# python/src/requirements_android_ci.txt）+ 构建宿主 Python 3.11（Qt offscreen），执行 python/android/tools/
 # 里的 5 道门，外加 shell 语法检查与全量字节码编译。这些用例就是移植过程中用来定位
 # 真机问题的同一套回归，任何一道红都代表真的坏了。
 #
 # 不在这里做 APK 打包：需要 NDK + QNN SDK，而且首次冷构建要几十分钟，放 CI 不划算
-# （打包流程见 android/README.md §5/§9）。
+# （打包流程见 python/android/README.md §5/§9）。
 
 on:
   push:
@@ -45,17 +45,17 @@ jobs:
       - name: 安装 Python 依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r src/requirements_android_ci.txt
+          pip install -r python/src/requirements_android_ci.txt
 
       - name: 字节码编译（目标是 APK 里的 Python 3.11）
         run: |
           python -m compileall -q \
-            src android/main.py android/sr_qnn android/tools android/recipes android/shims
+            python/src python/android/main.py python/android/sr_qnn python/android/tools python/android/recipes python/android/shims
 
       - name: shell 脚本语法检查
         run: |
           fail=0
-          for f in android/*.sh android/tools/*.sh android/tools/archive/*.sh; do
+          for f in python/android/*.sh python/android/tools/*.sh python/android/tools/archive/*.sh; do
             bash -n "$f" || { echo "::error file=$f::bash 语法错误"; fail=1; }
           done
           if [ "$fail" -ne 0 ]; then exit 1; fi
@@ -63,17 +63,17 @@ jobs:
       # 一律 `python -u`：stdout 走管道时是块缓冲的，卡住/崩溃时日志里会什么都看不到
       # （吃过大亏：一次挂死只留下两行 Qt 的 stderr，谁也看不出停在哪一步）
       - name: C++ ↔ ctypes 接口一致性
-        run: python -u android/tools/check_interfaces.py
+        run: python -u python/android/tools/check_interfaces.py
 
       - name: Android 竖屏冒烟（不联网）
-        run: python -u android/tools/smoke_test_android.py
+        run: python -u python/android/tools/smoke_test_android.py
 
       - name: 接口解密链回归（AES / ctypes 后端）
-        run: python -u android/tools/host_test_crypto_android.py
+        run: python -u python/android/tools/host_test_crypto_android.py
 
       - name: 图片解码链路回归（分割还原 / QImage / 线程）
-        run: python -u android/tools/host_test_image_pipeline.py
+        run: python -u python/android/tools/host_test_image_pipeline.py
 
       # timeout 是保险：真卡住时宁可这一步红掉，也不要把整条 job 拖到 6 小时超时
       - name: 应用内文件选择器回归
-        run: timeout 600 python -u android/tools/host_test_file_dialog.py
+        run: timeout 600 python -u python/android/tools/host_test_file_dialog.py
