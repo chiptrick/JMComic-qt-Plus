@@ -591,10 +591,10 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 
 ### 更新 26（2026-11-02）：真实下载源接通（仓库目录双源）+ 模型覆盖核查
 
-**① 下载源（用户上传的仓库目录）**：`chiptrick/JMComic-qt-Android` 的 `python/android/sr_qnn/models`
+**① 下载源（用户上传的仓库目录）**：`chiptrick/JMComic-qt-Plus` 的 `python/android/sr_qnn/models`
 （不是 Release，是仓库目录）→ 用 raw + jsDelivr 两个 CDN 直链，清单 v2 的 providers：
-1. `https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Android@main/python/android/sr_qnn/models/`（国内可达）
-2. `https://raw.githubusercontent.com/chiptrick/JMComic-qt-Android/main/python/android/sr_qnn/models/`（兜底）
+1. `https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/python/android/sr_qnn/models/`（国内可达）
+2. `https://raw.githubusercontent.com/chiptrick/JMComic-qt-Plus/main/python/android/sr_qnn/models/`（兜底）
 
 实测：
 - 三方比对 **31 个 .onnx / 217.7MB，名字与大小 100% 一致**（无漏传、无多余、无大小差异）；
@@ -660,7 +660,7 @@ worker 只碰 model_store、进度/结果全走信号；`StartDownload` 三道�
 | srmdnf_x2/x3/x4 | 同上 | 同上 | ≤0.002/255 | **≤0.002/255** |
 
 三处注册（models.txt / C++ 内置表新增 `SRMD_UP2X..`、`SRMDNF_UP2X..` / UI 新增 `SRMD` 分组 6 行），
-清单 **39 个模型 / 262.0MB**，6 个 onnx + models.txt 已推到 `chiptrick/JMComic-qt-Android`（远端 39 个）。
+清单 **39 个模型 / 262.0MB**，6 个 onnx + models.txt 已推到 `chiptrick/JMComic-qt-Plus`（远端 39 个）。
 顺带修了 C++ 内置表的一个隐患：`esrganNames[5][2]` 数组在加了 general 两个条目后已超界（循环仍 `i<5`），
 现已改为 `[7][2]` 并循环 7 次。
 
@@ -768,7 +768,7 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./sr_vk_probe ./libsr_vk.so"
 
 M3（模型分发）：
 - 仓库新增 `python/android/sr_qnn/models_vk/`（SRMD 全 6 个 ncnn 模型，param+bin 共 12 文件，
-  合计 17.5MB）+ `models_vk.txt`（含 in_channels 列）；已推 `chiptrick/JMComic-qt-Android`
+  合计 17.5MB）+ `models_vk.txt`（含 in_channels 列）；已推 `chiptrick/JMComic-qt-Plus`
   的 `python/android/sr_qnn/models_vk/`（远端 13 文件 / 17.5MB）。
 - 清单生成器增加 `--ncnn-dir` + `--ncnn-base-url`：ncnn 走**独立下载源**
   （`/models/` → `/models_vk/`），每个模型条目带 `providers`、`param/bin size/sha256`；
@@ -805,7 +805,7 @@ A3a 三套自检全过（model_store / sr_model_table / 下载端到端）。
 
 | 仓库 | workflow | 状态 |
 |---|---|---|
-| `chiptrick/JMComic-qt-Android` | CI (`.github/workflows/CI.yml`) | `disabled_manually` |
+| `chiptrick/JMComic-qt-Plus` | CI (`.github/workflows/CI.yml`) | `disabled_manually` |
 | 同上 | android (`.github/workflows/android.yml`) | `disabled_manually` |
 | 同上 | release (`.github/workflows/release.yml`) | `disabled_manually` |
 
@@ -815,9 +815,9 @@ A3a 三套自检全过（model_store / sr_model_table / 下载端到端）。
 **恢复（计划完成后执行）**：
 ```bash
 for id in 378532840 378532841 378532843; do
-  gh api -X PUT "repos/chiptrick/JMComic-qt-Android/actions/workflows/$id/enable"
+  gh api -X PUT "repos/chiptrick/JMComic-qt-Plus/actions/workflows/$id/enable"
 done
-gh api "repos/chiptrick/JMComic-qt-Android/actions/workflows" \
+gh api "repos/chiptrick/JMComic-qt-Plus/actions/workflows" \
   --jq '.workflows[] | "\(.state)\t\(.name)"'      # 应全部回到 active
 ```
 > 注意：workflow id 是仓库内固定值；若未来新增 workflow，需要单独禁用。

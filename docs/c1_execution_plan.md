@@ -279,7 +279,7 @@
 
 ```bash
 for id in 378532840 378532841 378532843; do
-  gh api -X PUT "repos/chiptrick/JMComic-qt-Android/actions/workflows/$id/enable"
+  gh api -X PUT "repos/chiptrick/JMComic-qt-Plus/actions/workflows/$id/enable"
 done
 ```
 
