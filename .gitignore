@@ -8,9 +8,9 @@ __pycache__/
 
 # Distribution / packaging
 test
-src/test
-src/data
-src/ssl-data
+python/src/test
+python/src/data
+python/src/ssl-data
 .idea
 .Python
 build/
@@ -148,16 +148,17 @@ data/
 
 # ---- Android 移植 ----
 # pysidedeploy.spec 是部署配置，需要入库(上面的 *.spec 规则会误伤)
-!android/pysidedeploy.spec
+!python/android/pysidedeploy.spec
 # 构建中间产物(业务源码副本、原生库、wheel、构建目录)
-android/app_src/
-android/libs/
-android/.work/
-android/.venv/
-android/.buildozer/
-android/bin/
-android/*.apk
-android/*.aab
+python/android/app_src/
+python/android/libs/
+python/android/.work/
+python/android/.venv/
+python/android/.buildozer/
+python/android/bin/
+python/android/*.apk
+python/android/dist/
+python/android/*.aab
 # ---- 仓库卫生(发布用) ----
 # WorkBuddy 项目数据(记忆/日志/临时文件)，与业务代码无关
 .workbuddy/
@@ -165,18 +166,18 @@ android/*.aab
 build_out/
 .vs/
 # Android：真机证据目录(日志/截图/真机配置 —— 含账号、代理 IP、下载样本)
-android/build_logs/
+python/android/build_logs/
 # Android：IDE 运行配置 / p4a 生成的工程 / 打包缓存与 wheel
-android/.run/
-android/deployment/
-android/wheels/
-android/buildozer.spec
+python/android/.run/
+python/android/deployment/
+python/android/wheels/
+python/android/buildozer.spec
 # Android：一键构建脚本(Windows PowerShell)的执行日志与产物输出
-android/tools/logs/
-android/logs/
+python/android/tools/logs/
+python/android/logs/
 # 本机路径配置（模板 local.env.example 入库，实际配置不入库）
-android/tools/local.env
-android/.p4a-src/
+python/android/tools/local.env
+python/android/.p4a-src/
 
 # 基准留档：APK 本体不入库（只会误被 git add -A 拖进 805MB），
 # 长期保留的是 docs/bench_raw/**/README.md 里的 sha256 与来源。
@@ -185,5 +186,20 @@ docs/bench_raw/**/*.apk
 # 量化低精度变体（PSNR<35dB，仅本地留存，不进交付）
 *_q16_lowq.onnx
 .Trash-0/
-android/c1_shell/build-win*/
-android/c1_shell/openssl/
+cpp/shell/build-win*/
+cpp/shell/openssl/
+
+# ---- 新目录结构（python/ + cpp/ 并行）----
+# C++ 桌面 / 移动构建产物
+cpp/shell/ui/build/
+cpp/shell/ui/build-android-*/
+cpp/shell/build-win/
+cpp/dist/
+cpp/build_logs/
+# Python 桌面构建产物
+python/dist/
+python/build/
+python/.venv-build/
+
+# 本地构建探针（一次性排查产物，不入库）
+.build-probe/
