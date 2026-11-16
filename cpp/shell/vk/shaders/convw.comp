@@ -1,0 +1,167 @@
+// Winograd F(2,3)：3x3 / stride1 / 对称 pad 的卷积，每线程产出一个 2x2 输出 tile。
+//
+// 变换（Lavin & Gray, "Fast Algorithms for Convolutional Neural Networks"）：
+//   Y = A^T * [ (G w) ⊙ (B^T d) ] * B
+//   B^T = [[1, 0, -1, 0], [0, 1, 1, 0], [0, -1, 1, 0], [0, 1, 0, -1]]
+//   G   = [[1, 0, 0], [1/2, 1/2, 1/2], [1/2, -1/2, 1/2], [0, 0, 1]]
+//   A^T = [[1, 1, 1, 0], [0, 1, -1, -1]]
+// 权重变换 G w G^T 在 CPU 上 prepare 时预计算（见 sr_graph），shader 只做：
+//   1) 每个输入通道读 4x4 邻域，B^T 行变换成 T[4][4]；
+//   2) 逐元素乘预变换权重并累加到 M[4][4]（fp32 累加）；
+//   3) 输出列/行组合得 2x2。
+// FLOP 比直接卷积省 ~2.25x（36 MAC/tile -> 16），读带宽省 ~2x；fp16 下读放大
+// 进一步减半。启用条件（C>=16 && OC>=16 门控）由 sr_graph 决定。
+//
+// 布局：workgroup 64 线程；gx = ceil(tileCols/64)，gy = tileRows，gz = OC。
+// push constant 与 conv.comp 完全同槽位；权重是预变换后的 [OC][IC][4][4]。
+// USE_FP16 变体：存储 half、累加 fp32（与 conv.comp 同一套宏）。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer Src { FT x[]; };
+layout(binding = 1) buffer Ker { FT w[]; };   // 预变换权重 [OC][IC][4][4]
+layout(binding = 2) buffer Bia { FT bias[]; };
+layout(binding = 3) buffer Dst { FT y[]; };
+
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+float FusedAct(float v, int mode, float alpha)
+{
+    if (mode == 1)
+        return max(v, 0.0);                       // Relu
+    if (mode == 2)
+        return v >= 0.0 ? v : v * alpha;          // LeakyRelu
+    if (mode == 3)
+        return 1.0 / (1.0 + exp(-v));             // Sigmoid
+    return v;
+}
+
+void main()
+{
+    const int C = P(0);
+    const int H = P(1);
+    const int W = P(2);
+    const int OC = P(3);
+    // KH/KW 恒为 3（sr_graph 已保证），SX/SY 恒为 1
+    const int PX = P(8);
+    const int PY = P(9);
+    const int OH = P(10);
+    const int OW = P(11);
+    const bool hasBias = P(12) != 0;
+    const int actMode = P(13);
+    const float actAlpha = uintBitsToFloat(uint(P(14)));
+
+    const int tileRows = (OH + 1) / 2;
+    const int tileCols = (OW + 1) / 2;
+    const int oy = int(gl_WorkGroupID.y);
+    const int oc = int(gl_WorkGroupID.z);
+    if (oy >= tileRows || oc >= OC)
+        return;
+    const int tX = int(gl_WorkGroupID.x) * 64 + int(gl_LocalInvocationID.x);
+    if (tX >= tileCols)
+        return;
+
+    const int ox = tX * 2;
+    const float b0 = hasBias ? FLD(bias[oc]) : 0.0;
+
+    // 4x4 输入窗口（行主序），窗口起点 = 2*oy-PY / ox-PX。
+    // 注意：oy 是 tile 行号（winY 才换算像素），而 ox 已经是输出像素列
+    //（tX*2），两者量纲不同——第一版把 ox 又乘了 2，tile 从第 2 列起全部错位
+    const int winY = oy * 2 - PY;
+    const int winX = ox - PX;
+
+    // M[4][4]：所有输入通道的变换域累加
+    float M[16];
+    for (int i = 0; i < 16; ++i)
+        M[i] = 0.0;
+
+    for (int c = 0; c < C; ++c) {
+        const int cBase = c * H * W;
+        // 每通道读自己的 4x4 窗口（窗口越界读 0，对应 constant pad）
+        float D[16];
+        for (int ky = 0; ky < 4; ++ky) {
+            const int iy = winY + ky;
+            for (int kx = 0; kx < 4; ++kx)
+                D[ky * 4 + kx] = 0.0;
+            if (iy < 0 || iy >= H)
+                continue;
+            for (int kx = 0; kx < 4; ++kx) {
+                const int ix = winX + kx;
+                if (ix < 0 || ix >= W)
+                    continue;
+                D[ky * 4 + kx] = FLD(x[cBase + iy * W + ix]);
+            }
+        }
+        // 输入变换 T = B^T · D · B^T（行、列方向用同一组稀疏系数）：
+        //   t0 = a0 - a2   t1 = a1 + a2   t2 = a2 - a1   t3 = a1 - a3
+        // 1) 行变换（j 遍历列，组合行）
+        float X[16];
+        for (int j = 0; j < 4; ++j) {
+            const float d0 = D[0 * 4 + j];
+            const float d1 = D[1 * 4 + j];
+            const float d2 = D[2 * 4 + j];
+            const float d3 = D[3 * 4 + j];
+            X[0 * 4 + j] = d0 - d2;
+            X[1 * 4 + j] = d1 + d2;
+            X[2 * 4 + j] = d2 - d1;
+            X[3 * 4 + j] = d1 - d3;
+        }
+        // 2) 列变换（i 遍历行，组合列）
+        float T[16];
+        for (int i = 0; i < 4; ++i) {
+            const float x0 = X[i * 4 + 0];
+            const float x1 = X[i * 4 + 1];
+            const float x2 = X[i * 4 + 2];
+            const float x3 = X[i * 4 + 3];
+            T[i * 4 + 0] = x0 - x2;
+            T[i * 4 + 1] = x1 + x2;
+            T[i * 4 + 2] = x2 - x1;
+            T[i * 4 + 3] = x1 - x3;
+        }
+        const int wBase = (oc * C + c) * 16;
+        for (int i = 0; i < 16; ++i)
+            M[i] += T[i] * FLD(w[wBase + i]);
+    }
+
+    // 输出 y = A^T · M · A。列组合（v0/v1）与行组合系数同构：
+    //   v0[i] = M[i][0] + M[i][1] + M[i][2]   （A 列 0）
+    //   v1[i] = M[i][1] - M[i][2] - M[i][3]   （A 列 1）
+    //   y00 = v0[0]+v0[1]+v0[2]   y10 = v0[1]-v0[2]-v0[3]   （A^T 两行）
+    //   y01 = v1[0]+v1[1]+v1[2]   y11 = v1[1]-v1[2]-v1[3]
+    float v0[4];
+    float v1[4];
+    for (int i = 0; i < 4; ++i) {
+        v0[i] = M[i * 4 + 0] + M[i * 4 + 1] + M[i * 4 + 2];
+        v1[i] = M[i * 4 + 1] - M[i * 4 + 2] - M[i * 4 + 3];
+    }
+    const float y00 = b0 + v0[0] + v0[1] + v0[2];
+    const float y10 = b0 + v0[1] - v0[2] - v0[3];
+    const float y01 = b0 + v1[0] + v1[1] + v1[2];
+    const float y11 = b0 + v1[1] - v1[2] - v1[3];
+
+    const int oRow0 = (oc * OH + oy * 2) * OW + ox;
+    const int oRow1 = (oc * OH + oy * 2 + 1) * OW + ox;
+    y[oRow0] = FST(FusedAct(y00, actMode, actAlpha));
+    if (ox + 1 < OW)
+        y[oRow0 + 1] = FST(FusedAct(y01, actMode, actAlpha));
+    if (oy * 2 + 1 < OH) {
+        y[oRow1] = FST(FusedAct(y10, actMode, actAlpha));
+        if (ox + 1 < OW)
+            y[oRow1 + 1] = FST(FusedAct(y11, actMode, actAlpha));
+    }
+}

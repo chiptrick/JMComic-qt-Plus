@@ -6,7 +6,6 @@
 #include <QBoxLayout>
 #include <QComboBox>
 #include <QFontMetrics>
-#include <QGuiApplication>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -17,7 +16,6 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
-#include <QScreen>
 #include <QScrollBar>
 #include <QSpinBox>
 #include <QTimer>
@@ -816,6 +814,7 @@ DetailPage::DetailPage(QWidget *parent) : PageBase(parent)
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     auto *body = PageBody(this);
+    body_ = body;
     auto *lay = BodyLayout(body);
 
     QHBoxLayout *header = nullptr;
@@ -829,22 +828,21 @@ DetailPage::DetailPage(QWidget *parent) : PageBase(parent)
 
     auto *top = new QWidget(body);
     // 手机竖屏只有 ~363dp 宽：封面 180 + 22 间距 + 信息列（简介 max 620）远超出屏宽，
-    // 右侧"收藏"按钮和简介尾行会被直接裁掉。上机改成上下堆叠，桌面保持左图右文。
-    // 手机竖屏上下堆叠；平板/折叠屏展开（>=600dp）仍按左图右文，避免大屏上内容被拉成一条。
-    const QScreen *scr = QGuiApplication::primaryScreen();
-    const bool wideScreen = scr && scr->availableGeometry().width() >= UiStyle::Fpx(600);
-    // IsMobile() 是编译期常量（Android 上恒真），IsTouchMode() 是运行期开关。
-    // 页面在主窗口构造期就建好了，那时还没 EnableTouchMode，所以必须带上 IsMobile，
-    // 否则真机会按桌面横排布局（内容超宽、封面被裁到屏幕外）。
-    const bool mobile = (Touch::IsMobile() || Touch::IsTouchMode()) && !wideScreen;
-    QBoxLayout *tl = mobile ? static_cast<QBoxLayout *>(new QVBoxLayout(top))
-                            : static_cast<QBoxLayout *>(new QHBoxLayout(top));
+    // 右侧"收藏"按钮和简介尾行会被直接裁掉。窄屏改成上下堆叠，宽屏保持左图右文。
+    //
+    // 判定**不能**用主屏宽度：页面在主窗口构造期就建好了，桌面验收窗口即使只有
+    // 427px 宽，primaryScreen 仍是 1920，按主屏算会一直走"左图右文"——信息列
+    // （三个按钮的最小宽 280 + 封面 180 + 间距 22 = 482）把内容顶到 514px，
+    // 视口只有 427px，hmax=87，标题/标签/简介整体右侧裁切（11-13 363dp 实测）。
+    // 现在统一由 ApplyTopLayout() 按页面实际宽度算，并在 resize 时重算。
+    QBoxLayout *tl = new QBoxLayout(QBoxLayout::LeftToRight, top);
+    topLayout_ = tl;
     tl->setContentsMargins(0, 0, 0, 0);
-    tl->setSpacing(mobile ? 14 : 22);
+    tl->setSpacing(22);
 
     cover_ = new QLabel(top);
-    cover_->setFixedSize(mobile ? QSize(120, 160) : QSize(180, 240));
-    tl->addWidget(cover_, 0, mobile ? Qt::AlignHCenter : Qt::AlignTop);
+    cover_->setFixedSize(QSize(180, 240));
+    tl->addWidget(cover_, 0, Qt::AlignTop);
 
     auto *info = new QVBoxLayout();
     info->setSpacing(10);
@@ -894,7 +892,7 @@ DetailPage::DetailPage(QWidget *parent) : PageBase(parent)
     desc_ = new QLabel(top);
     desc_->setObjectName(QStringLiteral("SettingDesc"));
     desc_->setWordWrap(true);
-    desc_->setMaximumWidth(mobile ? QWIDGETSIZE_MAX : 620);
+    desc_->setMaximumWidth(620);   // 宽屏上限；窄屏由 ApplyTopLayout 解掉
     info->addWidget(desc_);
 
     auto *btns = new QHBoxLayout();
@@ -910,10 +908,21 @@ DetailPage::DetailPage(QWidget *parent) : PageBase(parent)
     favBtn_->setObjectName(QStringLiteral("Ghost"));
     UiStyle::MarkSoftButton(favBtn_);   // "收藏 / 已收藏"是同一个按钮，造型保持不变
     favBtn_->setCursor(Qt::PointingHandCursor);
+    auto *comment = new QPushButton(QStringLiteral("评论"), top);
+    comment->setObjectName(QStringLiteral("Ghost"));
+    comment->setCursor(Qt::PointingHandCursor);
     btns->addWidget(read);
     btns->addWidget(dl);
     btns->addWidget(favBtn_);
+    btns->addWidget(comment);
     btns->addStretch(1);
+    connect(comment, &QPushButton::clicked, this, [this] {
+        if (c_.id.isEmpty()) {
+            emit Toast(QStringLiteral("缺少作品 ID，无法查看评论"));
+            return;
+        }
+        emit CommentsRequested(c_);
+    });
     info->addLayout(btns);
 
     connect(read, &QPushButton::clicked, this, [this] {
@@ -979,7 +988,8 @@ DetailPage::DetailPage(QWidget *parent) : PageBase(parent)
     lay->addWidget(chapterHost_);
     lay->addStretch(1);
 
-    root->addWidget(WrapScroll(body, this));
+    scroll_ = WrapScroll(body, this);
+    root->addWidget(scroll_);
 
     // 未经卡片点击直接进本页时不摆样例作品：只留空态提示，等真实作品/章节回填。
     title_->setText(QStringLiteral("未选择作品"));
@@ -987,12 +997,58 @@ DetailPage::DetailPage(QWidget *parent) : PageBase(parent)
     favBtn_->hide();
     BuildChapters();
     UpdateCover();
+    ApplyTopLayout();   // 构造期宽度还没定，先按 0 宽给堆叠态，首次 resize 会纠正
 
     // 真实封面是异步的：Get() 先给占位图，下载完成后再回填一次。
     connect(&CoverCache::I(), &CoverCache::Loaded, this, [this](const QString &key) {
         if (key == QStringLiteral("detail:%1").arg(c_.id))
             UpdateCover();
     });
+}
+
+void DetailPage::resizeEvent(QResizeEvent *e)
+{
+    QWidget::resizeEvent(e);
+    if (width() <= 0 || topCheckPending_)
+        return;
+    // 与 SettingRow 同一套做法：resizeEvent 里视口/页边距还没落到最终值，
+    // 延后到本轮布局结束再按稳定宽度判一次，避免"先判成堆叠就再也翻不回来"。
+    topCheckPending_ = true;
+    QTimer::singleShot(0, this, [this] {
+        topCheckPending_ = false;
+        ApplyTopLayout();
+    });
+}
+
+void DetailPage::ApplyTopLayout()
+{
+    if (!topLayout_ || !cover_ || !desc_)
+        return;
+    // 可用宽度 = 滚动视口宽 - 内容左右页边距。门槛与 Python 版一致：>=600dp 才左右排。
+    // 注意这里必须用页面/视口的真实宽度，不能用主屏宽：见构造函数里的注释。
+    const int vp = (scroll_ && scroll_->viewport()->width() > 0) ? scroll_->viewport()->width()
+                                                                 : width();
+    // 页边距取 body 布局的实际值（构造期按当时的 touch 模式算过一次，不能再猜）。
+    int margins = 2 * BodyMargin();
+    if (body_ && body_->layout())
+        margins = body_->layout()->contentsMargins().left()
+                  + body_->layout()->contentsMargins().right();
+    const int avail = vp - margins;
+    const bool side = avail >= UiStyle::Fpx(600);
+    if (topApplied_ && side == topSide_)
+        return;
+    topApplied_ = true;
+    topSide_ = side;
+
+    topLayout_->setDirection(side ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+    topLayout_->setSpacing(side ? 22 : 14);
+    cover_->setFixedSize(side ? QSize(180, 240) : QSize(120, 160));
+    // 堆叠态封面居中；横排态贴顶，别让 QBoxLayout 把固定尺寸的封面竖向拉伸。
+    topLayout_->setAlignment(cover_, side ? Qt::AlignTop : Qt::AlignHCenter);
+    // 简介在横排态限宽（行宽 620 左右最易读）；堆叠态必须放开通栏，否则右侧留一条空白。
+    desc_->setMaximumWidth(side ? 620 : QWIDGETSIZE_MAX);
+    // 这是"页面被撑宽"的定位锚点：视口宽、可用宽、当前模式三个数一起看。
+    qWarning("detail-layout: vp=%d avail=%d side=%d", vp, avail, int(side));
 }
 
 void DetailPage::UpdateMeta()

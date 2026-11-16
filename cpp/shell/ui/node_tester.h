@@ -28,6 +28,7 @@
 
 #include <functional>
 
+#include "node_bench_pool.h"
 #include "proxy_config.h"
 
 class QNetworkAccessManager;
@@ -45,6 +46,9 @@ public:
     void TestNodes();   // 三类节点：取 ProxyIP 列表 → ping → 图片 → 排序 → 自动选中
     void Cancel();
     bool Busy() const { return busy_; }
+    // 本轮节点测速实际采用的工作线程数（1 = 兼容档，不建线程）
+    int NodeThreads() const { return nodeThreads_; }
+    bool Pooled() const { return pooled_; }
 
     // Python ToolUtil.GetDownloadSize 的档位：bytes / kb / mb
     static QString FormatSpeed(double bytesPerSec);
@@ -91,6 +95,14 @@ private:
     void PumpNodes();
     void FinishNodes();
 
+    // 工作线程池分支（speedThreads >= 2）：ping / speed 各跑一批，ipinfo 与
+    // FinishNodes 仍走主线程原逻辑。两条分支共用同一套日志与结果字段。
+    void StartPooledPing();
+    void StartPooledSpeed();
+    void ApplyPingOutcome(const NodeBench::Outcome &o);
+    void ApplySpeedOutcome(const NodeBench::Outcome &o);
+    void StartIpInfoPhase();
+
     QNetworkAccessManager *nam_ = nullptr;
     NodeHttp *nodeHttp_ = nullptr;
     bool busy_ = false;
@@ -114,4 +126,10 @@ private:
     // 0=idle 1=fetch 2=ping 3=speed 4=ipinfo（补地区，Python 与 ping 并发发，这里
     // 单独收尾：地区只用于下拉候选，晚一点到不影响测速结果与排序）
     int nodePhase_ = 0;
+
+    // 并发测速（0.91）：1 = 完全沿用上面的事件循环路径；2..16 = 线程池。
+    // pool_ 的上下文就是 this，回调全部队列回投主线程，nodes_ 不被工作线程触碰。
+    NodeBench::Pool pool_;
+    int nodeThreads_ = 1;
+    bool pooled_ = false;
 };

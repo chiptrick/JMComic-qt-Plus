@@ -1,0 +1,71 @@
+// 双输入逐元素（Add / Mul / Sub / Div），支持 NCHW 广播。
+//
+// 广播在 host 侧算成 3 组 (use, dim)：use=0 表示该维取 0（相当于长度为 1），
+// 这样 shader 里没有分支树，只有两次乘法累加：
+//   aOff = aUseC? c*aH*aW : 0 + aUseH? h*aW : 0 + aUseW? w : 0
+// USE_FP16 变体：存储 half、计算 fp32（与 conv.comp 同一套宏）。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer A { FT a[]; };
+layout(binding = 1) buffer B { FT b[]; };
+layout(binding = 2) buffer O { FT o[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+void main()
+{
+    const int n = P(0);
+    const int mode = P(1);
+    const int C = P(2);
+    const int H = P(3);
+    const int W = P(4);
+    const int aUseC = P(5), aUseH = P(6), aUseW = P(7);
+    const int aH = P(8), aW = P(9);
+    const int bUseC = P(10), bUseH = P(11), bUseW = P(12);
+    const int bH = P(13), bW = P(14);
+
+    const int i = int(gl_GlobalInvocationID.x);
+    if (i >= n)
+        return;
+
+    const int w = W > 0 ? (i % W) : 0;
+    const int h = H > 0 ? ((i / W) % H) : 0;
+    const int c = (W > 0 && H > 0) ? (i / (W * H)) : 0;
+
+    const int aOff = (aUseC != 0 ? c * aH * aW : 0)
+                     + (aUseH != 0 ? h * aW : 0)
+                     + (aUseW != 0 ? w : 0);
+    const int bOff = (bUseC != 0 ? c * bH * bW : 0)
+                     + (bUseH != 0 ? h * bW : 0)
+                     + (bUseW != 0 ? w : 0);
+
+    const float va = FLD(a[aOff]);
+    const float vb = FLD(b[bOff]);
+    float r = va + vb;
+    if (mode == 1)
+        r = va * vb;
+    else if (mode == 2)
+        r = va - vb;
+    else if (mode == 3)
+        r = va / vb;
+    o[i] = FST(r);
+}

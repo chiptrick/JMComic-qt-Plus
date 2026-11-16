@@ -21,8 +21,10 @@
 #include <QScrollBar>
 #include <QScroller>
 #include <QSizePolicy>
+#include <QSpinBox>
 #include <QStyle>
 #include <QTimer>
+#include <QTouchEvent>
 #include <QVBoxLayout>
 
 #include "motion.h"
@@ -225,13 +227,6 @@ void ProxyPage::BuildUi()
     // 否则触摸/触控板的横向拖动会让整页左右平移（hmax 实测 53px @360 宽）。
     Touch::LockHorizontalPan(scroll);
     root->addWidget(scroll, 1);
-    // 展开抽屉后的 2.5s 内，内容高度一变（节点行重排/字体落定）就重新贴底，
-    // 否则会停在"展开那一刻的滚动范围"上，看起来像点了没反应。
-    connect(scroll->verticalScrollBar(), &QScrollBar::rangeChanged, this,
-            [this](int, int max) {
-                if (advOpen_ && advScrollClock_.isValid() && advScrollClock_.elapsed() < 2500)
-                    scroll_->verticalScrollBar()->setValue(max);
-            });
 
     // ---------------- 页头：代理通道 + 说明（demo .phead） ----------------
     auto *head = new QWidget(body);
@@ -384,28 +379,39 @@ void ProxyPage::BuildUi()
     nodeHost_->setSpacing(0);
     lay->addWidget(rows);
 
-    // ---------------- 高级抽屉（Python tab_4 的 proxyAdvPanel） ----------------
-    auto *advWrap = new QWidget(body);
-    auto *advWrapLay = new QVBoxLayout(advWrap);
-    advWrapLay->setContentsMargins(10, 8, 10, 2);
-    advWrapLay->setSpacing(0);
-    advPanel_ = new QWidget(advWrap);
-    auto *panelLay = new QVBoxLayout(advPanel_);
-    panelLay->setContentsMargins(0, 0, 0, 0);
-    panelLay->setSpacing(0);
-    // 描边必须画在独立子控件上：面板本身高度在 0→h 之间变化，自绘边框会跟着抖；
-    // 且普通 QWidget 默认不画 qss 背景/边框，必须开 WA_StyledBackground。
-    advFrame_ = new QWidget(advPanel_);
+    // ---------------- 高级抽屉：悬浮层（贴在底栏上沿，不占列表版面） ----------------
+    // 不再放进滚动内容：节点列表动辄几十上百行，内联在末尾等于"点高级就跳到页尾"。
+    // 这里挂在页面自身，高度从 0 长上来，底下列表纹丝不动。
+    // 内容外包一层 QScrollArea：字号放大/横屏时面板可能比可用高度还高，那时内部自己滚。
+    advOverlay_ = new QWidget(this);
+    advOverlay_->setObjectName(QStringLiteral("ProxyAdvOverlay"));
+    advOverlay_->setProperty("tapGuardOverlay", true);   // 悬浮抽屉参与统一防误触
+    advOverlay_->hide();
+    auto *ovl = new QVBoxLayout(advOverlay_);
+    ovl->setContentsMargins(0, 0, 0, 0);
+    ovl->setSpacing(0);
+    advScroll_ = new QScrollArea(advOverlay_);
+    advScroll_->setWidgetResizable(true);
+    advScroll_->setFrameShape(QFrame::NoFrame);
+    advScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // 不要给 advScroll_ 设无选择器的 background:transparent —— 组件级样式会一起
+    // 命中面板本身（优先级高于应用级 qss），背景会穿透到下面的列表。
+    advScroll_->viewport()->setAutoFillBackground(false);
+    Touch::LockHorizontalPan(advScroll_);
+    ovl->addWidget(advScroll_);
+    // 应用级过滤器：抽屉展开时"点面板外收起"。只在 advOpen_ 为真时做事，
+    // 常驻安装省掉"开时装/关时卸"的状态机（这层判定只比一次事件类型）。
+    qApp->installEventFilter(this);
+
+    // 描边必须画在独立子控件上（面板本身在滚动区内），普通 QWidget 默认
+    // 不画 qss 背景/边框，必须开 WA_StyledBackground。
+    advFrame_ = new QWidget();
     advFrame_->setObjectName(QStringLiteral("AdvFrame"));
     advFrame_->setAttribute(Qt::WA_StyledBackground, true);
     auto *av = new QVBoxLayout(advFrame_);
     av->setContentsMargins(10, 8, 10, 8);
     av->setSpacing(6);
-    panelLay->addWidget(advFrame_);
-    advPanel_->setMaximumHeight(0);
-    advPanel_->setVisible(false);
-    advWrapLay->addWidget(advPanel_);
-    lay->addWidget(advWrap);
+    advScroll_->setWidget(advFrame_);
 
     auto fieldLabel = [this](const QString &text) {
         auto *l = new QLabel(text, advFrame_);
@@ -459,6 +465,28 @@ void ProxyPage::BuildUi()
     switches->addWidget(http3Box_);
     switches->addStretch(1);
     av->addLayout(switches);
+
+    // 节点测速并发度：1 = 兼容档（原来的单线程事件循环，行为逐字节不变）；
+    // 2..16 = 工作线程池。上限写死在 ProxyConfig::kMaxSpeedThreads / NodeBench
+    // ::kMaxThreads，spinbox 的 range 与实际调度都受同一常量约束。
+    auto *benchRow = new QHBoxLayout();
+    benchRow->setSpacing(6);
+    benchRow->addWidget(fieldLabel(QStringLiteral("测速线程")));
+    threadSpin_ = new QSpinBox(advFrame_);
+    threadSpin_->setObjectName(QStringLiteral("PageSpin"));   // 复用 22px 紧凑样式
+    threadSpin_->setRange(1, ProxyConfig::kMaxSpeedThreads);
+    threadSpin_->setValue(ProxyConfig::SpeedThreads());
+    threadSpin_->setProperty("hitGrow", false);
+    threadSpin_->setToolTip(QStringLiteral(
+        "节点测速并发线程数：1 = 兼容单线程事件循环；2~16 = 工作线程同时测速（上限 16）"));
+    benchRow->addWidget(threadSpin_);
+    auto *benchNote = new QLabel(QStringLiteral("1 = 兼容旧逻辑 · 2~16 = 工作线程（上限 16）"),
+                                 advFrame_);
+    benchNote->setObjectName(QStringLiteral("ProxyNote"));
+    benchNote->setWordWrap(true);
+    benchNote->setMinimumWidth(0);
+    benchRow->addWidget(benchNote, 1);
+    av->addLayout(benchRow);
 
     // 地区 / 自定义 IP：Python 的 proxyRegionRow + proxyIpListRow 同样在抽屉里。
     // 地区不再手打代码：只读框点击弹出「已获取到的地区」下拉（见 ShowRegionMenu）。
@@ -536,6 +564,9 @@ void ProxyPage::BuildUi()
     advancedStatus_->setObjectName(QStringLiteral("ProxyNote"));
     advancedStatus_->setWordWrap(true);
     av->addWidget(advancedStatus_);
+    // 滚动区会把面板拉到视口高度：没有弹簧时 QVBoxLayout 会把多出来的
+    // 高度均分给各行，看起来"行距忽大忽小"。多出来的空间一律留在最下面。
+    av->addStretch(1);
 
     // 页脚诊断：接口/图片实际走的线路与原因（demo 里没有，属于本页的排障信息）
     effective_ = new QLabel(body);
@@ -561,7 +592,7 @@ void ProxyPage::BuildUi()
     advBtn_->setProperty("chip", QStringLiteral("foot"));
     advBtn_->setProperty("hitGrow", false);
     advBtn_->setCursor(Qt::PointingHandCursor);
-    advBtn_->setToolTip(QStringLiteral("DOH / ECH / HTTP3 / 地区 / 自定义 IP"));
+    advBtn_->setToolTip(QStringLiteral("DOH / ECH / HTTP3 / 测速线程 / 地区 / 自定义 IP"));
     connect(advBtn_, &QPushButton::clicked, this, &ProxyPage::ToggleAdvanced);
     footLay->addWidget(advBtn_);
     nodeBtn_ = new QPushButton(QStringLiteral("节点测速"), foot);
@@ -573,6 +604,7 @@ void ProxyPage::BuildUi()
     connect(nodeBtn_, &QPushButton::clicked, this, &ProxyPage::StartNodeTest);
     footLay->addWidget(nodeBtn_);
     root->addWidget(foot);
+    foot_ = foot;
 
     RefreshRegionField();
     UpdateEffectiveHint();
@@ -602,15 +634,30 @@ void ProxyPage::OnEnter()
         echBox_->setChecked(ProxyConfig::EchEnabled());
     if (http3Box_)
         http3Box_->setChecked(ProxyConfig::Http3Enabled());
+    if (threadSpin_)
+        threadSpin_->setValue(ProxyConfig::SpeedThreads());
     RefreshLineRows();
     RenderNodes();
     UpdateEffectiveHint();
     RefreshAdvancedStatus();
 }
 
+void ProxyPage::OnLeave()
+{
+    // 悬浮抽屉不随页面存活：离开就收起（无动画——换页动画期间再叠一层高度动画
+    // 会拖慢首帧，而且用户已经在看下一页了）。
+    // 收起后 advOpen_ 变假，常驻的应用级过滤器也就自动不再判事件。
+    if (advOpen_)
+        SetAdvancedOpen(false, false);
+    PageBase::OnLeave();
+}
+
 void ProxyPage::resizeEvent(QResizeEvent *e)
 {
     PageBase::resizeEvent(e);
+    // 悬浮抽屉跟着窗口走：宽度变了要重算折行，窗口变矮要重新夹高度
+    if (advOpen_ && advOverlay_ && advOverlay_->isVisible())
+        ApplyAdvancedHeight(qMin(AdvancedContentHeight(), AdvancedMaxHeight()));
     const bool narrow = Touch::IsMobile() || width() < 620;
     if (narrow == narrow_)
         return;
@@ -624,6 +671,10 @@ void ProxyPage::resizeEvent(QResizeEvent *e)
 // Python login_proxy_new_widget.OnAdvClicked：按钮文案在 高级 / 收起 之间切换，
 // 面板按"先量出展开高度、再从 0 长上去"的方式做高度过渡，展开期间给面板加
 // 1px 主题色描边，收起后连描边一起撤掉。
+//
+// 与 Python 的差别只有"挂在哪"：Python 的抽屉在页面底部固定区里，C++ 侧挂在页面
+// 自身、贴在底栏上沿（悬浮层）。原因是节点列表动辄几十上百行，内联在滚动内容末尾
+// 会出现"点高级 → 整页跳到页尾"，收起来以后人还留在页尾。
 // 曲线/时长取本项目的 motion 表（Slow=240ms + Enter/Exit），不用 Python 的
 // OutBack 320ms —— 全站动效只能来自 ui/motion.*，见 motion.h 的约束。
 void ProxyPage::ToggleAdvanced()
@@ -639,100 +690,124 @@ void ProxyPage::ExpandAdvanced()
 
 void ProxyPage::SetAdvancedOpen(bool open, bool animate)
 {
-    if (!advPanel_ || !advBtn_)
+    if (!advOverlay_ || !advFrame_ || !advBtn_)
         return;
-    // 连点时先打断上一个补间，否则两个动画同时写 maximumHeight 会互相覆盖
+    // 连点时先打断上一个补间，否则两个动画同时写几何会互相覆盖
     Motion::Stop(this, QStringLiteral("proxyAdv"));
     advOpen_ = open;
-    if (open)
-        advScrollClock_.start();
-    else
-        advScrollClock_.invalidate();
+    advOutsideArmed_ = false;
     advBtn_->setText(open ? QStringLiteral("收起") : QStringLiteral("高级"));
 
     // 展开时描边高亮：属性驱动 qss，避免内联 setStyleSheet 影响子控件
-    if (advFrame_) {
-        advFrame_->setProperty("open", open);
-        advFrame_->style()->unpolish(advFrame_);
-        advFrame_->style()->polish(advFrame_);
-    }
+    advFrame_->setProperty("open", open);
+    advFrame_->style()->unpolish(advFrame_);
+    advFrame_->style()->polish(advFrame_);
 
     if (open) {
-        advPanel_->setVisible(true);
-        // 先放开高度让布局算出"展开后该多高"，再从 0 长上去
-        advPanel_->setMaximumHeight(QWIDGETSIZE_MAX);
-        if (QLayout *l = advPanel_->layout())
-            l->activate();
-        // 抽屉里有 wordWrap 的状态文本：sizeHint() 给的是"不折行"的高度，
-        // 折行后的真实高度只有 heightForWidth 算得对，两个取大值才不会展开到一半。
-        int target = advFrame_ ? advFrame_->sizeHint().height() : 0;
-        if (advFrame_ && advFrame_->width() > 0 && advFrame_->hasHeightForWidth())
-            target = qMax(target, advFrame_->heightForWidth(advFrame_->width()));
-        target = qMax(1, target);
-        advPanel_->setMaximumHeight(0);
+        if (advScroll_)
+            advScroll_->ensureVisible(0, 0);   // 上次滚到一半，重开时回到顶部
+        advOverlay_->show();
+        advOverlay_->raise();
+        const int target = qMin(AdvancedContentHeight(), AdvancedMaxHeight());
+        advHeight_ = 0;
+        LayoutAdvancedOverlay();   // 先按"高度 0 + 最终宽度"落位，再加高
         if (!animate) {
             ApplyAdvancedHeight(target);
-            advPanel_->setMaximumHeight(QWIDGETSIZE_MAX);
-            advPanel_->setMinimumHeight(0);
-            // 展开后要把它滚进视口，但首次布局的高度/滚动范围还没定：
-            // 一次 ensureWidgetVisible 会按"当时的 maximum"夹住（实测停在列表中间）。
-            // 这里隔几个时间点各试一次，advOpen_ 为假时每次都是空操作。
-            for (int delay : {0, 150, 800})
-                QTimer::singleShot(delay, this, [this] { EnsureAdvancedVisible(); });
             return;
         }
-        Motion::Animate(
-            this, QStringLiteral("proxyAdv"), 0, target, Motion::Slow, Motion::EnterCurve(),
-            [this](qreal v) { ApplyAdvancedHeight(v); },
-            // 动画结束交回布局：之后字号/文案变化时高度能自然跟着变
-            [this] {
-                advPanel_->setMinimumHeight(0);
-                advPanel_->setMaximumHeight(QWIDGETSIZE_MAX);
-                EnsureAdvancedVisible();
-            });
+        Motion::Animate(this, QStringLiteral("proxyAdv"), 0, target, Motion::Slow,
+                        Motion::EnterCurve(), [this](qreal v) { ApplyAdvancedHeight(v); },
+                        [this] { ApplyAdvancedHeight(advHeight_); });
         return;
     }
 
-    const int from = advPanel_->height();
+    const int from = advHeight_;
     if (!animate) {
-        advPanel_->setVisible(false);
-        advPanel_->setMinimumHeight(0);
-        advPanel_->setMaximumHeight(0);
+        ApplyAdvancedHeight(0);
+        advOverlay_->hide();
         return;
     }
     Motion::Animate(this, QStringLiteral("proxyAdv"), from, 0, Motion::Slow, Motion::ExitCurve(),
-                    [this](qreal v) { ApplyAdvancedHeight(v); }, [this] {
-                        advPanel_->setVisible(false);
-                        advPanel_->setMinimumHeight(0);
-                        advPanel_->setMaximumHeight(0);
-                    });
+                    [this](qreal v) { ApplyAdvancedHeight(v); },
+                    [this] { advOverlay_->hide(); });
 }
 
 void ProxyPage::ApplyAdvancedHeight(qreal value)
 {
-    if (!advPanel_)
-        return;
-    const int h = qMax(0, qRound(value));
-    advPanel_->setMinimumHeight(h);
-    advPanel_->setMaximumHeight(h);
+    advHeight_ = qMax(0, qRound(value));
+    LayoutAdvancedOverlay();
 }
 
-// 展开后把抽屉滚进视口：高级入口在操作行末尾，桌面窗口不高时抽屉会落在折线以下，
-// 不滚一下等于"点了没反应"（Python 的抽屉是底部固定区，天然可见）。
-void ProxyPage::EnsureAdvancedVisible()
+// 面板内容高度。
+//
+// 不能用 sizeHint / heightForWidth：诊断段是多行 wordWrap 文本，两者都比实际
+// 少算 1~2 行（实测 309 vs 需要 ~350），展开后末尾必然被裁一截。
+// 做法：把悬浮层挪到页面下沿之外（父控件裁剪，用户看不到）按**最终宽度**排一次版，
+// 再读"视口高度 + 纵向滚动范围" —— 这就是内容在当前宽度下的真实高度。
+int ProxyPage::AdvancedContentHeight()
 {
-    // 不能拿 advFrame_->isVisible() 当门槛：--quiet / 最小化截图时顶层窗口是隐藏的，
-    // 整棵控件树的 isVisible() 都是 false，但布局与 grab() 照常工作。
-    // 折叠状态下 advOpen_ 为 false，这里自然不做无谓滚动。
-    if (!scroll_ || !advFrame_ || !advOpen_)
-        return;
-    // 抽屉是整页最后一块内容，滚到底就等于"把抽屉完整露出来"。
-    // 不用 ensureWidgetVisible：它按调用瞬间的滚动范围夹取，而展开抽屉时
-    // 节点行还在重排，实测会停在列表中间而不是抽屉上。
-    QScrollBar *bar = scroll_->verticalScrollBar();
-    bar->setValue(bar->maximum());
+    QLayout *av = advFrame_ ? advFrame_->layout() : nullptr;
+    if (!av)
+        return 0;
+    const int side = UiStyle::Fpx(10);
+    const int w = qMax(UiStyle::Fpx(200), width() - side * 2);
+    const QMargins m = av->contentsMargins();
+    const int innerW = qMax(1, w - m.left() - m.right() - 2);
+
+    // 不借助"先摆一遍再读几何"：滚动区对 widget 的尺寸重排是延迟的，量到的
+    // 往往是上一次窄宽度下的折行结果（实测 360dp 会多出 130px 空白）。
+    // 这里按内宽逐项累加：wordWrap 控件走 heightForWidth，其余走 sizeHint。
+    int total = m.top() + m.bottom() + 2;   // 上下内边距 + 上下边框
+    int items = 0;
+    for (int i = 0; i < av->count(); ++i) {
+        QLayoutItem *it = av->itemAt(i);
+        if (!it || dynamic_cast<QSpacerItem *>(it))
+            continue;
+        int h = 0;
+        if (QWidget *cw = it->widget()) {
+            if (cw->isHidden())
+                continue;
+            if (cw->hasHeightForWidth())
+                h = cw->heightForWidth(innerW);
+            if (h <= 0)
+                h = cw->sizeHint().height();
+        } else if (QLayout *cl = it->layout()) {
+            h = cl->heightForWidth(innerW);
+            if (h <= 0)
+                h = cl->sizeHint().height();
+        }
+        total += h;
+        ++items;
+    }
+    if (items <= 1)
+        return 0;
+    total += av->spacing() * (items - 1);
+    // 逐项累加与 QLabel 的真实折行有 1px 级误差，末尾补一行余量：
+    // 宁可底部多 8px 内边距，也不能把最后一行诊断文字裁掉。
+    total += UiStyle::Fpx(18);
+    return total;
 }
 
+// 可用高度：底栏上沿到页顶留 8px，再高就交给面板内部的滚动区
+int ProxyPage::AdvancedMaxHeight() const
+{
+    const int footH = foot_ ? foot_->height() : UiStyle::Fpx(54);
+    return qMax(UiStyle::Fpx(140), height() - footH - UiStyle::Fpx(8));
+}
+
+// 悬浮层几何：左右各留 10px（demo .advwrap），底边贴住底栏上沿
+void ProxyPage::LayoutAdvancedOverlay()
+{
+    if (!advOverlay_)
+        return;
+    const int side = UiStyle::Fpx(10);
+    const int footH = foot_ ? foot_->height() : UiStyle::Fpx(54);
+    const int w = qMax(0, width() - side * 2);
+    const int h = qBound(0, advHeight_, AdvancedMaxHeight());
+    advOverlay_->setGeometry(side, height() - footH - h, w, h);
+}
+
+// ---------------------------------------------------------------- 线路
 // ---------------------------------------------------------------- 线路
 void ProxyPage::RefreshLineRows()
 {
@@ -1051,12 +1126,6 @@ void ProxyPage::RenderNodes()
     UpdateCount();
     UpdateStatus();
     RefreshRegionStat();
-
-    // 刚展开抽屉的 2s 内，节点行重建会改内容高度，把已经对好的滚动位置顶偏
-    // （实测展开瞬间停在列表中间）。这段时间内每次重排后再对准一次；
-    // 之后不再干预 —— 用户自己往下滚时不能被拽回去。
-    if (advOpen_ && advScrollClock_.isValid() && advScrollClock_.elapsed() < 2500)
-        QTimer::singleShot(0, this, [this] { EnsureAdvancedVisible(); });
 }
 
 void ProxyPage::RefreshNodeRow(int row)
@@ -1192,6 +1261,8 @@ void ProxyPage::SaveAdvanced()
         ProxyConfig::SetEchEnabled(echBox_->isChecked());
     if (http3Box_)
         ProxyConfig::SetHttp3Enabled(http3Box_->isChecked());
+    if (threadSpin_)
+        ProxyConfig::SetSpeedThreads(threadSpin_->value());   // 内部再夹一次 [1,16]
     ProxyConfig::Save();
     // Python 保存代理设置时调 ResetHttp3EchFallback：重新尝试降级过的选项
     ProxyConfig::ResetAdvancedFallback();
@@ -1347,8 +1418,96 @@ QPoint ProxyPage::RegionAnchor() const
     return w->mapToGlobal(QPoint(0, w->height()));
 }
 
+// 面板与底栏按钮之外的全局坐标 = 该收起；面板内部（含内部滚动区）不算
+bool ProxyPage::IsAdvancedOutside(const QPoint &globalPos) const
+{
+    if (!advOverlay_)
+        return true;
+    if (advOverlay_->rect().contains(advOverlay_->mapFromGlobal(globalPos)))
+        return false;
+    if (advBtn_ && advBtn_->rect().contains(advBtn_->mapFromGlobal(globalPos)))
+        return false;   // 让按钮自己的 clicked 去切换，避免收起后又被点开
+    return true;
+}
+
+QString ProxyPage::AdvancedOutsideProbeForTest()
+{
+    if (!advOverlay_ || !advBtn_)
+        return QStringLiteral("no-ui");
+    const QPoint inPanel = advOverlay_->mapToGlobal(advOverlay_->rect().center());
+    const QPoint onBtn = advBtn_->mapToGlobal(advBtn_->rect().center());
+    const QPoint outside = mapToGlobal(QPoint(width() / 2, UiStyle::Fpx(60)));
+    // 真发一次"面板外按下"：走应用级过滤器 → SetAdvancedOpen(false)，
+    // 这样连"过滤器有没有装上/有没有误判"一起验到，而不只是几何口径。
+    bool closed = false;
+    if (QWidget *target = childAt(mapFromGlobal(outside))) {
+        QMouseEvent press(QEvent::MouseButtonPress, target->mapFromGlobal(outside), outside,
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(target, &press);
+        closed = !advOpen_;
+    }
+    // 注意不能用 arg(a, b, c) 三参重载：那是 (值, 宽度, 进制)，会拼出 %2/%3
+    return QStringLiteral("in=%1 btn=%2 out=%3 closed=%4")
+        .arg(int(IsAdvancedOutside(inPanel)))
+        .arg(int(IsAdvancedOutside(onBtn)))
+        .arg(int(IsAdvancedOutside(outside)))
+        .arg(int(closed));
+}
+
 bool ProxyPage::eventFilter(QObject *obj, QEvent *ev)
 {
+    // ---- 悬浮抽屉：点面板外收起（应用级，只在展开时生效） ----
+    // 鼠标与触摸两条路径都收：页面滚动区被 QScroller 抓走了 TouchBegin，
+    // 真机上"点空白处"不一定合成 MouseButtonPress，只判鼠标会漏。
+    // 弹层（地区 QMenu）与其它窗口里的点击不算"外面"：否则选地区时面板会先收起。
+    if (advOpen_) {
+        // 只看"按下"就收起会把滑过面板外的手势当成点击 —— 悬浮窗最常见的误触。
+        // 改成：按下时记候选，抬手时要求仍在面板外且位移 ≤ 8dp 才收起。
+        // 滑动的抬起会被 Touch::TapGuard 吞掉，这里的 8dp 是第二道保险。
+        // 鼠标与触摸两条路径都要走：真机上 QScroller 抓走 TouchBegin 后，
+        // "点空白"不一定合成 MouseButtonPress。
+        QPoint gp;
+        bool down = false, up = false, cancel = false;
+        if (ev->type() == QEvent::MouseButtonPress) {
+            auto *me = static_cast<QMouseEvent *>(ev);
+            if (me->button() == Qt::LeftButton) {
+                down = true;
+                gp = me->globalPosition().toPoint();
+            }
+        } else if (ev->type() == QEvent::MouseButtonRelease) {
+            auto *me = static_cast<QMouseEvent *>(ev);
+            if (me->button() == Qt::LeftButton) {
+                up = true;
+                gp = me->globalPosition().toPoint();
+            }
+        } else if (ev->type() == QEvent::TouchBegin || ev->type() == QEvent::TouchEnd
+                   || ev->type() == QEvent::TouchCancel) {
+            auto *te = static_cast<QTouchEvent *>(ev);
+            if (!te->points().isEmpty()) {
+                gp = te->points().first().globalPosition().toPoint();
+                down = ev->type() == QEvent::TouchBegin;
+                up = !down;
+                cancel = ev->type() == QEvent::TouchCancel;
+            }
+        }
+        auto *w = qobject_cast<QWidget *>(obj);
+        // 弹层（地区 QMenu）与其它窗口里的点击不算"外面"：否则选地区时面板先收起
+        const bool sameWindow = !w || w->window() == window();
+        if (down) {
+            advOutsideArmed_ = sameWindow && IsAdvancedOutside(gp);
+            advOutsidePress_ = gp;
+        } else if (up && advOutsideArmed_) {
+            advOutsideArmed_ = false;
+            const bool notSwipe =
+                (gp - advOutsidePress_).manhattanLength() <= Touch::Dp(8, this);
+            if (!cancel && sameWindow && notSwipe && IsAdvancedOutside(gp)) {
+                SetAdvancedOpen(false, true);
+                // 这次点击照常生效（选节点 / 点测速 / 滚列表），只负责把面板收起来
+                return PageBase::eventFilter(obj, ev);
+            }
+        }
+    }
+
     // 整框、框里的只读输入框都算同一个点击面（▾ 是透明穿透，落到框上）
     if (obj != regionEdit_ && obj != regionBox_)
         return PageBase::eventFilter(obj, ev);

@@ -1,0 +1,123 @@
+// 转置卷积（gather 形式）。ONNX ConvTranspose：权重 [C_in, C_out, KH, KW]。
+//
+//   out[oc][oy][ox] = bias[oc] + Σ_{c,ky,kx}  X[c][iy][ix] * W[(c*OC+oc)*KH*KW + ky*KW + kx]
+//   iy = (oy + PY - ky) / SY   （必须整除且落在 [0, H)）
+//
+// gather 而不是 scatter：scatter 需要原子加，且相邻 workgroup 会写同一块输出，
+// 结果对调度顺序敏感。gather 每个输出像素只被一个线程写，天然确定。
+// USE_FP16 变体：存储 half、累加 fp32（与 conv.comp 同一套宏）。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer Src { FT x[]; };
+layout(binding = 1) buffer Ker { FT w[]; };
+layout(binding = 2) buffer Bia { FT bias[]; };
+layout(binding = 3) buffer Dst { FT y[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+const int kBlock = 4;
+
+// 融合激活（与 conv.comp 同一套 mode 编码）：1=Relu 2=LeakyRelu 3=Sigmoid。
+// GLSL 不允许嵌套函数定义，必须放在 main() 外（首轮就写在 main 里，qsb 直接报错）。
+float FusedAct(float v, int mode, float alpha)
+{
+    if (mode == 1)
+        return max(v, 0.0);                       // Relu
+    if (mode == 2)
+        return v >= 0.0 ? v : v * alpha;          // LeakyRelu
+    if (mode == 3)
+        return 1.0 / (1.0 + exp(-v));             // Sigmoid
+    return v;
+}
+
+void main()
+{
+    const int C = P(0);
+    const int H = P(1);
+    const int W = P(2);
+    const int OC = P(3);
+    const int KH = P(4);
+    const int KW = P(5);
+    const int SX = P(6);
+    const int SY = P(7);
+    const int PX = P(8);
+    const int PY = P(9);
+    const int OH = P(10);
+    const int OW = P(11);
+    const bool hasBias = P(12) != 0;
+    // 与 conv.comp 一致的算子融合槽位：78 处 ConvTranspose 后紧跟 LeakyRelu
+    // （waifu2x / Real-CUGAN 的上采样段），融合后省一次 dispatch、一次全图
+    // barrier 和一整张上采样后的大张量显存往返。
+    const int actMode = P(13);
+    const float actAlpha = uintBitsToFloat(uint(P(14)));
+
+    const int oy = int(gl_WorkGroupID.y);
+    const int oc = int(gl_WorkGroupID.z);
+    if (oy >= OH || oc >= OC)
+        return;
+
+    const int x0 = int(gl_WorkGroupID.x) * 64 * kBlock + int(gl_LocalInvocationID.x) * kBlock;
+    if (x0 >= OW)
+        return;
+
+    const int nOut = min(kBlock, OW - x0);
+    const float b0 = hasBias ? FLD(bias[oc]) : 0.0;
+
+    float acc[kBlock];
+    for (int t = 0; t < kBlock; ++t)
+        acc[t] = b0;
+
+    const int yNum = oy + PY;
+    for (int ky = 0; ky < KH; ++ky) {
+        const int iyNum = yNum - ky;
+        if (iyNum < 0 || (iyNum % SY) != 0)
+            continue;
+        const int iy = iyNum / SY;
+        if (iy >= H)
+            continue;
+        for (int c = 0; c < C; ++c) {
+            const int wBase = ((c * OC + oc) * KH + ky) * KW;
+            const int rowBase = (c * H + iy) * W;
+            for (int kx = 0; kx < KW; ++kx) {
+                const float wv = FLD(w[wBase + kx]);
+                for (int t = 0; t < kBlock; ++t) {
+                    if (t >= nOut)
+                        break;
+                    const int ixNum = x0 + t + PX - kx;
+                    if (ixNum < 0 || (ixNum % SX) != 0)
+                        continue;
+                    const int ix = ixNum / SX;
+                    if (ix >= W)
+                        continue;
+                    acc[t] += FLD(x[rowBase + ix]) * wv;
+                }
+            }
+        }
+    }
+
+    const int oRow = (oc * OH + oy) * OW + x0;
+    for (int t = 0; t < kBlock; ++t) {
+        if (t >= nOut)
+            break;
+        y[oRow + t] = FST(FusedAct(acc[t], actMode, actAlpha));
+    }
+}

@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFontMetrics>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHash>
 #include <QKeyEvent>
@@ -15,11 +16,13 @@
 #include <QPointer>
 #include <QScrollBar>
 #include <QStyledItemDelegate>
+#include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include "../sr_engine.h"
 #include "motion.h"
+#include "sr_bench.h"
 #include "theme.h"
 #include "touch.h"
 #include "ui_kit.h"
@@ -55,7 +58,18 @@ QString ArchLabel(const QString &arch)
         return QStringLiteral("Real-ESRGAN");
     if (arch == QLatin1String("srmd"))
         return QStringLiteral("SRMD");
+    if (arch == QLatin1String("quant"))
+        return QStringLiteral("量化模型（QNN / CPU）");
     return arch;
+}
+
+// 筛选 chip 用短名：分组条里已经是全称，chip 只负责"定位到哪一组"。
+// 「量化模型（QNN / CPU）」这种长名会把 chip 行从 2 行挤成 3 行，白吃掉 30dp。
+QString ArchChipLabel(const QString &arch)
+{
+    if (arch == QLatin1String("quant"))
+        return QStringLiteral("量化");
+    return ArchLabel(arch);
 }
 
 // 分组色点：只用来区分算法，与主题强调色无关（橙主题下也不能四组同色）。
@@ -69,6 +83,8 @@ QColor ArchColor(const QString &arch)
         return QColor(0xd3, 0xa0, 0x3c);
     if (arch == QLatin1String("srmd"))
         return QColor(0x6f, 0x9a, 0xd6);
+    if (arch == QLatin1String("quant"))
+        return QColor(0xb0, 0x7a, 0x8c);
     return T().textFaint;
 }
 
@@ -167,15 +183,202 @@ enum Role {
     InstalledRole,
 };
 
+// ---------------------------------------------------------------- 测速快照
+// 后台任务写 SrBench，浮层把当前快照拷到这里；delegate 只读这份快照，
+// 避免每画一行都去抢 store 的锁。
+struct BenchView {
+    QHash<QString, QHash<QString, SrBench::Sample>> results;
+    QString activeModel;
+    QString activeHw;
+    bool running = false;
+};
+
+int TimingLineH()
+{
+    return QFontMetrics(MonoFont(10)).height();
+}
+
+struct TimingSeg {
+    QString label;   // 硬件短名（分隔符时为空）
+    QString value;   // "66 ms" / "测试中…" / 失败原因
+    QColor color;
+    bool separator = false;
+};
+
+QString FormatBenchMs(double ms)
+{
+    if (ms >= 1000.0)
+        return QStringLiteral("%1 s").arg(ms / 1000.0, 0, 'f', 2);
+    return QStringLiteral("%1 ms").arg(qRound(ms));
+}
+
+QVector<TimingSeg> TimingSegments(const BenchView &view, const QString &model)
+{
+    QVector<TimingSeg> out;
+    const auto res = view.results.value(model);
+    if (res.isEmpty() && !(view.running && view.activeModel == model))
+        return out;
+    double best = 1e30;
+    QString bestId;
+    for (auto it = res.constBegin(); it != res.constEnd(); ++it) {
+        if (it->ok && it->ms > 0 && it->ms < best) {
+            best = it->ms;
+            bestId = it.key();
+        }
+    }
+    for (const SrEngine::BenchHw &hw : SrBench::Hardware()) {
+        if (!hw.available)
+            continue;   // 不可用硬件只在工具条下的图例里写一次
+        const auto it = res.constFind(hw.id);
+        const bool active = view.running && view.activeModel == model && view.activeHw == hw.id;
+        TimingSeg seg;
+        seg.label = hw.shortLabel;
+        if (it != res.constEnd()) {
+            if (it->ok) {
+                seg.value = FormatBenchMs(it->ms);
+                seg.color = hw.id == bestId ? T().accent : T().textDim;
+            } else {
+                seg.value = it->note.isEmpty() ? QStringLiteral("失败") : it->note;
+                seg.color = T().danger;
+            }
+        } else if (active) {
+            seg.value = QStringLiteral("测试中…");
+            seg.color = T().accent;
+        } else {
+            continue;
+        }
+        out.push_back(seg);
+    }
+    return out;
+}
+
+// 按可用宽度折行（最多 3 行，再宽就不折了，交给裁剪）
+QVector<QVector<TimingSeg>> WrapTiming(const QVector<TimingSeg> &segs, int maxW,
+                                       const QFontMetrics &fm)
+{
+    QVector<QVector<TimingSeg>> lines;
+    QVector<TimingSeg> cur;
+    int w = 0;
+    const int sepW = 16;
+    for (const TimingSeg &s : segs) {
+        const int sw = fm.horizontalAdvance(s.label) + (s.label.isEmpty() ? 0 : 4)
+                       + fm.horizontalAdvance(s.value);
+        if (!cur.isEmpty() && w + sepW + sw > maxW && lines.size() < 2) {
+            lines.push_back(cur);
+            cur.clear();
+            w = 0;
+        }
+        if (!cur.isEmpty()) {
+            TimingSeg sep;
+            sep.separator = true;
+            cur.push_back(sep);
+            w += sepW;
+        }
+        cur.push_back(s);
+        w += sw;
+    }
+    if (!cur.isEmpty())
+        lines.push_back(cur);
+    return lines;
+}
+
+int TimingHeight(const BenchView &view, const QString &model, int maxW)
+{
+    const auto segs = TimingSegments(view, model);
+    if (segs.isEmpty())
+        return 0;
+    const QFontMetrics fm(MonoFont(10));
+    return int(WrapTiming(segs, maxW, fm).size()) * fm.height();
+}
+
+void PaintTiming(QPainter *p, const QRect &area, const BenchView &view, const QString &model)
+{
+    const auto segs = TimingSegments(view, model);
+    if (segs.isEmpty() || area.width() <= 0)
+        return;
+    const QFont f = MonoFont(10);
+    const QFontMetrics fm(f);
+    const auto lines = WrapTiming(segs, area.width(), fm);
+    p->setFont(f);
+    int y = area.top();
+    for (const auto &line : lines) {
+        int x = area.left();
+        for (const TimingSeg &s : line) {
+            if (s.separator) {
+                p->setPen(T().textFaint);
+                p->drawText(QRect(x, y, 16, fm.height()),
+                            Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("·"));
+                x += 16;
+                continue;
+            }
+            p->setPen(T().textFaint);
+            const int lw = fm.horizontalAdvance(s.label);
+            p->drawText(QRect(x, y, lw + 2, fm.height()),
+                        Qt::AlignLeft | Qt::AlignVCenter, s.label);
+            x += lw + 4;
+            p->setPen(s.color);
+            const int vw = fm.horizontalAdvance(s.value);
+            p->drawText(QRect(x, y, vw + 2, fm.height()),
+                        Qt::AlignLeft | Qt::AlignVCenter, s.value);
+            x += vw;
+        }
+        y += fm.height();
+    }
+}
+
+// 2px 进度条（demo 里就是一条细线，不用 QProgressBar 的块状样式）
+class BenchBar : public QWidget
+{
+public:
+    explicit BenchBar(QWidget *parent = nullptr) : QWidget(parent) {}
+    void SetFraction(qreal f)
+    {
+        f_ = qBound<qreal>(0.0, f, 1.0);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.fillRect(rect(), T().border);
+        if (f_ > 0.0)
+            p.fillRect(QRectF(0, 0, width() * f_, height()), T().accent);
+    }
+
+private:
+    qreal f_ = 0.0;
+};
+
 // ---------------------------------------------------------------- delegate
 class SrModelDelegate : public QStyledItemDelegate
 {
 public:
-    explicit SrModelDelegate(QObject *parent = nullptr) : QStyledItemDelegate(parent) {}
+    explicit SrModelDelegate(const BenchView *view, QObject *parent = nullptr)
+        : QStyledItemDelegate(parent), view_(view) {}
 
-    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &index) const override
+    QSize sizeHint(const QStyleOptionViewItem &opt, const QModelIndex &index) const override
     {
-        return QSize(0, index.data(GroupRole).toBool() ? GroupRowHeight() : RowHeight());
+        if (index.data(GroupRole).toBool())
+            return QSize(0, GroupRowHeight());
+        int h = RowHeight();
+        if (view_) {
+            // 有耗时行时行高要加上折行后的高度（宽度按当前视口算）
+            h += TimingHeight(*view_, index.data(NameRole).toString(),
+                              qMax(UiStyle::Fpx(60), ViewWidth(opt) - RowPadX() * 2));
+            if (h > RowHeight())
+                h += UiStyle::Fpx(3);
+        }
+        return QSize(0, h);
+    }
+
+    int ViewWidth(const QStyleOptionViewItem &opt) const
+    {
+        if (opt.rect.width() > 0)
+            return opt.rect.width();
+        if (auto *v = qobject_cast<QListWidget *>(parent()))
+            return v->viewport()->width();
+        return 400;
     }
 
     void paint(QPainter *p, const QStyleOptionViewItem &opt,
@@ -301,8 +504,19 @@ public:
             p->drawText(badgeRect, Qt::AlignCenter, badge);
         }
 
+        if (view_) {
+            const QFontMetrics fm(MonoFont(10));
+            const int top = idTop + ifm.height() + UiStyle::Fpx(3);
+            PaintTiming(p, QRect(r.left() + RowPadX(), top, r.width() - RowPadX() * 2,
+                                 r.bottom() - top),
+                        *view_, name);
+        }
+
         p->restore();
     }
+
+private:
+    const BenchView *view_ = nullptr;
 };
 
 // ---------------------------------------------------------------- 吸顶分组条
@@ -346,6 +560,9 @@ public:
         : QWidget(host), host_(host), current_(current), animate_(animate)
     {
         setAttribute(Qt::WA_StyledBackground, false);
+        // 全屏遮罩浮层：吸顶分组条、悬浮「继续测试」条、列表行都参与
+        // Touch::TapGuard 的统一滑动/点击仲裁（浮层不是顶层窗口，靠属性识别）
+        setProperty("tapGuardOverlay", true);
         setGeometry(host->rect());
         setFocusPolicy(Qt::StrongFocus);
         host->installEventFilter(this);
@@ -361,6 +578,13 @@ public:
             }
         }
         Rebuild();
+        SrBench::EnsureLoaded();
+        UpdateBenchLegend();
+        UpdateBenchUi();
+        poll_ = new QTimer(this);
+        poll_->setInterval(160);
+        connect(poll_, &QTimer::timeout, this, [this] { UpdateBenchUi(); });
+        poll_->start();
     }
 
     QString Chosen() const { return accepted_ ? chosen_ : QString(); }
@@ -439,6 +663,152 @@ protected:
     }
 
 private:
+    QPushButton *MakeBenchButton(const QString &text, const char *role, QWidget *parent)
+    {
+        auto *b = new QPushButton(text, parent);
+        b->setObjectName(QStringLiteral("SrBenchButton"));
+        b->setProperty("benchBtn", true);
+        if (role && *role)
+            b->setProperty(role, true);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setProperty("hitGrow", false);
+        b->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        return b;
+    }
+
+    QStringList InstalledNames() const
+    {
+        QStringList out;
+        for (const SrEngine::ModelInfo &m : SrEngine::InstalledModels())
+            out << m.name;
+        return out;
+    }
+
+    QStringList NamesOfFilter() const
+    {
+        QStringList out;
+        for (const SrEngine::ModelInfo &m : SrEngine::InstalledModels()) {
+            if (filter_.isEmpty() || m.arch == filter_)
+                out << m.name;
+        }
+        return out;
+    }
+
+    void StartBench(const QStringList &models)
+    {
+        if (models.isEmpty())
+            return;
+        SrBench::Start(models);
+        UpdateBenchUi();
+    }
+
+    void UpdateBenchLegend()
+    {
+        if (!legend_)
+            return;
+        QStringList tags;
+        QStringList missing;
+        // 多于一块 GPU 时必须点名（GPU0/GPU1 各自是什么卡），否则两列耗时对不上号；
+        // 单卡时只写 GPU0 保持紧凑。硬件指纹用的是 label，这里只改显示。
+        int gpuCount = 0;
+        for (const SrEngine::BenchHw &h : SrBench::Hardware()) {
+            if (h.id.startsWith(QLatin1String("gpu")))
+                ++gpuCount;
+        }
+        for (const SrEngine::BenchHw &h : SrBench::Hardware()) {
+            if (!h.available) {
+                missing << QStringLiteral("%1 不可用：%2").arg(h.shortLabel, h.note);
+                continue;
+            }
+            if (gpuCount > 1 && h.id.startsWith(QLatin1String("gpu"))) {
+                tags << QString(h.label).replace(QStringLiteral(" · "), QStringLiteral(" "));
+            } else {
+                tags << h.shortLabel;
+            }
+        }
+        QString text = QStringLiteral("测试硬件 %1 · 192×192 单块")
+                           .arg(tags.join(QStringLiteral(" · ")));
+        if (!missing.isEmpty())
+            text += QStringLiteral("（%1）").arg(missing.join(QStringLiteral("；")));
+        legend_->setText(text);
+    }
+
+    void RelayoutResume()
+    {
+        if (!resume_ || !list_)
+            return;
+        const int w = qMax(0, list_->viewport()->width() - UiStyle::Fpx(18));
+        resume_->setGeometry(UiStyle::Fpx(9), UiStyle::Fpx(7), w,
+                             qMax(UiStyle::Fpx(34), resume_->sizeHint().height()));
+        resume_->raise();
+    }
+
+    void UpdateBenchUi()
+    {
+        const SrBench::Progress snap = SrBench::Snapshot();
+        if (benchAll_) {
+            const bool run = snap.running;
+            benchAll_->setEnabled(!run);
+            benchSel_->setEnabled(!run && !chosen_.isEmpty());
+            benchGroup_->setEnabled(!run && !filter_.isEmpty());
+            benchStop_->setVisible(run);
+            benchStop_->setEnabled(run && !snap.cancelling);
+        }
+        if (benchBar_) {
+            benchBar_->setVisible(snap.running);
+            benchBar_->SetFraction(snap.total > 0 ? double(snap.done) / snap.total : 0.0);
+        }
+        if (benchStat_) {
+            QString text;
+            if (snap.running) {
+                text = QStringLiteral("测试中 %1/%2")
+                           .arg(qMin(snap.done + 1, snap.total))
+                           .arg(snap.total);
+                if (!snap.activeHw.isEmpty())
+                    text += QStringLiteral(" · %1").arg(SrBench::HardwareShort(snap.activeHw));
+            } else if (!snap.pending.isEmpty()) {
+                text = snap.lastSummary.isEmpty()
+                           ? QStringLiteral("已取消 · 完成 %1/%2").arg(snap.done).arg(snap.total)
+                           : snap.lastSummary;
+            } else if (!snap.lastSummary.isEmpty()) {
+                text = snap.lastSummary;
+            } else {
+                QStringList tags;
+                for (const SrEngine::BenchHw &h : SrBench::Hardware()) {
+                    if (h.available)
+                        tags << h.shortLabel;
+                }
+                text = QStringLiteral("将测试 %1").arg(tags.join(QStringLiteral(" · ")));
+            }
+            benchStat_->setText(text);
+            const bool hot = snap.running;
+            if (benchStat_->property("run").toBool() != hot) {
+                benchStat_->setProperty("run", hot);
+                benchStat_->style()->unpolish(benchStat_);
+                benchStat_->style()->polish(benchStat_);
+            }
+        }
+        if (resume_) {
+            const bool show = !snap.running && !snap.pending.isEmpty();
+            if (show && resumeText_)
+                resumeText_->setText(QStringLiteral("上次测试未完成 %1/%2")
+                                         .arg(snap.done)
+                                         .arg(snap.total));
+            resume_->setVisible(show);
+            if (show)
+                RelayoutResume();
+        }
+        if (snap.version != benchVersion_) {
+            benchVersion_ = snap.version;
+            benchView_.results = SrBench::All();
+            benchView_.activeModel = snap.activeModel;
+            benchView_.activeHw = snap.activeHw;
+            benchView_.running = snap.running;
+            activeRow_ = snap.activeModel;
+            Rebuild(true);
+        }
+    }
+
     void BuildUi()
     {
         card_ = new QWidget(this);
@@ -507,7 +877,7 @@ private:
         QVector<ChipDef> defs;
         defs.push_back({QString(), QStringLiteral("全部"), int(all.size())});
         for (const QString &a : order)
-            defs.push_back({a, ArchLabel(a), counts.value(a)});
+            defs.push_back({a, ArchChipLabel(a), counts.value(a)});
         for (const ChipDef &d : defs) {
             auto *chip = new Chip(QStringLiteral("%1 %2").arg(d.label).arg(d.count), true,
                                   chipsHost);
@@ -522,9 +892,79 @@ private:
                     c->setChecked(c == chip);
                 filter_ = key;
                 Rebuild();
+                // 「仅测试当前分组」的可用性跟着筛选走：不立刻刷新的话，
+                // 点完 chip 马上点按钮会撞上还没解禁的旧状态（按钮是灰的，点了没反应）
+                UpdateBenchUi();
             });
         }
         lay->addWidget(chipsHost);
+
+        // ---- 测速工具条（demo v2：第 1 行按钮，第 2 行状态 + 细进度条）----
+        auto *tools = new QWidget(card_);
+        toolsGrid_ = new QGridLayout(tools);
+        toolsGrid_->setContentsMargins(UiStyle::Fpx(13), UiStyle::Fpx(9), UiStyle::Fpx(13), 0);
+        toolsGrid_->setHorizontalSpacing(UiStyle::Fpx(8));
+        toolsGrid_->setVerticalSpacing(UiStyle::Fpx(6));
+        toolsGrid_->setColumnStretch(3, 1);
+        benchAll_ = MakeBenchButton(QStringLiteral("一键测试全部"), "benchPrimary", tools);
+        benchSel_ = MakeBenchButton(QStringLiteral("测试选中模型"), nullptr, tools);
+        benchGroup_ = MakeBenchButton(QStringLiteral("仅测试当前分组"), nullptr, tools);
+        benchStop_ = MakeBenchButton(QStringLiteral("停止"), "benchStop", tools);
+        benchAll_->setObjectName(QStringLiteral("SrBenchAll"));
+        benchSel_->setObjectName(QStringLiteral("SrBenchSel"));
+        benchGroup_->setObjectName(QStringLiteral("SrBenchGroup"));
+        benchStop_->setObjectName(QStringLiteral("SrBenchStop"));
+        toolsGrid_->addWidget(benchAll_, 0, 0);
+        toolsGrid_->addWidget(benchSel_, 0, 1);
+        toolsGrid_->addWidget(benchGroup_, 0, 2);
+        toolsGrid_->addWidget(benchStop_, 0, 4, Qt::AlignRight | Qt::AlignVCenter);
+        benchStop_->hide();
+        toolsWide_ = true;
+        lay->addWidget(tools);
+
+        auto *statRow = new QWidget(card_);
+        auto *sl = new QHBoxLayout(statRow);
+        sl->setContentsMargins(UiStyle::Fpx(13), UiStyle::Fpx(7), UiStyle::Fpx(13), 0);
+        sl->setSpacing(UiStyle::Fpx(8));
+        benchStat_ = new QLabel(statRow);
+        benchStat_->setObjectName(QStringLiteral("SrBenchStat"));
+        benchStat_->setMinimumWidth(0);
+        sl->addWidget(benchStat_, 0);
+        benchBar_ = new BenchBar(statRow);
+        benchBar_->setFixedHeight(UiStyle::Fpx(2));
+        benchBar_->hide();
+        sl->addWidget(benchBar_, 1);
+        lay->addWidget(statRow);
+
+        legend_ = new QLabel(card_);
+        legend_->setObjectName(QStringLiteral("SrBenchLegend"));
+        legend_->setWordWrap(true);
+        legend_->setMinimumWidth(0);
+        legend_->setContentsMargins(UiStyle::Fpx(13), UiStyle::Fpx(6), UiStyle::Fpx(13),
+                                    UiStyle::Fpx(7));
+        lay->addWidget(legend_);
+
+        connect(benchAll_, &QPushButton::clicked, this, [this] {
+            if (SrBench::Snapshot().running)
+                return;
+            // “全部”按字面意思跑全部模型：有筛选时先切回全部，否则看起来像没反应
+            if (!filter_.isEmpty()) {
+                filter_.clear();
+                for (auto *c : chips_)
+                    c->setChecked(c->text().startsWith(QStringLiteral("全部")));
+                Rebuild();
+            }
+            StartBench(InstalledNames());
+        });
+        connect(benchSel_, &QPushButton::clicked, this, [this] {
+            if (!chosen_.isEmpty())
+                StartBench(QStringList{chosen_});
+        });
+        connect(benchGroup_, &QPushButton::clicked, this, [this] {
+            if (!filter_.isEmpty())
+                StartBench(NamesOfFilter());
+        });
+        connect(benchStop_, &QPushButton::clicked, this, [this] { SrBench::Cancel(); });
 
         // ---- 列头 ----
         auto *colHead = new QWidget(card_);
@@ -564,7 +1004,7 @@ private:
         list_->setFocusPolicy(Qt::NoFocus);
         list_->setUniformItemSizes(false);
         list_->setMouseTracking(true);
-        list_->setItemDelegate(new SrModelDelegate(list_));
+        list_->setItemDelegate(new SrModelDelegate(&benchView_, list_));
         lay->addWidget(list_, 1);
 
         sticky_ = new SrStickyBand(list_->viewport());
@@ -583,6 +1023,37 @@ private:
             chosen_ = item->data(NameRole).toString();
             Finish(true);
         });
+
+        // ---- 取消后的"继续测试"悬浮条（浮在列表顶部）----
+        resume_ = new QWidget(list_->viewport());
+        resume_->setObjectName(QStringLiteral("SrBenchResume"));
+        resume_->setAttribute(Qt::WA_StyledBackground, true);
+        auto *rl = new QHBoxLayout(resume_);
+        rl->setContentsMargins(UiStyle::Fpx(9), UiStyle::Fpx(7), UiStyle::Fpx(9), UiStyle::Fpx(7));
+        rl->setSpacing(UiStyle::Fpx(8));
+        resumeText_ = new QLabel(resume_);
+        resumeText_->setObjectName(QStringLiteral("SrBenchResumeText"));
+        resumeText_->setMinimumWidth(0);
+        rl->addWidget(resumeText_, 1);
+        auto *resumeGo = MakeBenchButton(QStringLiteral("继续测试"), "benchPrimary", resume_);
+        auto *resumeNo = MakeBenchButton(QStringLiteral("忽略"), nullptr, resume_);
+        resumeGo->setObjectName(QStringLiteral("SrBenchResumeGo"));
+        resumeNo->setObjectName(QStringLiteral("SrBenchResumeNo"));
+        rl->addWidget(resumeGo);
+        rl->addWidget(resumeNo);
+        connect(resumeGo, &QPushButton::clicked, this, [this] {
+            SrBench::ResumePending();
+            if (resume_)
+                resume_->hide();
+            UpdateBenchUi();
+        });
+        connect(resumeNo, &QPushButton::clicked, this, [this] {
+            SrBench::DismissPending();
+            if (resume_)
+                resume_->hide();
+            UpdateBenchUi();
+        });
+        resume_->hide();
 
         // ---- 底栏 ----
         auto *foot = new QWidget(card_);
@@ -628,10 +1099,11 @@ private:
         MarkChosen();
     }
 
-    void Rebuild()
+    void Rebuild(bool keepScroll = false)
     {
         if (!list_)
             return;
+        const int keepValue = keepScroll ? list_->verticalScrollBar()->value() : 0;
         QVector<SrEngine::ModelInfo> all = SrEngine::Catalog();
         models_ = all;
 
@@ -679,8 +1151,16 @@ private:
             count_->setText(QStringLiteral("%1 / %2").arg(shown).arg(all.size()));
         }
         MarkChosen();
-        // 重建后滚动位置归零：吸顶条跟着复位，不会停在上一组的标题上
-        list_->verticalScrollBar()->setValue(0);
+        // 首次构建把滚动归零；测速刷新时保留原位置，否则列表会每次跳回顶部
+        list_->verticalScrollBar()->setValue(keepScroll ? keepValue : 0);
+        if (keepScroll) {
+            for (int i = 0; i < list_->count(); ++i) {
+                if (list_->item(i)->data(NameRole).toString() == activeRow_) {
+                    list_->scrollToItem(list_->item(i), QAbstractItemView::EnsureVisible);
+                    break;
+                }
+            }
+        }
         UpdateSticky();
     }
 
@@ -766,6 +1246,23 @@ private:
         UpdateSticky();
     }
 
+    // 宽屏：停止与三个按钮同一行、靠右（demo 的排法）；
+    // 窄屏：三个按钮一行已经占满，停止落到第二行右侧，绝不挤压/裁切按钮。
+    void RelayoutToolButtons()
+    {
+        if (!toolsGrid_ || !card_)
+            return;
+        const bool wide = card_->width() >= UiStyle::Fpx(420);
+        if (wide == toolsWide_)
+            return;
+        toolsWide_ = wide;
+        toolsGrid_->removeWidget(benchStop_);
+        if (wide)
+            toolsGrid_->addWidget(benchStop_, 0, 4, Qt::AlignRight | Qt::AlignVCenter);
+        else
+            toolsGrid_->addWidget(benchStop_, 1, 0, 1, 5, Qt::AlignRight | Qt::AlignVCenter);
+    }
+
     void LayoutCard()
     {
         if (!card_)
@@ -784,8 +1281,14 @@ private:
         }
         if (grip_)
             grip_->setVisible(sheetMode);
-        if (sizeHead_)
-            sizeHead_->setVisible(card_->width() >= UiStyle::Fpx(340));
+        RelayoutToolButtons();
+        // 体积列头必须跟 delegate 用同一口径（列宽按列表视口算，不是卡片宽度），
+        // 否则窄屏会出现"列头有体积、行里没有"的错位
+        if (sizeHead_) {
+            const int vw = list_ && list_->viewport()->width() > 0 ? list_->viewport()->width()
+                                                                    : card_->width() - 4;
+            sizeHead_->setVisible(vw >= UiStyle::Fpx(340));
+        }
     }
 
     void Finish(bool ok)
@@ -793,6 +1296,9 @@ private:
         if (finished_)
             return;
         finished_ = true;
+        // 关闭浮层 = 取消测试：已完成的结果留在 SrBench 里，下次打开提示继续
+        if (SrBench::Snapshot().running)
+            SrBench::Cancel();
         const SrEngine::ModelInfo *m = FindModel(models_, chosen_);
         accepted_ = ok && !chosen_.isEmpty() && m && m->installed;
         if (!Motion::Enabled()) {
@@ -824,11 +1330,26 @@ private:
     SrStickyBand *sticky_ = nullptr;
     QLabel *sizeHead_ = nullptr;
     QLabel *count_ = nullptr;
+    QPushButton *benchAll_ = nullptr;
+    QPushButton *benchSel_ = nullptr;
+    QPushButton *benchGroup_ = nullptr;
+    QPushButton *benchStop_ = nullptr;
+    class QGridLayout *toolsGrid_ = nullptr;
+    bool toolsWide_ = true;
+    QLabel *benchStat_ = nullptr;
+    BenchBar *benchBar_ = nullptr;
+    QLabel *legend_ = nullptr;
+    QWidget *resume_ = nullptr;
+    QLabel *resumeText_ = nullptr;
+    BenchView benchView_;
+    quint64 benchVersion_ = 0;
+    QString activeRow_;
     ElideLabel *chosenText_ = nullptr;
     QPushButton *okBtn_ = nullptr;
     QVector<Chip *> chips_;
     QVector<SrEngine::ModelInfo> models_;
     QEventLoop *loop_ = nullptr;
+    QTimer *poll_ = nullptr;
     QString current_;
     QString chosen_;
     QString filter_;

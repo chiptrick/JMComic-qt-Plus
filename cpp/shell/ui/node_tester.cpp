@@ -30,6 +30,11 @@ constexpr int kPingSamples = 2;    // 每条线路 ping 采样次数（取最小
 constexpr int kSpeedSamples = 2;   // 每条线路下载采样次数（取最大吞吐）
 constexpr int kProbeTimeoutMs = 3000;   // Python SpeedTestPingReq.timeout = 3
 constexpr int kFetchTimeoutMs = 5000;
+// 工作线程走 TCP/TLS 基线：NodeHttp 的 QUIC/ECH 是主线程全局态（EchH3Blocks
+// 等容器无锁），不能搬进 worker。实测同一节点 TCP 首包比 H3 慢 1~2s，若并发档
+// 仍卡 3s 会把本可达节点大面积误判超时。并发档用 6s，指标口径仍是耗时//4；
+// 兼容档（1 线程）继续用 kProbeTimeoutMs，行为不变。
+constexpr int kPooledTimeoutMs = 6000;
 
 // Python natsorted：按数字段自然排序，保证 ProxyIP 列表顺序稳定
 bool NaturalLess(const QString &a, const QString &b)
@@ -62,7 +67,7 @@ bool NaturalLess(const QString &a, const QString &b)
 
 }  // namespace
 
-NodeTester::NodeTester(QObject *parent) : QObject(parent)
+NodeTester::NodeTester(QObject *parent) : QObject(parent), pool_(this)
 {
     nam_ = new QNetworkAccessManager(this);
 }
@@ -120,6 +125,10 @@ void NodeTester::Cancel()
     nodeInfoInflight_.clear();
     nodePhase_ = 0;
     linePingPending_ = 0;
+    // 工作线程分支：置取消标志并废弃本轮所有在途回调（Pool 自己也会换 generation）。
+    // 已在飞的请求最迟在一个 100ms 分片内退出；其结果不会被回写。
+    pool_.Cancel();
+    pooled_ = false;
 }
 
 void NodeTester::Get(const Probe &p, Done done)
@@ -458,6 +467,18 @@ void NodeTester::BuildNodes()
                      return r.kind == NodeKind::Preferred;
                  }))));
     emit NodeListReady(nodes_);
+    // 本轮开始时快照并发度，运行中改设置不会影响正在跑的这一批。
+    // 1 = 兼容档：下面这段事件循环代码与 0.90 完全一致，不创建工作线程。
+    const int override = NodeBench::ThreadOverride();
+    nodeThreads_ = override > 0 ? override : ProxyConfig::SpeedThreads();
+    pooled_ = nodeThreads_ > 1 && !nodes_.isEmpty();
+    emit Log(QStringLiteral("node-test: mode=%1 threads=%2")
+                 .arg(pooled_ ? QStringLiteral("pool") : QStringLiteral("event-loop"))
+                 .arg(nodeThreads_));
+    if (pooled_) {
+        StartPooledPing();
+        return;
+    }
     for (int i = 0; i < nodes_.size(); ++i)
         nodePingQueue_.enqueue(i);
     nodePhase_ = 2;
@@ -492,22 +513,7 @@ void NodeTester::PumpNodes()
             SpeedNode(idx);
         }
         if (nodeSpeedInflight_.isEmpty() && nodeSpeedQueue_.isEmpty()) {
-            // 测速结束后补一轮 ipinfo：只查「ping 通且还没有地区」的节点。
-            // Python 是对全部 item 并发发，但失败节点本来选不上，56 个全查会让
-            // 整轮多等十几秒（4 并发 × 5s 超时）；这里按可用节点裁剪。
-            for (int i = 0; i < nodes_.size(); ++i) {
-                const NodeResult &r = nodes_.at(i);
-                if (!r.failed && r.country.isEmpty())
-                    nodeInfoQueue_.enqueue(i);
-            }
-            if (nodeInfoQueue_.isEmpty()) {
-                nodePhase_ = 0;
-                FinishNodes();
-                return;
-            }
-            nodePhase_ = 4;
-            emit Log(QStringLiteral("node-speed done, ipinfo %1").arg(nodeInfoQueue_.size()));
-            PumpNodes();
+            StartIpInfoPhase();   // 与线程池分支共用同一段收尾逻辑
         }
         return;
     }
@@ -521,6 +527,163 @@ void NodeTester::PumpNodes()
             nodePhase_ = 0;
             FinishNodes();
         }
+    }
+}
+
+// ---------------------------------------------------------------- 并发分支
+// ipinfo 与排序收尾在两条分支上完全相同：它只补地区/ASN，走 QNAM，必须在主线程。
+void NodeTester::StartIpInfoPhase()
+{
+    // Python 是对全部 item 并发发，但失败节点本来选不上，56 个全查会让整轮
+    // 多等十几秒（4 并发 × 5s 超时）；这里按可用节点裁剪。
+    nodeInfoQueue_.clear();
+    nodeInfoInflight_.clear();
+    for (int i = 0; i < nodes_.size(); ++i) {
+        const NodeResult &r = nodes_.at(i);
+        if (!r.failed && r.country.isEmpty())
+            nodeInfoQueue_.enqueue(i);
+    }
+    if (nodeInfoQueue_.isEmpty()) {
+        nodePhase_ = 0;
+        FinishNodes();
+        return;
+    }
+    nodePhase_ = 4;
+    emit Log(QStringLiteral("node-speed done, ipinfo %1").arg(nodeInfoQueue_.size()));
+    PumpNodes();
+}
+
+void NodeTester::ApplyPingOutcome(const NodeBench::Outcome &o)
+{
+    if (o.id < 0 || o.id >= nodes_.size())
+        return;
+    NodeResult &r = nodes_[o.id];
+    r.failed = !o.ok;
+    r.delayMs = o.ok ? int(o.elapsedMs / 4) : 0;   // Python 口径：耗时 // 4
+    r.error = o.ok ? QString()
+                   : (o.error.isEmpty() ? QStringLiteral("failed") : o.error);
+    emit NodeUpdated(r);
+}
+
+void NodeTester::ApplySpeedOutcome(const NodeBench::Outcome &o)
+{
+    if (o.id < 0 || o.id >= nodes_.size())
+        return;
+    NodeResult &r = nodes_[o.id];
+    r.downloadFailed = !o.ok;
+    r.downloadMs = o.ok ? int(o.elapsedMs / 4) : 0;
+    if (!o.ok && r.error.isEmpty())
+        r.error = o.error;
+    emit NodeUpdated(r);
+}
+
+void NodeTester::StartPooledPing()
+{
+    nodePhase_ = 2;
+    QVector<NodeBench::Task> tasks;
+    tasks.reserve(nodes_.size());
+    for (int i = 0; i < nodes_.size(); ++i) {
+        QUrl url(ProxyConfig::GetApiUrl2(5) + QStringLiteral("/latest/"));
+        QUrlQuery q;
+        q.addQueryItem(QStringLiteral("page"), QStringLiteral("0"));
+        url.setQuery(q);
+        NodeBench::Task t;
+        t.id = i;                       // = nodes_ 下标，汇总时据此回写
+        t.url = url;
+        t.connectIp = nodes_.at(i).ip;
+        t.sniHost = url.host();
+        t.timeoutMs = kPooledTimeoutMs;
+        t.maxBytes = 2 * 1024 * 1024;
+        tasks.append(t);
+    }
+    const int gen = generation_;
+    emit Log(QStringLiteral("node-ping: pool threads=%1 tasks=%2 timeout=%3ms")
+                 .arg(nodeThreads_)
+                 .arg(tasks.size())
+                 .arg(kPooledTimeoutMs));
+    const bool started = pool_.Start(
+        tasks, nodeThreads_,
+        [this, gen](const NodeBench::Outcome &o) {
+            if (gen != generation_ || !busy_)
+                return;
+            ApplyPingOutcome(o);       // 逐个刷新行，保留原有的渐进式界面
+        },
+        [this, gen](const NodeBench::Report &rep) {
+            if (gen != generation_ || !busy_)
+                return;
+            // 最终对账：Report 与任务同序且等长，按序再写一次，保证最终状态
+            // 严格等于汇总结果，不受逐条回调的队列投递顺序影响。
+            for (const NodeBench::Outcome &o : rep.outcomes)
+                ApplyPingOutcome(o);
+            int speedCount = 0;
+            for (const NodeResult &r : nodes_) {
+                if (!r.failed)
+                    ++speedCount;
+            }
+            emit Log(QStringLiteral("node-ping done, speed test %1").arg(speedCount));
+            nodePhase_ = 3;
+            StartPooledSpeed();
+        });
+    if (!started) {
+        // 理论上不会发生（上一批已被 Cancel 丢弃）；真发生就退回兼容路径，
+        // 绝不能让整轮卡在"测速中"。
+        emit Log(QStringLiteral("node-ping: pool busy, fall back to event loop"));
+        pooled_ = false;
+        for (int i = 0; i < nodes_.size(); ++i)
+            nodePingQueue_.enqueue(i);
+        nodePhase_ = 2;
+        PumpNodes();
+    }
+}
+
+void NodeTester::StartPooledSpeed()
+{
+    QVector<NodeBench::Task> tasks;
+    for (int i = 0; i < nodes_.size(); ++i) {
+        if (nodes_.at(i).failed)   // 与旧队列一致：ping 失败的节点不测图片
+            continue;
+        NodeBench::Task t;
+        t.id = i;
+        t.url = QUrl(ProxyConfig::GetImgUrl2(5) + QString::fromLatin1(kCoverSample));
+        t.connectIp = nodes_.at(i).ip;
+        t.sniHost = t.url.host();
+        t.timeoutMs = kPooledTimeoutMs;
+        t.maxBytes = 2 * 1024 * 1024;
+        tasks.append(t);
+    }
+    if (tasks.isEmpty()) {
+        StartIpInfoPhase();
+        return;
+    }
+    const int gen = generation_;
+    emit Log(QStringLiteral("node-speed: pool threads=%1 tasks=%2 timeout=%3ms")
+                 .arg(nodeThreads_)
+                 .arg(tasks.size())
+                 .arg(kPooledTimeoutMs));
+    const bool started = pool_.Start(
+        tasks, nodeThreads_,
+        [this, gen](const NodeBench::Outcome &o) {
+            if (gen != generation_ || !busy_)
+                return;
+            ApplySpeedOutcome(o);
+        },
+        [this, gen](const NodeBench::Report &rep) {
+            if (gen != generation_ || !busy_)
+                return;
+            for (const NodeBench::Outcome &o : rep.outcomes)
+                ApplySpeedOutcome(o);
+            StartIpInfoPhase();
+        });
+    if (!started) {
+        emit Log(QStringLiteral("node-speed: pool busy, mark download failed"));
+        for (const NodeBench::Task &t : tasks) {
+            NodeBench::Outcome o;
+            o.id = t.id;
+            o.ok = false;
+            o.error = QStringLiteral("pool busy");
+            ApplySpeedOutcome(o);
+        }
+        StartIpInfoPhase();
     }
 }
 

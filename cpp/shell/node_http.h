@@ -72,6 +72,10 @@ struct NodeHttpResponse
     QString error;            // 传输层失败原因（ok=false 时有效）
     qint64 elapsedMs = 0;
     QString finalUrl;
+    // 响应头（键统一小写）。多数调用方不需要；账号网页流程要靠 set-cookie 复用
+    // 站点会话（先 GET 表单页拿 cookie，再 POST 提交），所以这里如实带出来。
+    // 同名头出现多次时按换行拼接（set-cookie 就会这样），解析方自行 split。
+    QHash<QString, QString> headers;
 };
 
 class NodeHttp : public QObject

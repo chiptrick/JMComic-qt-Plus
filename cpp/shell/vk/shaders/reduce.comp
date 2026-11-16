@@ -1,0 +1,57 @@
+// GlobalAveragePool / ReduceMean(axes=[2,3], keepdims=1)：[1,C,H,W] -> [1,C,1,1]
+// 每个 workgroup 负责一个通道：64 线程各扫 HW/64 个元素，共享内存归约。
+// USE_FP16 变体：存储 half、累加 fp32（与 conv.comp 同一套宏）。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer Src { FT x[]; };
+layout(binding = 1) buffer Dst { FT y[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+shared float s[64];
+
+void main()
+{
+    const int C = P(0);
+    const int H = P(1);
+    const int W = P(2);
+    const int c = int(gl_WorkGroupID.x);
+    if (c >= C)
+        return;
+
+    const int hw = H * W;
+    const int base = c * hw;
+    const int tid = int(gl_LocalInvocationID.x);
+    float sum = 0.0;
+    for (int i = tid; i < hw; i += 64)
+        sum += FLD(x[base + i]);
+
+    s[tid] = sum;
+    barrier();
+    for (int step = 32; step > 0; step >>= 1) {
+        if (tid < step)
+            s[tid] += s[tid + step];
+        barrier();
+    }
+    if (tid == 0)
+        y[c] = FST(s[0] / float(hw));
+}

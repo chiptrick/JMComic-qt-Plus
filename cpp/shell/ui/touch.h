@@ -17,6 +17,7 @@
 
 #include <QObject>
 #include <QPoint>
+#include <QPointer>
 #include <QRect>
 #include <QString>
 
@@ -69,34 +70,61 @@ void LockHorizontalPan(QAbstractScrollArea *area);
 // 返回被调整的控件数量（0 表示本来就是合规的）
 int PolishHitTargets(QWidget *root);
 
-// ---- 菜单栏 / 弹出菜单 / 下拉选项框的点击防误触 ----
+// ---- 点击防误触（滑动 vs 点击）----
 //
-// 现象：手指在侧栏导航、弹出菜单（含二级子菜单）或下拉选项上滑动时，松手落在
-// 某一项上，控件把"滑动"当成"点击"——导航直接跳页、菜单项直接执行、下拉框
-// 直接换选项；滑动过程中还会出现"高亮跟着手指走 / 二级菜单自己弹出来"。
+// 现象：手指在任意可交互区域（侧栏、卡片、设置整行、下拉选项、菜单项、列表行）
+// 上或附近滑动时，松手会被当成点击 —— 跳页、拨开关、换选项、执行菜单项。
 //
-// 三条阈值（必须同时成立才算一次有效点击）：
-//   * 位移阈值 kTapSlopDp = 8dp：取**过程峰值位移**，不是"抬起点 − 按下点"。
-//     划出去再划回来（首末差≈0）同样判为滑动。超过即吞掉 release：
-//     按钮不会 clicked、菜单项不会 triggered、下拉列表不会提交。
+// 根因（真机 + 桌面实测）：
+//   * 控件的点击语义只有一条规则"抬起点落在我的矩形内 → clicked"，完全不看
+//     按下到抬起之间发生过什么；
+//   * QScroller 的 DragStartDistance ≈ 10mm（Android 上约 40 逻辑像素）。位移
+//     小于它时既不滚动、也不算滑动，抬手就是一次"合法点击"；
+//   * 位移够了以后 QScroller 会吃掉 touch 手势，但**仍把一条合成鼠标抬起按
+//     最后位置发给控件**，且中间没有 MouseMove（实测）。所以控件看到的
+//     press(起点) + release(终点) 依然像一次点击。
+//
+// 判定：一次"按下→抬起"只有同时满足下面四条才算点击，否则整条手势按滑动处理
+// （吞掉抬起）。四条互相独立，任一成立即为滑动：
+//   * 位移阈值 kTapSlopDp = 8dp。取**过程峰值**（鼠标位移与原始触摸位移取大），
+//     不是"抬起点 − 按下点"：划出去再划回来（首末差≈0）同样判为滑动。
 //   * 长按漂移 kTapHoldDriftMs = 500ms 且 kTapDriftDp = 4dp：按得久又在缓慢
 //     挪动（慢慢拖列表）不算点击；长按不动仍然是点击。
-//   * 忽略阈值 kTapIgnoreAfterScrollMs = 250ms：只要内容在 250ms 内发生过位移
-//     （含惯性滚动尚未收尾），期间的点击一律忽略。
+//   * 滚动证据：本次手势期间任一滚动区发生过位移（含 QScroller 拖出来的、
+//     含惯性未收尾）。内容动过就不是点击。
+//   * 忽略阈值 kTapIgnoreAfterScrollMs = 250ms：内容在 250ms 内刚滚动过
+//     （含惯性尚未收尾），期间的点击一律忽略。
+//   * 多指：手势期间出现过第二根手指，一律不算点击（本应用无双指点按语义）。
+//   * 序列污染：手势期间弹出窗口补发的按下（mouse replay）沿用累计峰值，
+//     整条手势强制按滑动算，且连按下一起吞（kTapSequenceMs = 300ms 续接窗口，
+//     只作用于弹出类窗口；普通控件上的新按下永远开新序列）。
 //
-// 判成滑动后还会复位中途产生的选中态：菜单 activeAction 归空并收起已展开的
-// 子菜单、按钮解除按下态、下拉列表 currentIndex 回到按下时的值。
+// 覆盖范围（GuardScope）：按钮/菜单/下拉框/下拉弹窗列表之外，还包括
+//   * Overlay —— 所有 Qt::Popup/Tool/ToolTip 顶层窗口，以及声明
+//     tapGuardOverlay 的项目自绘浮层（SrModelSheet / ModalDialog /
+//     ProxyPage 悬浮抽屉）里的任何控件；悬浮菜单同样走整条菜单链清理。
+//   * Item —— QAbstractItemView（列表行，Qt 自己在抬起时发 clicked）；
+//   * Generic —— 自绘可点控件：声明了 tapGuardItem / toggleRow / clickable
+//     属性，或自带 PointingHandCursor（WA_SetCursor）的控件，例如 ComicCard、
+//     SettingRow、SrModelField、文字链。
+// 显式声明 tapGuardSelfManaged=true 的控件（SectionStrip）除外：它内部已有
+// 滑动/点击仲裁，守卫吞掉抬起会让它停在"拖动中"。
 //
-// 全部写在触摸层而不是各页面里：入口太多（侧栏、阅读器菜单、右键菜单、
-// 下拉框弹窗），只有一处实现才不会漏。
+// 冲突消解：QScroller 正在拖同一个容器、且本次手势来自桌面鼠标时，抬起交还
+// 给它（它靠这条事件收尾并起惯性；点击已由它自己的假释放取消）。触摸路径相反：
+// QScroller 只吃 touch，合成抬起与它无关，必须吞。
 constexpr int kTapSlopDp = 8;
 constexpr int kTapDriftDp = 4;
 constexpr int kTapHoldDriftMs = 500;
 constexpr int kTapIgnoreAfterScrollMs = 250;
 
 void InstallTapGuard();        // 幂等：装一次应用级过滤器
-int TapGuardSwallowed();       // 回归：被忽略的误触次数
+int TapGuardSwallowed();       // 回归：拦截次数（吞掉的抬起 + 污染序列的补发按下）
 void ResetTapGuardStats();     // 回归：清零计数（截图/自检前调用）
+void SetTapGuardLegacy(bool on);  // 回归对照：复刻修复前的手势重置行为
+bool TapGuardLegacy();            // 回归：当前是否处于对照档
+QString TapGuardTrace();       // 回归：最近 24 条手势判定（真机落盘排障用）
+int TapGuardScopeOf(QWidget *w);  // 回归：控件落入的 GuardScope 编号（0=None）
 
 }  // namespace Touch
 
@@ -142,6 +170,7 @@ private:
     bool decided_ = false;     // 是否已经判明"横滑还是竖滑"
     bool horizontal_ = false;  // 判明后：是否接管（横滑才接管）
     bool fromTouch_ = false;
+    QPointer<QWidget> pressWidget_;   // 起手控件：接管时解除它的按下态
     QPoint startGlobal_;
     qreal progress_ = 0.0;
 };

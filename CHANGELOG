@@ -1,6 +1,233 @@
 # update log file.
 # tonquer<tonquer@qq.com>
 #####################################################################################
+# Version: cpp-ui 0.96.6（量化模型（w8a16 QDQ）在 NPU 上跑通）
+# 2026/11/15
+# 1)根因：EnsureModel 里有一条 `&& !quantModel`，把所有 QDQ 量化模型直接排除在
+#   QNN 子进程之外，只走 ORT CPU；状态行还写着"QDQ 量化模型不支持 QNN HTP"。
+#   该结论来自 0.96.3 之前的实测——那时 HTP 整体起不来，不是模型格式的问题。
+#   ORT QNN EP 官方支持的推荐配置正是 uint16 激活 + uint8 权重（w8a16）。
+# 2)第二个根因：QDQ 图的图首/图尾就是 QuantizeLinear/DequantizeLinear，QNN EP 默认
+#   把它们 offload 给 CPU EP（offload_graph_io_quantization=1），而严格档同时设了
+#   session.disable_cpu_ep_fallback=1 —— 一边把节点推给 CPU、一边禁止 CPU 兜底，
+#   建会话必然失败。现在 models.txt 增加第 6 列 arch，quant 模型下发
+#   offload_graph_io_quantization=0，让 QNN 自己吃下 I/O 量化。
+# 3)后端不再谎报：QNN 会话建好后先跑探针，再用 cmd=4 向子进程要 htp 标志；只有
+#   backend 里出现 Hexagon 才算 qnn-htp，否则落 CPU 并把原因写进状态行
+#   （QNN 0 分区的会话会被引擎丢弃，实际跑 CPU，光看"会话建成"是分辨不出的）。
+# 4)顺带修：量化模型 scale 推断补 `_x2/_x3/_x4` 命名（srmd_x3_q16 以前被当成 2 倍）；
+#   QnnPickModel 对 quant 禁用"同倍数兜底"（否则会把 float 模型顶上来）；
+#   QnnProcStart 已启动时仍把目标模型补进 qnn_models（切换模型曾静默跑错模型）；
+#   BenchModel 对 quant/srmd 把 tile 钳回 192；QNN 模式不再每次 EnsureModel 重跑
+#   探针（没有进程内 session，原判据永远不命中）；性能测试的 --sr-model 现在
+#   对 GPU/NPU/CPU 三档同时生效。
+# 5)新增 --sr-npu-compare <model>：同一 192×192 合成图分别走 NPU 与 CPU，输出
+#   maxAbs/PSNR。QDQ 图"跑通"不等于"算对"，这是数值侧的验收口。
+# 6)真机 V2463A 实测 realcugan_pro_up2x_q16_lowq：NPU 271ms vs CPU 671ms（2.5×），
+#   backend=Qualcomm Hexagon NPU (QNN HTP, fp16)，out=384x384 scale=2。
+#   sr-perf.txt / sr-compare.txt 落盘失败时改退应用内部 data 目录（Android 11+
+#   上 /sdcard/Android/data/<pkg> 可能整个不存在）。
+# 7)修 SetBackendPreference(pref, persist=false) 完全不生效：原来只释放会话，
+#   偏好没落到任何地方，PrefBackend() 仍按 ui.ini 的 auto 走 —— 于是"临时切 CPU
+#   做对比"实际又跑回 QNN（表现为 maxAbs=0、CPU/NPU 耗时一模一样）。新增进程内
+#   覆盖 g_prefOverride；性能测试/数值对比的临时切换统一 persist=false，不再改写
+#   用户的永久偏好。
+# 8)顺带修非 Windows 平台的编译错误（OpenVINO 插件注册用了 Windows 的
+#   ORTCHAR_T=wchar_t；Android 上是 char）。该路径在 Android 上永不执行，只为编过。
+#
+# Version: cpp-ui 0.96.5（QNN 去厂商库依赖：运行时复制到 app 私有目录）
+# 2026/11/15
+# 1)不再把 libcdsprpc.so / libvmmem.so / vendor.qti.hardware.dsp-V1-ndk.so 打进 APK
+#   （Qualcomm 私有库，分发有授权风险）。改为 QnnPrepareFastRpcLib 首次启动时从
+#   /vendor/lib64 复制到 filesDir/qnn_libs（三个缺一不可，libcdsprpc 的 NEEDED
+#   依赖另外两个）
+# 2)关键机制：app namespace 的 permitted_paths 含 /data，filesDir 在它下面，所以
+#   复制到那里的库可以 dlopen（SELinux 标签 app_data_file 对 untrusted_app 有 execute）；
+#   LD_LIBRARY_PATH 必须在 exec 前经 envp 传入（nativeLibraryDir:filesDir/qnn_libs），
+#   运行期 setenv 不更新 namespace 的 ld_library_paths
+# 3)排除的路径：dlopen(/vendor/lib64/...) 被 namespace 拒；裸名同样（public.libraries
+#   只对 Java 层 System.loadLibrary 生效）；android_dlopen_ext + USE_LIBRARY_FD 仍走
+#   is_accessible(soname)；linker64 启动不改变 namespace 且会毁掉 dladdr 同目录查找；
+#   android_create_namespace 未导出（NDK 无头、设备 libdl 无符号）
+# 4)实测：waifu2x cunet tile192 NPU 25ms vs CPU 825/830ms = 33.0~33.2×，
+#   APK 内零厂商库；与打包方案（23~27ms）一致
+# 5)回退 0.96.4 里引入的 linker64 启动（无收益且破坏同目录查找）
+#
+# Version: cpp-ui 0.96.4（QNN NPU 在 app 域跑通：FastRPC 客户端库补齐）
+# 2026/11/15
+# 1)根因：app 的 linker namespace permitted_paths 不含 /vendor/lib64（default_library_paths
+#   只有 /system/lib64:/system_ext/lib64），而 libQnnHtpV79Stub.so 的 NEEDED 是
+#   libcdsprpc.so(FastRPC 客户端) → App 内 dlopen 绝对路径报 "is not accessible for the
+#   namespace"，裸名也不走 Java 层 libnativeloader 的 public.libraries 白名单 →
+#   QnnDevice_create 恒报 QNN_DEVICE_ERROR_INVALID_CONFIG（4 个 tier 全挂、无编译耗时）
+# 2)修复：libcdsprpc.so(497KB) + libvmmem.so(69KB) + vendor.qti.hardware.dsp-V1-ndk.so(86KB)
+#   随 arm64 jniLibs 打包（nativeLibraryDir 属 apk_data_file，允许 execute）；三者 PT_LOAD
+#   均为 0x4000（满足 Android 15+ 16KB）。x86_64 不接 QNN
+# 3)结果：waifu2x cunet tile192 NPU 23/27ms vs CPU 823/862ms = 31.9~35.8×，
+#   backend=Qualcomm Hexagon NPU (QNN HTP, fp16)，与 Python 参考实现 19.8ms 同量级
+# 4)排障设施：--qnn-debug 打开引擎级 options 明细（JM_QNN_DEBUG 传入 proc）；
+#   QnnProcStart 改用 posix_spawn（envp 显式构造）+ proc main 的 CloseFrom(3)；
+#   proc 日志改写到 /sdcard/Android/data/<pkg>/files（adb 可直接 pull）；
+#   proc 启动打印 selinux/cgroup/seccomp/capEff/openFds/ADSP 值
+# 5)复盘文档 docs/qnn_android_npu_setup.md：含"此前 8 种尝试为何失败"与 local-dream 对照
+#
+# Version: cpp-ui 0.96.3（QNN 接入：独立进程 + 打包链路 + 真实后端校验）
+# 2026/11/14
+# 1)gradle packaging.jniLibs.useLegacyPackaging=true + libsr_qnn_proc.so 随包，
+#   安装器解压到 nativeLibraryDir 后可 exec（AGP 9 拒绝 manifest 的
+#   extractNativeLibs，必须走 build.gradle；APK 414→300MB）
+# 2)sr_engine 新增 QNN 子进程客户端（fork/pipe/poll + hello/add 协议），
+#   models.txt 自动生成（含 Dyn 量化模型）、assets 模型解包、skel 复制到 filesDir；
+#   Android 禁用 App 内 ORT QNN（tier1 会把 QNN-CPU 伪装成 NPU）
+# 3)NPU 档用 cmd=4 info 校验 backend 含 Hexagon 才算成功；QDQ 量化模型直接跳过
+#   QNN/Vulkan 并注明原因；PerfRecommendation 按 ms 真实排序
+# 4)CLI --sr-model / --qnn-probe 0；sr-perf.txt 增加 backend/qnn/qnnlog 诊断行
+# 5)已知限制：app 域 QnnDevice_create 报 QNN_DEVICE_ERROR_INVALID_CONFIG
+#   （shell 域同一二进制可用），自动回退 CPU，不影响出图
+#
+# Version: cpp-ui 0.96.2（性能测试扩展：NPU 档 + 内存口径 + 测试报告）
+# 2026/11/14
+# 1)RunPerfProbe 新增 NPU 档（QNN HTP 就绪时自动测 tile192 单次 + 内存增量，
+#   库缺失时如实标注"libQnnHtp.so 未随包分发"）；三档（GPU/NPU/CPU）统一
+#   记录 memDeltaMb（进程内存净增量，FootprintMb：/proc 或 K32GetProcessMemoryInfo，
+#   Windows 链接 psapi）；PerfRecommendation 支持三硬件排序（NPU>GPU>CPU，
+#   给相对次快硬件倍数）
+# 2)设置页性能测试展示激活显存/内存增量/失败原因三列
+# 3)完整测试报告 docs/sr_perf_report.md（桌面 RTX4060 + 真机 Adreno830 +
+#   NPU 接入条件与预期收益）
+# 
+# Version: cpp-ui 0.96.1（A+B 组合落地：分批提交 + watchdog 降档 + 设置页）
+# 2026/11/14
+# 1)A 分批提交：sr_graph prepare 按每步 gx*gy*gz 累计生成切点（桌面独显 8M/
+#   其它 256K 工作组，JM_VK_BATCH_WG 覆盖/置 0 关），run/runStream 在切点
+#   endPass→beginPass——x4plus tile128 真机从"四组全熔断"变 3 次全过
+#   （7346ms，1.77x vs CPU），conv-test 数值不变、桌面 stream pixelHash 不变
+# 2)B watchdog 自动降档：TileOverride(userSet) 区分显式/默认；x4plus 与
+#   realesrgan_general 在 Android 未显式设置时自动 tile64（真机 3889ms，
+#   3.34x vs CPU）；TileForCurrentModel 暴露生产 tile 并修正 --vk-report
+#   默认 tile 与生产不一致
+# 3)设置页超分组新增"Tile 大小"（自动/64/96/128/160/192/256，写 ui.ini [sr]
+#   tile）与"性能测试"（后台线程 GPU tile64+自动档+CPU 各一次，输出耗时/
+#   显存并给出推荐后端与 tile）；底层 API TilePreference/SetTilePreference/
+#   RunPerfProbe/PerfRecommendation/TileForCurrentModel；CLI --sr-perf-test
+# 4)修 data_migrator.cpp qWarning 的 non-pod-varargs（NDK 构建挡路）
+# 
+# Version: cpp-ui 0.96（Vulkan 超分第二轮：fp16 / Winograd / descriptor 复用 / tile 流水）
+# 2026/11/14
+# 1)fp16 存储与计算（NCNN fp16_packing 模式）：Vulkan12Features.shaderFloat16 +
+#   Vulkan11Features.storageBuffer16BitAccess 能力探测（桌面/NDK 两种头命名兼容），
+#   9 个 kernel 用 FT/FLD/FST 宏参数化并由 qsb -D USE_FP16=1 生成 _fp16 变体，
+#   显存 half、shader 内 unpack 成 fp32 累加；CPU half 转换走 vk_half.h（RNE 位操作）
+# 2)Winograd F(2,3)：convw.comp 每线程 2x2 输出 tile，输入 T=Bt*D*Bt（行/列同组
+#   稀疏系数）、输出 y=At*M*A；权重 CPU 预变换 [OC][IC][3][3]->[OC][IC][4][4]；
+#   门控 stride1/3x3/对称pad/常量权重且 C>=16 且 OC>=16（JM_VK_WINO=0 可关）；
+#   --vk-conv-test 增加 winograd 用例（maxErr=7.2e-07）
+# 3)descriptor 复用：VK_KHR_push_descriptor 首选路径（vkCmdPushDescriptorSetKHR，
+#   零 allocate/bind set），回退一次 allocate 8192 set 的轮转池，再回退逐 dispatch
+# 4)双 tile 流水（深度 2）：cmds/fences 轮转 + endPass 只 submit 不等待 + 激活池
+#   头部输入/输出双 slot；Graph::runStream(TileStream 回调)，上传 tile k+1 与
+#   计算 tile k 重叠；download 走 staging 环（回卷等全部在飞 fence）；修复
+#   closePass 在 endPass 异步化后 resetStaging 覆盖在飞拷贝导致权重损坏
+#   （x4plus/realcugan_pro 权重 >24MB 分批上传受影响）
+# 5)CLI：--vk-stream-test（整图流水 vs 串行像素哈希对比）；--vk-compare 打印
+#   nonFinite/tol/fp16（修复原 fprintf 参数错位）；fp16 数值基线 2.5e-2
+#   （用户定夺：half 存储舍入在深网络的实测量级 0.0067~0.020，NCNN fp16 同等
+#   行为；fp32 仍 1e-3）
+# 6)数据（桌面 RTX 4060 Laptop，fp16+wino）：--vk-compare fp32 39/39 PASS
+#   （1e-3 基线）、fp16 39/39 PASS（2.5e-2 基线）；--vk-model-test 39/39 ok；
+#   waifu2x 2x tile128 115 -> 49.65ms（vs 首轮优化前 427ms = 8.6x）；
+#   realcugan_pro 74.8ms、x4plus 801ms；流水 vs 串行 pixelHash 一致（1800/1892ms）
+# 7)遗留：真机（Adreno 830）fp16 复测与移动端后端优先级调整由用户统一决定
+# 8)升级数据保护：新增 DataMigrator（[meta] schemaVersion；启动时损坏 INI 隔离为
+#   .corrupt-<ts> 并从 .bak 恢复、升级前备份到 backup/v<n>/、键迁移 v1->v2
+#   proxy/http3->http3On）；ui.ini 五个写盘点（UiPrefs/ProxyConfig/CachePath/
+#   AppFont/SearchHistory）接入"写成功才滚动备份"；--export-data/--import-data
+#   （桌面 CLI 与手机 jm.args 同义）：卸载重装/换设备前导出登录态与个性化设置
+# 9)16KB 页对齐（Android 15+ 兼容性提醒根因）：实测 0.95 APK 48 个 .so 全部
+#   STORED（extractNativeLibs=false，加载器从 APK 直接 mmap）且 zip 偏移仅按
+#   4KB 对齐（38 个 mod 16K != 0）——ELF PT_LOAD 已是 0x4000（NDK r30 默认），
+#   提醒来自 zip 维度。修复：apk_repack.py ALIGN 4096->16384；build_android.sh/
+#   repack_apk.sh 改 zipalign -P 16 并加 -c 检查门禁；build_android.ps1 默认改走
+#   Python 重对齐（zipalign.exe 在本机会挂）；check_ui_apk_16kb.py 增加 zip 偏移
+#   与 STORED 两个检查维度（旧包 FAIL、重打包重签后 48/48 PASS）
+# 10)签名稳定化：debug 构建改用随仓 keys/jm-dev.keystore（alias jmdev），替代
+#    每台机器都不同的 ~/.android/debug.keystore——跨机器构建的包互相覆盖安装
+#    不再被迫卸载清数据（首次换签名需卸载一次，先 --export-data）
+# 11)versionCode 改由 project VERSION 推导（major*100+minor，0.95->195），防手写
+#    回退触发 INSTALL_FAILED_VERSION_DOWNGRADE（被迫卸载）
+#####################################################################################
+# Version: cpp-ui 0.95（Vulkan 超分：参考 NCNN 用法的 GPU 优化）
+# 2026/11/14
+# 1)对照 tumuyan/RealSR-NCNN-Android（nihui ncnn-vulkan）定位瓶颈：直接卷积的
+#   读放大与逐像素分支、ConvTranspose+LeakyRelu 未融合、每 dispatch 重复 bind
+#   与全局 barrier
+# 2)conv 滑窗按 KW=1/2/3 常量特化展开（输入读 12 -> 6，内层无分支）；运行期下标
+#   数组会被驱动降级 local memory（实测 164 -> 269ms 退化），特化后恢复并反超
+# 3)deconv 增加融合激活槽位并纳入融合规则（78 处 ConvTranspose+LeakyRelu 生效）
+# 4)CmdBindPipeline 去重（beginPass 重置绑定状态）；全局 barrier 改为输出区间
+#   buffer barrier（x4plus 单 tile 1714 次 dispatch）
+# 5)数据：桌面 waifu2x 164 -> 97.7ms（2.9x vs ORT CPU）、realcugan 124ms（2.8x）、
+#   model-test 21888 -> 9094ms；真机 tile128 waifu2x 1158 -> 427ms（2.7x）、
+#   realcugan 1480 -> 845ms（1.8x），与 ORT CPU 基本持平
+# 6)数值：--vk-compare 39/39、--vk-model-test 39/39、离线回归 75/75 全部保持
+# 7)路线图：fp16 存储/计算（NCNN 在 Adreno 的第一支柱）-> Winograd F(2,3) ->
+#   descriptor 复用 -> 双 tile 流水（docs/cpp_vulkan_sr_backend.md 第 8 节）
+#####################################################################################
+#####################################################################################
+# Version: cpp-ui 0.95（Vulkan 后端：arm64 真机验证与可靠性补齐）
+# 2026/11/14
+# 1)arm64 真机 V2463A / Adreno 830 / Vulkan 1.3.284 出包安装并跑通：
+#   --vk-report（设备/算子自检、46 模型扫描、吞吐基准）；APK 312MB / 46 个 onnx
+# 2)新增 conv -> Relu/LeakyRelu/Sigmoid 算子融合（75 节点压到 50 步），
+#   39/39 与 ORT 逐像素对比仍全部 PASS
+# 3)DEVICE_LOST 自动重建一次 + 二次丢失进程内熔断 + 运行期重建 ORT CPU
+#   会话并整图重跑；每层失败都留人话原因
+# 4)量化 QDQ 模型动态加入目录（Vulkan 明确拒绝 / ORT CPU 39/39 可执行），
+#   新增 --vk-quant-test；Sweep 明确 SKIP 而非静默跳过
+# 5)tile 参数化：Vulkan 接受 32~512（JM_SR_TILE / ui.ini），CPU 固定 192
+#   （ONNX 导出时写死输入维度）；Android Vulkan 默认 128、显存预算 384MB
+# 6)新增 cpp/tools/apk_repack.py（4096 对齐 STORED + 预补 apksigner padding +
+#   移除旧 v1 签名），解决 INSTALL_FAILED_INVALID_APK
+# 7)验收：--vk-compare 39/39、--vk-model-test 39/39、离线回归 75/75、
+#   Android 双 ABI 交叉编译通过；真机 tile128 全量 ok=18 fail=0 skipped=28，
+#   28 个 SKIP 的 ORT CPU 回退全部成功
+# 8)边界：Adreno 连续大模型触发 GPU watchdog（熔断后 CPU 兜底），
+#   移动端 Vulkan 比 CPU 慢 2~4 倍；详见 docs/cpp_vulkan_sr_backend.md
+#####################################################################################
+#####################################################################################
+# Version: cpp-ui 0.95（Vulkan 超分后端）
+# 2026/11/14
+# 1)新增原生 Vulkan compute 超分后端：不引 ncnn/QRhi，桌面用随仓 Khronos 头、
+#   Android 用 NDK sysroot 头；入口全部动态解析（VK_NO_PROTOTYPES）
+# 2)新增 cpp/shell/vk/{vk_onnx,sr_graph,sr_vk,vk_api,vk_device}.* 与 10 个 GLSL
+#   计算内核（构建期 qsb -> SPIR-V -> qrc）；常量折叠 + 形状推断 + 活跃期显存复用
+# 3)支持全部 39 个 fp32 超分模型（waifu2x / Real-CUGAN / Real-ESRGAN / SRMD），
+#   量化 *_q16 / lowq 显式不支持并回退 CPU
+# 4)SrEngine 后端偏好扩展为 auto|qnn|vulkan|cpu，优先级 QNN -> Vulkan -> CPU；
+#   设置页改为四选一，失败原因进 BackendDetail，CPU 始终兜底
+# 5)验收：--vk-compare 39/39 与 ORT 逐像素对齐（maxAbs<=4.6e-05）、
+#   --vk-model-test 39/39 无 NaN、--vk-conv-test/--vk-pad-test 单算子自检通过、
+#   桌面离线回归 75/75；Android x86_64 / arm64-v8a 交叉编译通过
+# 6)架构、参数、桌面/移动端差异与回退策略见 docs/cpp_vulkan_sr_backend.md
+#####################################################################################
+#####################################################################################
+# Version: cpp-ui 0.95
+# 2026/11/13
+# 1)补齐"尚未接入"的 11 项：云端记录(/watch_list)、我的评论(/forum?uid=)、连载更新
+#   (/serialization)、作品评论读写(/forum?aid= + POST /comment)、本地收藏(真实目录扫描)、
+#   网络存储节点管理、日志导出(zip)、检查更新+更新配置(config.txt)、
+#   注册/找回密码/重发验证邮件/图形验证码、QNN-HTP 超分后端
+# 2)新增 JmAccount / UpdateChecker / LogExport / NasStore 四个模块；NodeHttp 增加响应头
+#   捕获（含 set-cookie），账号网页流程可复用站点会话
+# 3)JmApi 增加 JmComment 与两条账号列表接口、连载更新接口，解析器可单测；401 与收藏同口径
+# 4)SrEngine 支持后端偏好（JM_SR_BACKEND / ui.ini [sr] backend）、QNN EP 分级降级与
+#   真实回退原因；设置页"优先使用 NPU"改为真实开关
+# 5)新增回归入口：--export-logs/--sr-backend/--nas-selftest/--nas-ui-selftest/
+#   --account-selftest/--account-flow/--update-check/--update-base/--about-report/
+#   --watchlist-report/--mycomment-report/--week-report/--comment-report/--login-panel
+# 6)桌面离线回归 75/75；详见 docs/cpp_unwired_features_2026-11-13.md
+#####################################################################################
+#####################################################################################
 # Version: cpp-ui 0.94
 # 2026/11/13
 # 1)滑动 vs 点击判定重做（touch.cpp 的 TapGuard）：QComboBox 本体、下拉弹窗列表、

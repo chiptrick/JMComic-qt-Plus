@@ -245,25 +245,47 @@ if ($SkipSign) {
         Select-Object -First 1
     if (-not $Bt) { Fail 'no usable build-tools (zipalign/apksigner) found' }
     $ApkSigner = Join-Path $Bt.FullName 'apksigner.bat'
-    $Ks = Join-Path $env:USERPROFILE '.android\debug.keystore'
-    if (-not (Test-Path $Ks)) { Fail "debug keystore not found: $Ks" }
+    # 签名稳定性（升级丢数据根因之一）：~\.android\debug.keystore 每台机器不同，
+    # 跨机器构建的 debug 包互相覆盖安装会失败并被迫卸载。改用随仓 dev keystore，
+    # 任何机器出的 debug 包签名一致（详 build_android.sh 同段注释）。
+    $Ks = Join-Path $PSScriptRoot 'keys\jm-dev.keystore'
+    if (-not (Test-Path $Ks)) { Fail "committed dev keystore not found: $Ks" }
     $signInput = $Unsigned
     if ($WithZipAlign) {
         $ZipAlign = Join-Path $Bt.FullName 'zipalign.exe'
         $Aligned = Join-Path $Build 'aligned.apk'
-        & $ZipAlign -f 4 $Unsigned $Aligned
+        # -P 16: .so entries must be 16 KB page-aligned for Android 15+ 16 KB
+        # page-size devices (AGP / plain zipalign -p only give 4096, which
+        # trips the app compatibility notice on 16 KB devices).
+        & $ZipAlign -f -P 16 4 $Unsigned $Aligned
         if ($LASTEXITCODE -ne 0) { Fail 'zipalign failed' }
+        & $ZipAlign -c -P 16 4 $Aligned
+        if ($LASTEXITCODE -ne 0) { Fail 'zipalign check failed (not 16 KB aligned)' }
         $signInput = $Aligned
     } else {
-        Write-Host '  note  skipping zipalign (use -WithZipAlign to force it)' -ForegroundColor Yellow
+        # zipalign.exe hangs on 300 MB+ APKs on this host (AV/Defender scan).
+        # The Python repackager rewrites the zip with 16 KB-aligned STORED .so
+        # entries and byte-identical other entries - same result, no hang.
+        $Aligned = Join-Path $Build 'aligned16k.apk'
+        python (Join-Path $Repo 'cpp\tools\apk_repack.py') --base $Unsigned --out $Aligned
+        if ($LASTEXITCODE -ne 0) { Fail '16 KB realign (apk_repack.py) failed' }
+        $signInput = $Aligned
     }
-    & $ApkSigner sign --ks $Ks --ks-pass pass:android --ks-key-alias androiddebugkey `
+    & $ApkSigner sign --ks $Ks --ks-pass pass:android --ks-key-alias jmdev `
         --key-pass pass:android --out $OutApk $signInput 2>$null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutApk)) { Fail 'apksigner failed' }
 }
 
 $sizeMb = [math]::Round((Get-Item $OutApk).Length / 1MB, 1)
 Step "APK: $OutApk ($sizeMb MB)"
+
+# --- 16 KB page alignment gate: both dimensions the loader/system actually
+# check. ELF PT_LOAD p_align >= 16384 AND zip data-offset % 16384 == 0 (the
+# manifest declares extractNativeLibs=false, so the loader mmaps from the APK).
+Step 'verify 16 KB page alignment (ELF p_align + zip offset)'
+$env:ANDROID_SDK_ROOT = $Sdk   # the checker locates the NDK's llvm-readelf under it
+python (Join-Path $Repo 'cpp\tools\check_ui_apk_16kb.py') $OutApk
+if ($LASTEXITCODE -ne 0) { Fail '16 KB page alignment gate failed (see check output)' }
 
 # --- ECH / HTTP3 gate: a build that lacks the symbols is a build without the
 # features (runtime would silently report ech=0 / http3=0), so fail here.

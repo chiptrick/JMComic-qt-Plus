@@ -327,6 +327,7 @@ protected:
     void showEvent(QShowEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
     void mousePressEvent(QMouseEvent *) override;
+    void mouseReleaseEvent(QMouseEvent *) override;
     bool eventFilter(QObject *obj, QEvent *ev) override;
 
 private:
@@ -344,6 +345,10 @@ private:
     qreal scrim_ = 0.0;
     bool intro_ = false;
     bool finished_ = false;
+    // 点遮罩关闭必须等抬起：按下即关闭会让"从遮罩上滑过去"被当成一次点击，
+    // 而且 TapGuard 只吞抬起、拦不住 press 里的副作用。
+    bool outsideArmed_ = false;
+    QPoint outsidePress_;
 };
 
 // ---------------------------------------------------------------- 卡片

@@ -1,0 +1,55 @@
+// DepthToSpace（CRD 模式）：ONNX 里 39 个模型全部是 CRD。
+//   out[oc][oy][ox] = in[oc*b*b + by*b + bx][oy/b][ox/b]，其中 by=oy%b, bx=ox%b
+// USE_FP16 变体：存储 half（与 conv.comp 同一套宏）；纯搬运不做格式转换。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer Src { FT x[]; };
+layout(binding = 1) buffer Dst { FT y[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+void main()
+{
+    const int COut = P(0);
+    const int HIn = P(1);
+    const int WIn = P(2);
+    const int b = P(3);
+    const int OH = P(4);
+    const int OW = P(5);
+
+    const int i = int(gl_GlobalInvocationID.x);
+    const int total = COut * OH * OW;
+    if (i >= total)
+        return;
+
+    const int ox = i % OW;
+    const int t1 = i / OW;
+    const int oy = t1 % OH;
+    const int oc = t1 / OH;
+
+    const int by = oy % b;
+    const int bx = ox % b;
+    const int ic = oc * b * b + by * b + bx;
+    const int iy = oy / b;
+    const int ix = ox / b;
+    y[i] = x[(ic * HIn + iy) * WIn + ix];
+}

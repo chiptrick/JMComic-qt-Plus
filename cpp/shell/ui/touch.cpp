@@ -3,11 +3,14 @@
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
+#include <QAbstractSlider>
+#include <QAbstractSpinBox>
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QStringList>
 #include <QGuiApplication>
 #include <QInputDevice>
 #include <QLineEdit>
@@ -31,8 +34,23 @@
 
 #include "motion.h"
 #include "theme.h"
+#include "touch_menu.h"
 
 namespace {
+
+// 同一根手指的"手势序列"续接窗口。
+//
+// 弹窗/子菜单出现时 Qt 会补发一条 MouseButtonPress（mouse replay / popup grab
+// 转移），距离上一条 move 通常只有几十毫秒。旧实现把它当成一次全新的点击，
+// 把过程峰值与起点一起归零，于是"从选项框上方滑进列表再松手"被判成一次
+// 6px 的短点击 —— 正是二级菜单 / 下拉选项框 / 悬浮菜单残留误触的根因。
+// 这个窗口只用于"弹出类窗口里的补发按下"，普通控件上的新按下永远开新序列，
+// 所以"滑一下马上点另一个按钮"不受影响。
+constexpr qint64 kTapSequenceMs = 300;
+
+// 回归对照开关：--tapguard-legacy 复刻修复前"弹窗补发按下会重置手势"的行为，
+// 用来在桌面/真机上做同一套用例的 A/B，平时恒为 false。
+bool g_tapGuardLegacy = false;
 
 bool g_touchMode =
 #ifdef Q_OS_ANDROID
@@ -195,7 +213,13 @@ void InstallScrollGestures(QWidget *root)
     const QScroller::ScrollerGestureType type =
         physical ? QScroller::TouchGesture : QScroller::LeftMouseButtonGesture;
 
-    const QList<QAbstractScrollArea *> areas = root->findChildren<QAbstractScrollArea *>();
+    // root 本身是滚动区时 findChildren 扫不到它：模型选择浮层这类打开时才创建的
+    // 列表只能把 list 自己传进来（没有父页面可扫），漏了就完全无法拖动（实测）。
+    QList<QAbstractScrollArea *> areas = root->findChildren<QAbstractScrollArea *>();
+    if (auto *self = qobject_cast<QAbstractScrollArea *>(root)) {
+        if (!areas.contains(self))
+            areas.prepend(self);
+    }
     for (QAbstractScrollArea *area : areas) {
         if (area->property("jmScroller").toBool())
             continue;
@@ -427,7 +451,7 @@ void LockHorizontalPan(QAbstractScrollArea *area)
 
 // ---------------------------------------------------------------- 点击防误触
 //
-// 一次"按下→抬起"只有同时满足下面三条才算点击，否则整条手势按滑动处理：
+// 一次"按下→抬起"只有同时满足下面几条才算点击，否则整条手势按滑动处理：
 //
 //   1. 位移阈值 kTapSlopDp = 8dp，且取**过程峰值**而不是"抬起点 − 按下点"。
 //      手指划出去再划回来时首末差≈0，只看首末差会把整段滑动判成点击 —— 这正是
@@ -436,27 +460,60 @@ void LockHorizontalPan(QAbstractScrollArea *area)
 //      挪动（慢慢拖列表）同样不是点击，长按不动仍然是点击。
 //   3. 静默期 kTapIgnoreAfterScrollMs = 250ms：内容刚滚动过（含惯性尚未收尾）
 //      期间的点击一律忽略，否则"想停滚动"会点进某一项。
+//   4. 滚动证据 / 多指：本次手势期间任一滚动区动过，或出现过第二根手指，都不是点击。
+//   5. **手势序列连续**（本轮补的残留误触根因）：弹窗拿到 grab、二级子菜单由
+//      20ms hover 定时器弹出时，Qt 会补发一条 MouseButtonPress。它以前被当成
+//      全新点击，pressGlobal / 峰值一起归零：从选项框上方滑进列表的几十像素被
+//      洗掉，抬手只剩 5~6px → 下拉框换选项、菜单项 triggered（独立探针实测
+//      currentIndex 0→2、QMenu::triggered 两次）。现在这些补发按下沿用同一序列的
+//      累计峰值并标成"受污染"，整条手势强制按滑动算，且**连按下一起吞掉**
+//      （QComboBox 在 press 就 showPopup、QMenu 在 press 就起子菜单定时器）。
 //
-// 判成滑动之后要做三件事，缺一不可：
+// 判成滑动之后要做四件事，缺一不可：
 //   * 吞掉抬起 —— 按钮不 clicked、菜单项不 triggered、下拉列表不提交；
-//   * 滑动过程中不制造选中态 —— 菜单与下拉列表的 move 直接吞掉（高亮不跟手，
-//     QMenu 的 hover 子菜单定时器也不会被续上），需要滚动就自己改 scrollbar；
+//   * 吞掉污染序列里的补发按下 —— 弹窗/子菜单不许在中途被"点开"；
+//   * 滑动过程中不制造选中态 —— 菜单与下拉列表的 move 直接吞掉（高亮不跟手），
+//     整条菜单链（含二三级子菜单）的 activeAction / hover 定时器一起清掉；
 //   * 结束后复位 —— 菜单 activeAction 归空并收起已展开的子菜单、按钮解除按下态、
 //     下拉列表 currentIndex 回到按下时的值。
 //
-// 为什么必须在应用级过滤器里做：入口分散在侧栏（QToolButton）、QMenu（含二级
-// 子菜单）和 QComboBox 弹窗列表（独立 popup 窗口）里，各自的 mouseReleaseEvent
-// 语义不同，逐个改必然漏；而且弹窗容器按下后会 grab 鼠标，按下与抬起根本不在
-// 同一个控件上，只有应用级过滤器能看到完整序列。
+// 覆盖范围：Button / Item / Generic 之外，还有 Menu（含子菜单链）、Combo、
+// PopupList，以及 Overlay —— 所有 Qt::Popup/Tool/ToolTip 顶层窗口与项目自绘浮层
+// （声明 tapGuardOverlay）里的**任何**控件都兜底纳入，不再逐控件列白名单。
+// 自绘浮层里"按下即动作"的控件（ModalDialog 遮罩、ProxyPage 悬浮抽屉）同步改成
+// 抬起才执行，否则只吞抬起拦不住 press 里的副作用。
+//
+// 为什么必须在应用级过滤器里做：入口分散在侧栏、QMenu、QComboBox 弹窗、
+// 悬浮窗与悬浮菜单里，各自的 mouseReleaseEvent 语义不同，逐个改必然漏；而且
+// 弹窗容器按下后会 grab 鼠标，按下与抬起根本不在同一个控件上，只有应用级
+// 过滤器能看到完整序列。
 namespace {
 
 enum class GuardScope {
     None,
+    Generic,     // 自绘可点控件（卡片 / 整行 / 文字链）：只吞"拖动后的抬起"
+    Item,        // QAbstractItemView（非弹窗）：行点击同样不许由滑动产生
     Button,      // 侧栏项 / 工具条按钮 / 开关
     Menu,        // QMenu 本体（含二三级子菜单），以及 QWidgetAction 里的子控件
     Combo,       // QComboBox 本体（含可编辑框里的 QLineEdit）
     PopupList,   // 下拉弹窗里的列表（view 或 viewport）
+    Overlay,     // 悬浮窗 / 悬浮菜单 / 自绘浮层（遮罩、吸顶条、浮条、模态框）
 };
+
+const char *ScopeName(GuardScope s)
+{
+    switch (s) {
+    case GuardScope::Generic:   return "generic";
+    case GuardScope::Item:      return "item";
+    case GuardScope::Button:    return "button";
+    case GuardScope::Menu:      return "menu";
+    case GuardScope::Combo:     return "combo";
+    case GuardScope::PopupList: return "popup-list";
+    case GuardScope::Overlay:   return "overlay";
+    case GuardScope::None:      break;
+    }
+    return "none";
+}
 
 struct GestureState {
     bool active = false;
@@ -473,7 +530,33 @@ struct GestureState {
     bool scrollKnown = false;
     bool dragging = false;
     bool swallowMove = false;         // 菜单/弹窗列表：move 不再往下传
+    bool touchOrigin = false;         // 本次点击手势由触摸合成而来（不是桌面鼠标）
+    bool contaminated = false;        // 手势期间出现过弹窗/补发按下：整条按滑动算
+    bool menuTaken = false;           // 菜单按下已由 MenuPressController 接管
+    QPointer<QAction> pressMenuAction;        // Menu：按下时手指下的菜单项
+    QPersistentModelIndex pressListIndex;     // PopupList：按下时手指下的列表行
     QModelIndex listIndexAtPress;     // 弹窗列表按下时的选中项（滑动后回滚）
+};
+
+// 一根手指的完整序列。它比"一次 press→release"更长：弹出类窗口会在中途
+// 补发按下，序列必须跨过这些按下保持峰值，否则短距离滑动会被洗成点击。
+struct GestureSequence {
+    bool active = false;
+    bool swiping = false;
+    int peak = 0;
+    qint64 lastMs = 0;
+};
+
+// 触摸轨迹。与上一条"点击手势"分开维护，原因见 OnTouch 的注释：
+// 真机上 QScroller 吃掉 touch 之后，控件只收到"合成的鼠标按下 + 抬起"，
+// 中间没有任何 MouseMove —— 峰值位移只能从原始触摸流里取。
+struct TouchTrack {
+    bool active = false;
+    int id = -1;
+    QPoint pressGlobal;
+    QPoint lastGlobal;
+    int peak = 0;
+    bool multi = false;   // 出现过第二根手指
 };
 
 // 菜单项 / 下拉项的归属判定：从 w 往上找，**遇到顶层窗口就停**。
@@ -524,6 +607,144 @@ QAbstractScrollArea *ScrollAreaAncestor(QWidget *w)
     return nullptr;
 }
 
+// 顶层窗口是"弹出类"（QMenu、QComboBoxPrivateContainer、QMenu 的二级子菜单、
+// 悬浮菜单）。注意必须用 windowType() 比较，不能用 windowFlags() & Qt::Popup：
+// Qt::Popup 的枚举值含 Window 位，普通窗口按位与也会成立。
+bool IsPopupWindow(QWidget *w)
+{
+    if (!w)
+        return false;
+    QWidget *win = w->window();
+    if (!win)
+        return false;
+    const Qt::WindowType t = win->windowType();
+    return t == Qt::Popup || t == Qt::ToolTip || t == Qt::Tool;
+}
+
+// 项目自绘浮层不是顶层窗口，而是叠在主窗口上的全屏遮罩
+// （SrModelSheet / ModalDialog / 悬浮筛选面板 / 浮条）。构造处声明
+// tapGuardOverlay=true，让浮层里的每一行、每个按钮都参与统一仲裁。
+QWidget *OverlayAncestor(QWidget *w)
+{
+    for (QWidget *p = w; p; p = p->parentWidget()) {
+        if (p->property("tapGuardOverlay").toBool())
+            return p;
+        if (p->isWindow())
+            break;
+    }
+    return nullptr;
+}
+
+// 弹窗/子菜单补发的按下会出现在这两类窗口里；普通页面上的按下不受序列续接影响。
+bool IsPopupContext(QWidget *w)
+{
+    return IsPopupWindow(w) || OverlayAncestor(w);
+}
+
+// QComboBox 的弹窗列表是否正开着。
+bool ComboPopupOpen(QWidget *combo)
+{
+    auto *c = qobject_cast<QComboBox *>(combo);
+    if (!c)
+        return false;
+    if (QAbstractItemView *v = c->findChild<QAbstractItemView *>())
+        return v->isVisible();
+    return false;
+}
+
+// 文本输入/数值拖拽类控件：它们自己要用整条按下-移动-抬起（选词、拖光标、
+// 拖滑块），吞掉抬起会破坏交互，因此永远不参与"点击仲裁"。
+bool IsSelfDrivenControl(QWidget *w)
+{
+    return qobject_cast<QLineEdit *>(w) || qobject_cast<QTextEdit *>(w)
+           || qobject_cast<QAbstractSpinBox *>(w) || qobject_cast<QAbstractSlider *>(w)
+           || qobject_cast<QScrollBar *>(w) || qobject_cast<QAbstractScrollArea *>(w);
+}
+
+// "这个控件是否自己声明了可点"。
+//
+// 判定优先级（从强到弱）：
+//   1. tapGuardSelfManaged=true：控件内部已有滑动/点击仲裁（SectionStrip），
+//      守卫必须完全让路 —— 吞掉它的抬起会让它停在"拖动中"状态（惯性/状态复位都不走）。
+//   2. tapGuardItem / toggleRow / clickable：显式声明（SettingRow 的整行点击）。
+//   3. WA_SetCursor + PointingHandCursor：自绘控件的"可点"声明（ComicCard、
+//      SrModelField、侧栏行都靠这条，不需要给每个控件加属性）。
+//
+// 只认 WA_SetCursor 是必要的：QWidget::cursor() 会继承父控件的 cursor，
+// 拿 cursor() 判断会把整页所有子控件都判成可点。
+bool IsTappable(QWidget *w)
+{
+    if (!w)
+        return false;
+    if (w->property("tapGuardSelfManaged").toBool())
+        return false;
+    if (w->property("tapGuardItem").toBool() || w->property("toggleRow").toBool()
+        || w->property("clickable").toBool())
+        return true;
+    if (w->testAttribute(Qt::WA_SetCursor) && w->cursor().shape() == Qt::PointingHandCursor)
+        return true;
+    return false;
+}
+
+// 从 w 往上找最近的"可点"控件（遇窗口停）。QML 宿主（QQuickWidget）必须排除：
+// 卡片点击由 QML 的 MouseArea/Flickable 自己仲裁，在 C++ 侧吞事件会让
+// MouseArea 收不到抬起而停在按下态（缩放/按压层不复位）。
+QWidget *TappableAncestor(QWidget *w)
+{
+    for (QWidget *p = w; p; p = p->parentWidget()) {
+        if (p->inherits("QQuickWidget"))
+            return nullptr;
+        if (IsSelfDrivenControl(p))
+            return nullptr;
+        if (IsTappable(p))
+            return p;
+        if (p->isWindow())
+            break;
+    }
+    return nullptr;
+}
+
+// 冻结过滤器：手势一旦被判定为滑动（BeginDrag），就把该弹出窗口收到的
+// 鼠标 move 与补发按下全部拦在 QMenu::event() 之前。
+//
+// 为什么要装对象级过滤器：应用级过滤器只能拦"事件第一次进入应用"的那一遍，
+// 但 Qt 内部还会转发（QMenuPrivate::mouseEventTaken 把事件转给 caused popup）、
+// 重放（popup 打开时补发按下），Qt 6.12 起 QMenu::mouseReleaseEvent 在
+// mouseDown 为空时不再提前返回、而是继续激活 currentAction —— 高亮跟手的
+// move 会把 currentAction 改成手指下的项，抬起一旦有任何路径漏吞就是误选。
+// 对象级过滤器直接挡在 QMenu::event() 前面，move 与补发按下都到不了菜单，
+// currentAction 停在按下时的项上，Qt 的激活条件就不可能再成立。
+//
+// 只吞 move：高亮跟手 / 子菜单定时器 / combo currentIndex 全部失效。
+// 按下与抬起不能在这里吞 —— 吞抬起后冻结静默期（250ms）内的任何新按下都
+// 必须**先**过应用级守卫（OnPress 建立新手势并解冻冻结层），冻结层若把按下
+// 吞掉，快速连续操作时按下永远到不了守卫，菜单/选项框会整体失灵（实测：
+// 自检与真机全部按下消失）。skipFirstPress/armSkipFirstPress 机制随按下
+// 分支一并移除 —— 应用级 OnPress 的接管/续接判定就是放行与否的唯一裁决者。
+class PopupFreeze : public QObject
+{
+public:
+    explicit PopupFreeze(QObject *parent, bool skipFirstPress)
+        : QObject(parent), skipFirstPress_(skipFirstPress)
+    {
+        Q_UNUSED(skipFirstPress_);
+    }
+
+    bool eventFilter(QObject *, QEvent *ev) override
+    {
+        switch (ev->type()) {
+        case QEvent::MouseButtonDblClick:
+        case QEvent::MouseMove:              // 高亮跟手 / 子菜单定时器 / combo currentIndex
+            return true;
+        default:
+            return false;                    // 按下/抬起交给应用级守卫统一判定
+        }
+    }
+
+private:
+    bool skipFirstPress_;
+};
+
 class TapGuard : public QObject
 {
 public:
@@ -568,8 +789,22 @@ protected:
         }
 
         QWidget *w = qobject_cast<QWidget *>(obj);
-        if (!w)
+        if (!w) {
+            // 触摸事件在真机上投给 QWidgetWindow（不是 QWidget），这里只取轨迹，
+            // 与接收者无关。旧实现要求 obj 是 QWidget，于是整条触摸流被丢掉，
+            // "过程峰值"在真机上永远取不到 —— 这是误触修复失效的一半原因。
+            switch (ev->type()) {
+            case QEvent::TouchBegin:
+            case QEvent::TouchUpdate:
+            case QEvent::TouchEnd:
+            case QEvent::TouchCancel:
+                OnTouch(static_cast<QTouchEvent *>(ev));
+                break;
+            default:
+                break;
+            }
             return QObject::eventFilter(obj, ev);
+        }
 
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         switch (ev->type()) {
@@ -597,8 +832,11 @@ protected:
             break;
         }
         case QEvent::TouchBegin:
-            if (OnTouch(w, static_cast<QTouchEvent *>(ev), now))
-                return true;
+        case QEvent::TouchUpdate:
+        case QEvent::TouchEnd:
+        case QEvent::TouchCancel:
+            // 只记录轨迹，永不吞事件：吞 touch 会直接掐掉滚动与捏合。
+            OnTouch(static_cast<QTouchEvent *>(ev));
             break;
         default:
             break;
@@ -629,9 +867,32 @@ private:
             *scopeWidget = b;
             return GuardScope::Button;
         }
-        if (w->property("tapGuardItem").toBool()) {
-            *scopeWidget = w;
-            return GuardScope::Button;
+        // 文本输入 / 滑块 / 滚动区自己要用完整的按下-移动-抬起，不参与仲裁
+        if (IsSelfDrivenControl(w)) {
+            *scopeWidget = nullptr;
+            return GuardScope::None;
+        }
+        // 列表行：Qt 自己在 mouseReleaseEvent 里发 clicked，同样不许由滑动产生
+        if (QAbstractItemView *v = AncestorInWindow<QAbstractItemView>(w)) {
+            *scopeWidget = v;
+            return GuardScope::Item;
+        }
+        // 自绘可点控件：ComicCard / SettingRow / SrModelField / 文字链……
+        if (QWidget *t = TappableAncestor(w)) {
+            *scopeWidget = t;
+            return GuardScope::Generic;
+        }
+        // 浮层兜底：弹出类窗口 / 自绘浮层里的**任何**控件都参与仲裁。
+        // QComboBox 弹窗容器、QMenu 的 QWidgetAction 宿主、吸顶分组条、遮罩层
+        // 本身都不是 Qt 标准可点控件，但"滑过它们再抬手"同样会触发关闭浮层、
+        // 选中项或提交弹窗；只列白名单必然漏。
+        if (QWidget *overlay = OverlayAncestor(w)) {
+            *scopeWidget = overlay;
+            return GuardScope::Overlay;
+        }
+        if (IsPopupWindow(w)) {
+            *scopeWidget = w->window();
+            return GuardScope::Overlay;
         }
         *scopeWidget = nullptr;
         return GuardScope::None;
@@ -639,13 +900,91 @@ private:
 
     bool OnPress(QWidget *w, const QPoint &global, qint64 now)
     {
-        // 上一次手势没等到抬起（弹窗被销毁 / 窗口切换）：先把状态清干净
-        if (g_.active)
-            Settle(g_);
         QWidget *scopeWidget = nullptr;
         const GuardScope scope = ScopeOf(w, &scopeWidget);
-        if (scope == GuardScope::None)
+        const int slop = Touch::Dp(Touch::kTapSlopDp, w);
+        const bool inPopup = IsPopupContext(w);
+
+        if (g_tapGuardLegacy) {
+            // A/B 对照：修复前的任何新按下都把整条手势（含过程峰值）清零
+            if (g_.active)
+                Settle(g_);
+            g_ = GestureState{};
+            seq_ = GestureSequence{};
+            pendingPopup_ = nullptr;
+        }
+
+        // ---- 手势序列续接：弹窗 / 二级子菜单补发按下 ----
+        //
+        // Qt 在 popup 拿到 grab、子菜单由 hover 定时器弹出时，会再补一条
+        // MouseButtonPress（mouse replay）。旧实现把它当"一次全新的点击"，
+        // pressGlobal / pressMs / maxMoved 全部归零：前面几十像素的滑动被洗掉，
+        // 抬手只剩 5~6px 位移 → 判成点击 → 下拉框换选项 / 菜单项执行。
+        // 这里不重置任何轨迹，并把整条手势标成"受污染"（必为滑动）。
+        const bool midGesture = g_.active
+                                && (g_.dragging || g_.contaminated || g_.maxMoved > slop
+                                    || touch_.peak > slop || touch_.multi);
+        // 注意：不按"距上次滑动的时间窗"续接补发按下。手势结束后的迟到 replay
+        // 由冻结层（吞抬起后保持 250ms）和 OnRelease 的"无按下抬起"拦截兜住；
+        // 若在这里按时间窗吞掉用户的正常按下，6.12 的 QMenu 会用残留
+        // currentAction 激活那条无按下抬起 —— 表现为"按下就触发"。
+        if (midGesture) {
+            seq_.active = true;
+            seq_.swiping = true;
+            seq_.peak = qMax(seq_.peak, qMax(g_.maxMoved, touch_.peak));
+            seq_.lastMs = now;
+            g_.contaminated = true;
+            Trace(QStringLiteral("press+ %1 scope=%2 seq=%3 popup=%4")
+                      .arg(QLatin1String(w->metaObject()->className()))
+                      .arg(QLatin1String(ScopeName(scope)))
+                      .arg(seq_.peak).arg(int(inPopup)));
+            // 弹窗里的"按下即动作"必须连按下一起吞：QComboBox 在 press 就
+            // showPopup，QMenu 在 press 就 setCurrentAction + 起 20ms 子菜单
+            // 定时器，自绘遮罩在 press 就关闭浮层。只吞抬起已经来不及。
+            if (inPopup) {
+                ++swallowed_;
+                return true;
+            }
             return false;
+        }
+
+        // 走到这里说明是"新的一根手指"：续接情况已在上面返回。
+        // 无条件开新序列，滑完立刻点按钮 / 点菜单项才不会被上一次滑动污染。
+        ThawAll();   // 上一条手势若没等到抬起，冻结层在这里兜底解开
+        seq_ = GestureSequence{};
+        seq_.active = true;
+        seq_.lastMs = now;
+        pendingPopup_ = nullptr;
+
+        if (scope == GuardScope::None && g_.active) {
+            // 绝不能复位手势状态：鼠标事件被 ignore 后会**向父控件传播**
+            // （卡片不 accept → 同一条按下还会到达 QFrame、MainWindow），
+            // 复位会把手心正在进行的可点手势清掉，于是抬手变成一次"没有守卫"的点击。
+            return false;
+        }
+        // 上一条手势没等到抬起（弹窗被销毁 / 窗口切换）：先把状态清干净
+        if (g_.active)
+            Settle(g_);
+        if (scope == GuardScope::None) {
+            // 从空白处起手也要记一条"空手势"：ComicCard / SettingRow /
+            // SrModelField 这类自绘控件只看 mouseReleaseEvent（不检查有没有按在自己
+            // 身上），手指从空白划到它们身上再抬起，仍会 emit Activated/clicked。
+            // 这条手势不复位任何视觉态，抬起时只在落点是可点控件时才吞（见 OnRelease）。
+            g_ = GestureState{};
+            g_.active = true;
+            g_.scope = GuardScope::None;
+            g_.pressWidget = w;
+            g_.pressGlobal = global;
+            g_.lastGlobal = global;
+            g_.pressMs = now;
+            g_.touchOrigin = touch_.active;
+            if (!g_.touchOrigin)
+                touch_ = TouchTrack{};
+            bool ok = false;
+            g_.scrollAtPress = ScrollFingerprint(w, &ok);
+            g_.scrollKnown = ok;
+            return false;
+        }
 
         g_ = GestureState{};
         g_.active = true;
@@ -654,14 +993,85 @@ private:
         g_.scopeWidget = scopeWidget;
         g_.list = (scope == GuardScope::PopupList) ? qobject_cast<QAbstractItemView *>(scopeWidget)
                                                    : nullptr;
-        if (g_.list)
+        if (g_.list) {
             g_.listIndexAtPress = g_.list->currentIndex();
+            g_.pressListIndex =
+                g_.list->indexAt(g_.list->viewport()->mapFromGlobal(global));
+        }
+        if (scope == GuardScope::Menu) {
+            auto *m = qobject_cast<QMenu *>(scopeWidget);
+            g_.pressMenuAction = m ? m->actionAt(m->mapFromGlobal(global)) : nullptr;
+        }
+        // 按下即冻结弹出窗口的鼠标流入。freeze 只拦"之后"到达该窗口的事件，
+        // 不影响当前这条 press；死区内的 move 不再让菜单高亮跟手/起子菜单
+        // 定时器，Qt 6.12 的 release 激活条件（currentAction）就不会被改写。
+        if (scope == GuardScope::Menu || scope == GuardScope::PopupList
+            || scope == GuardScope::Overlay)
+            FreezePopup(scopeWidget, /*skipFirstPress=*/true);
+        // 触摸模式下的菜单接管：按下被吞，控制器负责按压视觉 / 松手才触发 /
+        // 滑动跟手滚动与边界提示（见 touch_menu.h）。
+        Touch::MenuPressController::DismissOutside(global);
+        if (g_.active && g_.menuTaken) {
+            // 菜单接管手势进行中出现的任何新按下（Qt popup replay、触摸合成的
+            // 重复按下等）都不属于新的用户点击：吞掉，保证接管手势完整，
+            // 否则这条按下会替换掉 menuTaken 手势，导致后续 move/release 全部
+            // 脱离控制器（菜单交互整体失灵，实测）。
+            return true;
+        }
+        if (scope == GuardScope::Menu && Touch::IsTouchMode()) {
+            auto *m = qobject_cast<QMenu *>(scopeWidget);
+            if (m && !Touch::TapGuardLegacy()
+                && Touch::MenuPressController::BeginMenuPress(m, global)) {
+                // 按下必须被吞：放行给 QMenu 就等于让它执行 mousePressEvent ——
+                // 设 currentAction + 起 20ms 子菜单定时器，"按下即弹二级菜单"、
+                // "滑动一下弹出又立刻收起"的闪现全部来自这里。吞下之后按压视觉、
+                // 松手触发、滑动滚动都由控制器接管（与 Combo 分支同一写法）。
+                g_.menuTaken = true;
+                return true;
+            }
+        }
+        if (scope == GuardScope::Combo && Touch::IsTouchMode()) {
+            auto *cb = qobject_cast<QComboBox *>(scopeWidget);
+            QAbstractItemView *openView = cb ? cb->findChild<QAbstractItemView *>() : nullptr;
+            if (cb && !(openView && openView->isVisible())
+                && Touch::MenuPressController::BeginComboPress(cb, global)) {
+                // 按下被吞：选项框不再"按下即弹出"，松手才 showPopup，
+                // 按压层画在框上，滑动放弃打开并渐隐
+                g_.menuTaken = true;
+                return true;
+            }
+            if (openView && openView->isVisible()) {
+                Touch::MenuPressController::BeginListPress(openView, global);
+                Touch::InstallBoundaryHints(openView);
+            }
+        }
+        if (scope == GuardScope::PopupList && Touch::IsTouchMode()) {
+            if (auto *v = qobject_cast<QAbstractItemView *>(scopeWidget)) {
+                Touch::MenuPressController::BeginListPress(v, global);
+                Touch::InstallBoundaryHints(v);
+            }
+        }
         g_.pressGlobal = global;
         g_.lastGlobal = global;
         g_.pressMs = now;
+        // 触摸合成的鼠标按下：记住来源。触摸路径上 QScroller 只吃 touch，
+        // 这条合成抬起可以安全吞掉；桌面鼠标路径的抬起还要给 QScroller 收尾。
+        g_.touchOrigin = touch_.active;
+        // 纯鼠标手势不能继承上一次触摸留下的峰值/多指标记，否则"先滑一下再点"
+        // 会因为陈旧峰值把正常点击吞掉。
+        if (!g_.touchOrigin)
+            touch_ = TouchTrack{};
         bool ok = false;
         g_.scrollAtPress = ScrollFingerprint(w, &ok);
         g_.scrollKnown = ok;
+        if (qEnvironmentVariableIsSet("JM_TAPGUARD_LOG")) {
+            std::fprintf(stderr, "tapguard: press %s[%s] scope=%d touch=%d\n",
+                         w->metaObject()->className(),
+                         qPrintable(w->objectName().isEmpty() ? QStringLiteral("-")
+                                                              : w->objectName()),
+                         int(scope), int(g_.touchOrigin));
+            std::fflush(stderr);
+        }
         return false;   // 按下必须放行：按下态/高亮/弹窗都要靠它产生
     }
 
@@ -675,7 +1085,43 @@ private:
         const QPoint prev = g_.lastGlobal;
         g_.lastGlobal = global;
 
-        if (!g_.dragging && moved > Touch::Dp(Touch::kTapSlopDp, w))
+        // 菜单/选项框接管中的手势：滑动滚动/按压渐隐由控制器处理。
+        // 用 HasState 判定（menuTaken 标志可能被中间的 replay 按下清除，而
+        // 控制器的按压状态仍在），双保险保证抬起/移动始终进控制器。
+        if (g_.menuTaken || Touch::MenuPressController::HasState(g_.scopeWidget)) {
+            const int dy = global.y() - prev.y();
+            return Touch::MenuPressController::FeedMove(g_.scopeWidget, global, dy);
+        }
+
+        // 峰值取四者的最大：本帧位移、历次鼠标位移、原始触摸位移，以及
+        // **本序列此前累计的峰值**（弹窗/子菜单补发按下之前的那一半滑动）。
+        // 真机上 QScroller 拿下手势后控件只收到"按下 + 抬起"两条合成事件，
+        // 中间没有 MouseMove —— 只看鼠标峰值会漏掉"划出去再划回来"。
+        const int slop = Touch::Dp(Touch::kTapSlopDp, w);
+        // 弹出类作用域的位移阈值必须对齐 QMenu 自己的激活窗口：
+        // hasMouseMoved 用 QApplication::startDragDistance()（默认 10px）判定，
+        // 真机上它小于 8dp（DPR>=1.25 时），滑动落在这段窗口里的抬起会直接
+        // 激活 currentAction —— "按下就触发、但不是每次"的量化来源。
+        const int popupSlop = qMax(QApplication::startDragDistance(), Touch::Dp(4, w));
+        const int effSlop = (g_.scope == GuardScope::Menu || g_.scope == GuardScope::PopupList
+                             || g_.scope == GuardScope::Combo || g_.scope == GuardScope::Overlay)
+                                ? qMin(slop, popupSlop) : slop;
+        const int peak = qMax(qMax(g_.maxMoved, touch_.peak), seq_.active ? seq_.peak : 0);
+        if (seq_.active) {
+            seq_.peak = peak;
+            seq_.lastMs = now;
+            if (peak > effSlop)
+                seq_.swiping = true;
+        }
+        // Combo 弹窗打开后的任何 move 都按滑动处理：死区内的 move 会让
+        // QComboBoxPrivateContainer 的过滤器把 currentIndex 跟手改写，抬起落在
+        // blockMouseReleaseTimer 过期之后就直接提交 —— 这正是选项框"概率性误触"
+        // 的来源（弹窗刚打开的防误提交窗口一过就必中）。弹窗没开时 move 仍留给
+        // 页面补滚。
+        if (!g_.dragging
+            && (peak > effSlop
+                || (!g_tapGuardLegacy && g_.scope == GuardScope::Combo
+                    && ComboPopupOpen(g_.scopeWidget))))
             BeginDrag();
         if (!g_.dragging) {
             // 还在死区内：留给控件自己做悬停/高亮，点击手感不变
@@ -688,18 +1134,29 @@ private:
 
     void BeginDrag()
     {
+        if (g_.dragging)
+            return;
         g_.dragging = true;
         switch (g_.scope) {
         case GuardScope::Menu:
             // QMenu 的 mouseMoveEvent 会 setCurrentAction + 启动 20ms 子菜单定时器，
             // 光"清一下 activeAction"再放行等于没清：它立刻又设回来。从这里开始
             // move 一律吞掉，菜单的高亮与子菜单都不再跟着手指走。
+            FreezePopup(g_.scopeWidget, /*skipFirstPress=*/false);
             ClearMenu(g_.scopeWidget);
             g_.swallowMove = true;
             break;
         case GuardScope::PopupList:
+            FreezePopup(g_.list ? g_.list->window() : nullptr, false);
             // 弹窗列表自己滚（见 DragTo），move 不外泄 → 列表高亮不跟手
             g_.swallowMove = true;
+            break;
+        case GuardScope::Overlay:
+            // 悬浮窗里的列表还要滚动，不能吞 move；但滑动过程中由 hover 定时器
+            // 弹出的悬浮菜单必须立刻收起（QMenu 的 20ms 定时器不依赖新 move）。
+            FreezePopup(g_.scopeWidget, false);
+            ClearMenuChain();
+            g_.swallowMove = false;
             break;
         case GuardScope::Combo:
             // 有的样式在**按下**就弹窗（QComboBox::mousePressEvent → showPopup）。
@@ -721,7 +1178,12 @@ private:
                 b->setDown(false);
             g_.swallowMove = false;
             break;
+        case GuardScope::Item:
+        case GuardScope::Generic:
         case GuardScope::None:
+            // 不拦 move：这两类的滚动完全靠 QScroller 转发位移，
+            // 吞一条 move 就从"滑动"退化成"点了不动"。
+            g_.swallowMove = false;
             break;
         }
     }
@@ -768,97 +1230,321 @@ private:
             if (auto *b = qobject_cast<QAbstractButton *>(g_.pressWidget))
                 b->setDown(false);
             break;
+        case GuardScope::Overlay:
+            // 悬浮菜单可能在"按下 → 判定为滑动"的间隙里已经弹出，每次 move 收一遍
+            ClearMenuChain();
+            break;
+        case GuardScope::Item:
+        case GuardScope::Generic:
         case GuardScope::None:
+            // 行/卡片不自己滚：位移交给 QScroller（它拿得到 move 就够）
             break;
         }
     }
 
     bool OnRelease(QWidget *w, const QPoint &global, qint64 now)
     {
-        if (!g_.active)
+        if (!g_.active) {
+            // 没有对应按下的抬起落在弹出类窗口（QMenu/QComboBox 弹窗/浮层）：
+            // Qt 6.12 的 QMenu 在 mouseDown 为空时不再提前返回，而是继续用
+            // currentAction 激活 —— 按下被守卫吞掉（滑动中/冻结静默期内）之后，
+            // 这条"无按下抬起"就是"按下就触发"的直接来源，必须吞掉。
+            // 普通控件上的无按下抬起照常放行（拖拽/悬停收尾要用）。
+            if (!g_tapGuardLegacy && IsPopupContext(w)) {
+                ++swallowed_;
+                ThawAll();
+                return true;
+            }
+            ThawAll();
             return false;
+        }
         const GestureState gs = g_;
         g_ = GestureState{};
+        if (gs.menuTaken || Touch::MenuPressController::HasState(gs.scopeWidget)) {
+            // 菜单/选项框接管手势：触发/弹子菜单/保持打开由控制器统一决定
+            ThawAll();
+            return Touch::MenuPressController::FeedRelease(gs.scopeWidget, global);
+        }
 
+        // 手势结束时触摸流可能已经结束（真机上是"合成抬起 → TouchEnd"），
+        // 因此 touchOrigin 在按下时就记下来，这里不再看 touch_.active。
+        const bool fromTouch = gs.touchOrigin;
+        // 序列峰值必须并进来：弹窗/子菜单补发按下之前的那一半滑动，
+        // 在 gs.maxMoved 里已经被清零了（gs 是补发按下之前的老状态，或
+        // 补发按下之后的新状态，两者都只覆盖半段）。
+        const int peak = qMax(qMax(gs.maxMoved, touch_.peak), seq_.active ? seq_.peak : 0);
         const int moved = (global - gs.pressGlobal).manhattanLength();
+        const int slop = Touch::Dp(Touch::kTapSlopDp, w);
+        // 弹出类作用域与 OnMove 同用 startDragDistance 阈值（见 OnMove 注释）：
+        // 抬起位移一旦越过 QMenu 的激活窗口就必须按滑动处理。
+        const int popupSlop = qMax(QApplication::startDragDistance(), Touch::Dp(4, w));
+        const int effSlop = (gs.scope == GuardScope::Menu || gs.scope == GuardScope::PopupList
+                             || gs.scope == GuardScope::Combo || gs.scope == GuardScope::Overlay)
+                                ? qMin(slop, popupSlop) : slop;
+
         bool scrollNow = false;
         if (gs.scrollKnown && gs.pressWidget) {
             bool ok = false;
             const int v = ScrollFingerprint(gs.pressWidget, &ok);
             scrollNow = ok && v != gs.scrollAtPress;
         }
+        // 本次手势期间任何滚动区发生过位移（含惯性、含 QScroller 拖出来的），
+        // 都说明手指在"滑"而不是"点"。比滚动条指纹更可靠：滑出去再滑回原位时
+        // 首末指纹相同，但这一条仍然是真。
+        const bool scrolled = gs.pressMs > 0 && lastScrollMs_ >= gs.pressMs;
         // 惯性滚动尚未收尾时的点击一律不算数（"想停滚动"不该点进某一项）
         const bool quiet = lastScrollMs_ > 0
                            && (now - lastScrollMs_) < Touch::kTapIgnoreAfterScrollMs;
         // 长按 + 缓慢漂移同样不是点击
         const bool holdDrift = (now - gs.pressMs) > Touch::kTapHoldDriftMs
-                               && gs.maxMoved > Touch::Dp(Touch::kTapDriftDp, w);
-        // 位移判据取"过程峰值"：划出去再划回来（首末差≈0）也必须算滑动
-        const bool drag = gs.dragging || moved > Touch::Dp(Touch::kTapSlopDp, w)
-                          || gs.maxMoved > Touch::Dp(Touch::kTapSlopDp, w) || holdDrift;
+                               && peak > Touch::Dp(Touch::kTapDriftDp, w);
+        // 位移判据取"过程峰值"：划出去再划回来（首末差≈0）也必须算滑动。
+        // 多指（捏合/双指）永远不是点击：本应用没有双指点按语义。
+        // 跨项/跨行判据：菜单与下拉列表的命中是离散的 —— 按下与抬起落在不同
+        // 项上就是滑动，哪怕位移小到峰值死区里（菜单行紧凑或真机短滑时会发生，
+        // 这正是"按下不触发、一开始滑动就触发菜单项"的窗口）。反过来，同一项
+        // 内的 1~3px 手指抖动不算，正常点击手感不变。
+        bool crossedItem = false;
+        if (gs.scope == GuardScope::Menu) {
+            if (auto *m = qobject_cast<QMenu *>(gs.scopeWidget))
+                crossedItem = m->actionAt(m->mapFromGlobal(global)) != gs.pressMenuAction;
+        } else if (gs.scope == GuardScope::PopupList && gs.list) {
+            crossedItem = gs.list->indexAt(gs.list->viewport()->mapFromGlobal(global))
+                          != gs.pressListIndex;
+        }
+        // Combo 手势（按下在框上）的抬起落在弹窗列表里：正常点选的按下就落在
+        // 列表上（作用域是 PopupList），按框滑进列表再抬手必然经过滑动。
+        const bool comboPopupLanded = !g_tapGuardLegacy && gs.scope == GuardScope::Combo
+                                      && PopupViewOf(w) != nullptr;
+        // 受污染的手势（期间弹窗出现 / 补发按下）一律按滑动算：那不是一次
+        // 新的用户点击，而是 Qt 的 popup replay，不能让它提交任何选项。
+        const bool drag = gs.dragging || gs.contaminated || moved > effSlop || peak > effSlop
+                          || holdDrift || touch_.multi || seq_.swiping || crossedItem
+                          || comboPopupLanded;
 
-        if (!drag && !scrollNow && !quiet)
-            return false;   // 真点击：原样交给控件，clicked/triggered 照常
+        if (!drag && !scrollNow && !scrolled && !quiet) {
+            seq_ = GestureSequence{};   // 真点击：序列干净结束
+            pendingPopup_ = nullptr;
+            ThawAll();                  // 立即解冻：release 要原样到达菜单/控件
+            return false;              // 原样交给控件，clicked/triggered 照常
+        }
+        seq_.active = true;
+        seq_.swiping = true;
+        seq_.peak = qMax(seq_.peak, peak);
+        seq_.lastMs = now;
 
-        // 吞掉这次抬起：按钮不会 clicked()、菜单项不会 triggered()、
-        // 下拉列表不会提交，同时把中途产生的选中态复位。
+        // 空白处起手的手势：只有"抬手落在可点控件上"才有误触风险（自绘控件
+        // 不看按下态）。落点也是空白时放行，免得把 QScroller 的收尾抬起吞掉，
+        // 也免得把普通滚动计入 swallowed 统计。
+        if (gs.scope == GuardScope::None && !gs.contaminated) {
+            QWidget *releaseTarget = nullptr;
+            if (ScopeOf(w, &releaseTarget) == GuardScope::None) {
+                ThawAll();
+                return false;
+            }
+        }
+
+        // 判成滑动之后的复位：按钮解除按下态、菜单收起高亮/子菜单、
+        // 下拉列表把选中项回滚。Generic/Item 没有需要复位的视觉态。
         Settle(gs);
-        ++swallowed_;
+        Trace(QStringLiteral("release %1 scope=%2 drag=%3 peak=%4 contam=%5 -> %6")
+                  .arg(QLatin1String(w->metaObject()->className()))
+                  .arg(QLatin1String(ScopeName(gs.scope)))
+                  .arg(int(drag)).arg(peak).arg(int(gs.contaminated))
+                  .arg(QLatin1String("swallow")));
         if (qEnvironmentVariableIsSet("JM_TAPGUARD_LOG")) {
             std::fprintf(stderr,
                          "tapguard: ignored %s[%s] scope=%d drag=%d peak=%d end=%d "
-                         "hold=%lldms quiet=%d scroll=%d\n",
+                         "hold=%lldms quiet=%d scroll=%d touch=%d\n",
                          w->metaObject()->className(),
                          qPrintable(w->objectName().isEmpty() ? QStringLiteral("-")
                                                               : w->objectName()),
-                         int(gs.scope), int(drag), gs.maxMoved, moved,
-                         (long long)(now - gs.pressMs), int(quiet), int(scrollNow));
+                         int(gs.scope), int(drag), peak, moved, (long long)(now - gs.pressMs),
+                         int(quiet), int(scrollNow), int(fromTouch));
             std::fflush(stderr);
         }
+
+        // 冲突消解：QScroller 正在拖同一个容器时，桌面鼠标路径上的这条抬起
+        // 是它收尾/起惯性的唯一输入 —— 吞掉会让它停在 Dragging（实测：页面
+        // 只走到手指位移的一半且不再回弹）。这条路 QScroller 自己会发一条
+        // 假释放把按下态取消，所以点击本来就不会发生，交还给它即可。
+        // 触摸路径相反：QScroller 只吃 touch，合成抬起与它无关，必须吞。
+        // 但弹窗路径不能交还：popup 里没有需要收尾的 QScroller，而 Qt 的
+        // QComboBoxPrivateContainer / QMenu 会在 release 上直接提交选项。
+        // 受污染的手势（弹窗 replay）尤其必须吞干净。
+        const bool inPopupRelease = gs.contaminated || gs.scope == GuardScope::PopupList
+                                    || gs.scope == GuardScope::Menu
+                                    || gs.scope == GuardScope::Combo
+                                    || gs.scope == GuardScope::Overlay;
+        if (!fromTouch && !inPopupRelease && ScrollerEngaged(gs.pressWidget)) {
+            ThawAll();                  // 交还 QScroller 收尾，同样要立即解冻
+            return false;
+        }
+        ++swallowed_;
+        // 吞掉抬起后冻结层再保持 250ms：Qt 对 popup 的内部转发/重放可能紧随
+        // 其后（Qt 6.12 的 mouseReleaseEvent 在 mouseDown 为空时仍会激活
+        // currentAction），立即解冻会让同轮的漏网事件直达菜单。
+        QTimer::singleShot(250, this, [this] { ThawAll(); });
         return true;
     }
 
-    // 触摸路径：只有"自己接受触摸事件"的控件才收得到（其余控件由 Qt 合成鼠标
-    // 事件，走上面的鼠标分支）。菜单/弹窗列表属于前者时同样要守，否则真机上
-    // 这条链路完全没有防护。
-    bool OnTouch(QWidget *w, QTouchEvent *te, qint64 now)
+    // 从 w 往上找滚动区，看它的 QScroller 是否正在拖（Dragging/Scrolling）。
+    static bool ScrollerEngaged(QWidget *w)
     {
-        if (te->points().isEmpty())
-            return false;
-        const QPoint global = te->points().first().globalPosition().toPoint();
+        for (QWidget *p = w; p; p = p->parentWidget()) {
+            auto *area = qobject_cast<QAbstractScrollArea *>(p);
+            if (!area)
+                continue;
+            if (QScroller *sc = QScroller::scroller(area)) {
+                if (sc->state() != QScroller::Inactive)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    // 触摸流：只维护轨迹（峰值 / 多指 / 来源），不参与"点击"判定，也从不吞事件。
+    //
+    // 为什么必须单独记：真机上 QScroller 拿下手势后，手指下的控件只收到两条
+    // 合成鼠标事件（按下在最开始、抬起在**最后位置**），中间一条 MouseMove
+    // 都没有。此时若只看鼠标位移，"划出去再划回来"会被判成点击 —— 而它正是
+    // 用户最容易做出来的手势（先滑一半发现不对再滑回来）。
+    //
+    // 也不能在这里自己判点击：触摸事件的目标是窗口/滚动区而不是手指下的控件
+    // （控件没开 WA_AcceptTouchEvents），在这里初始化手势会把作用域判成"不可点"。
+    bool OnTouch(QTouchEvent *te)
+    {
+        const QList<QEventPoint> pts = te->points();
         switch (te->type()) {
-        case QEvent::TouchBegin:
-            return OnPress(w, global, now);
-        case QEvent::TouchUpdate:
-            return OnMove(w, global, true, now);
+        case QEvent::TouchBegin: {
+            touch_ = TouchTrack{};
+            for (const QEventPoint &p : pts) {
+                if (p.state() == QEventPoint::State::Pressed) {
+                    touch_.id = p.id();
+                    touch_.pressGlobal = p.globalPosition().toPoint();
+                    touch_.lastGlobal = touch_.pressGlobal;
+                    break;
+                }
+            }
+            if (touch_.id < 0 && !pts.isEmpty()) {
+                touch_.id = pts.first().id();
+                touch_.pressGlobal = pts.first().globalPosition().toPoint();
+                touch_.lastGlobal = touch_.pressGlobal;
+            }
+            touch_.active = touch_.id >= 0;
+            break;
+        }
+        case QEvent::TouchUpdate: {
+            if (!touch_.active)
+                break;
+            // 多指：捏合/双指划动一律按"非点击"处理
+            if (pts.size() > 1)
+                touch_.multi = true;
+            for (const QEventPoint &p : pts) {
+                if (p.id() != touch_.id)
+                    continue;
+                touch_.lastGlobal = p.globalPosition().toPoint();
+                touch_.peak = qMax(touch_.peak,
+                                   (touch_.lastGlobal - touch_.pressGlobal).manhattanLength());
+            }
+            break;
+        }
         case QEvent::TouchEnd:
         case QEvent::TouchCancel:
-            return OnRelease(w, global, now);
+            // 不清 multi/peak：紧随其后的合成抬起还要用它们判定。
+            // 状态在下一根手指按下时整体重置。
+            touch_.active = false;
+            break;
         default:
-            return false;
+            break;
         }
+        return false;
     }
 
     void OnShow(QWidget *w)
     {
-        if (!w || !g_.active || !g_.dragging || g_.scope != GuardScope::Combo)
+        if (!w || g_tapGuardLegacy)
             return;
-        QWidget *comboW = g_.scopeWidget;
-        if (!comboW || !w->isWindow() || w->parentWidget() != comboW)
+        // 菜单接管手势期间弹出的子菜单（按下时 20ms 定时器触发）立即收起：
+        // "按下不触发子菜单弹出"，弹出动作延迟到松手（见 FeedRelease）。
+        if (g_.menuTaken) {
+            if (auto *m = qobject_cast<QMenu *>(w))
+                if (qobject_cast<QMenu *>(m->parentWidget()))
+                    QTimer::singleShot(0, m, [m] { if (m) m->hide(); });
             return;
-        // 手指已经在滑，弹窗这时才出现：立刻收回。否则它 grab 鼠标，后续
-        // move/release 全部落到列表上 —— 一松手就是"选中手指下面那一项"。
-        QPointer<QComboBox> c = qobject_cast<QComboBox *>(comboW);
-        if (!c)
+        }
+        // Combo 弹窗无论怎么打开都冻结 move：死区滑动会让
+        // QComboBoxPrivateContainer 的过滤器把 currentIndex 跟手改写，抬起落在
+        // blockMouseReleaseTimer 过期后直接提交 —— 选项框"概率性误触"的来源。
+        // 用户随后点列表项的按下由 PopupList 作用域的 armSkip 放行。
+        if (!g_tapGuardLegacy && g_.scope == GuardScope::Combo && w->isWindow()
+            && w->parentWidget()
+            && qobject_cast<QComboBox *>(w->parentWidget()))
+            FreezePopup(w, /*skipFirstPress=*/false);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        // 只在"手势还没抬手"时算滑动期间。手势结束之后用户主动点开的弹窗
+        // （滑完立刻点下拉框选一项）必须正常打开，不能被当成误触收起。
+        const bool swiping = g_.active
+                             && (g_.dragging || g_.contaminated || seq_.swiping);
+        if (!swiping)
             return;
-        QTimer::singleShot(0, c, [c] {
-            if (c)
-                c->hidePopup();
-        });
+
+        // 滑动期间"新出现"的弹窗/浮层不是用户主动打开的：标成污染，后续
+        // 它补发的按下按同一序列处理（OnPress 的续接分支）。
+        const bool popup = IsPopupWindow(w) || w->property("tapGuardOverlay").toBool();
+        if (popup && w->isWindow()) {
+            g_.contaminated = true;
+            seq_.active = true;
+            seq_.swiping = true;
+            seq_.lastMs = now;
+            pendingPopup_ = w->window();
+            FreezePopup(w, /*skipFirstPress=*/false);
+            Trace(QStringLiteral("show %1 seq=%2 -> contaminated")
+                      .arg(QLatin1String(w->metaObject()->className())).arg(seq_.peak));
+        }
+
+        // 二级子菜单：QMenu 的 20ms hover 定时器可能在"按下 → 判明滑动"的
+        // 间隙里弹出。它不依赖新的 move，只能在这里收。
+        if (auto *m = qobject_cast<QMenu *>(w)) {
+            if (qobject_cast<QMenu *>(m->parentWidget()))
+                QTimer::singleShot(0, m, [m] { if (m) m->hide(); });
+            ClearMenuChain();
+        }
+
+        // QComboBox 弹窗可能比"按下"晚 50~150ms 才出现，正好落在手指已经
+        // 开始滑动之后。旧逻辑只在 scope==Combo 时收；现在覆盖"从框上方滑进来"
+        // 的情形：那时的起手作用域是 None，弹窗同样要收。
+        QComboBox *c = qobject_cast<QComboBox *>(w->parentWidget());
+        if (!c && g_.scope == GuardScope::Combo)
+            c = qobject_cast<QComboBox *>(g_.scopeWidget);
+        if (c && w->isWindow()) {
+            QPointer<QComboBox> keep = c;
+            QTimer::singleShot(0, keep, [keep] {
+                if (keep)
+                    keep->hidePopup();
+            });
+        }
+    }
+
+    // 清整条菜单链：主菜单的 activeAction + 所有可见的二级/三级子菜单。
+    // 只清"按下时那一个 QMenu"是不够的 —— 抬手可能落在刚弹出的子菜单上，
+    // 它自己的 activeAction / hover 定时器还在，照样会 triggered。
+    static void ClearMenuChain()
+    {
+        const QList<QWidget *> tops = QApplication::topLevelWidgets();
+        for (QWidget *top : tops) {
+            auto *m = qobject_cast<QMenu *>(top);
+            if (!m || !m->isVisible())
+                continue;
+            m->setActiveAction(nullptr);
+            if (qobject_cast<QMenu *>(m->parentWidget()))
+                m->hide();      // 只收子菜单，用户主动打开的主菜单保持可见
+        }
     }
 
     static void ClearMenu(QWidget *w)
     {
+        ClearMenuChain();
         auto *m = qobject_cast<QMenu *>(w);
         if (!m)
             return;
@@ -876,6 +1562,8 @@ private:
 
     void Settle(const GestureState &gs)
     {
+        if (gs.menuTaken)
+            return;   // 接管手势没有按钮按下态/菜单高亮需要复位，子菜单保持打开
         if (auto *b = qobject_cast<QAbstractButton *>(gs.pressWidget))
             b->setDown(false);
         ClearMenu(gs.scopeWidget);
@@ -914,6 +1602,7 @@ private:
                 // 这一下不该算点击（Android 上就是"停滚动反倒点进了某一项"）。
                 if (!hooked_.contains(area)) {
                     hooked_.insert(area);
+                    Touch::InstallBoundaryHints(area);
                     for (QScrollBar *bar : {area->horizontalScrollBar(),
                                             area->verticalScrollBar()}) {
                         connect(bar, &QScrollBar::valueChanged, this,
@@ -935,9 +1624,86 @@ private:
         return 0;
     }
 
+    // 最近若干条手势判定：--tapguard-watch 落盘，真机/模拟器上可以直接看到
+    // "哪条按下被吞、峰值多少、抬起落在哪个 scope"，不用依赖会整段丢的 logcat。
+    void Trace(const QString &line)
+    {
+        if (trace_.size() >= 24)
+            trace_.removeFirst();
+        trace_ << line;
+    }
+
+public:
+    QString traceText() const { return trace_.join(QLatin1String("\n")); }
+    static int ScopeValue(QWidget *w)
+    {
+        QWidget *scopeWidget = nullptr;
+        return int(ScopeOf(w, &scopeWidget));
+    }
+
+private:
     bool installed_ = false;
     int swallowed_ = 0;
     GestureState g_;
+    GestureSequence seq_;
+    TouchTrack touch_;
+    QPointer<QWidget> pendingPopup_;
+    QHash<QWidget *, QPointer<PopupFreeze>> frozen_;
+    QStringList trace_;
+
+    // 给弹出窗口（QMenu / QComboBox 弹窗容器 / 自绘浮层）及其全部子控件
+    // 装对象级冻结过滤器。对象级过滤器在 QWidget::event() 之前执行，且
+    // installEventFilter 是 prepend（后装先跑），所以能挡在 Qt 自己的
+    // QComboBoxPrivateContainer::eventFilter 与 QMenu 内部转发之前。
+    void FreezePopup(QWidget *w, bool skipFirstPress)
+    {
+        if (!w)
+            return;
+        QWidget *win = w->window();
+        if (!win)
+            return;
+        QWidgetList targets;
+        targets << win << w;
+        const QWidgetList kids = win->findChildren<QWidget *>();
+        for (QWidget *k : kids)
+            targets << k;
+        for (QWidget *t : targets) {
+            if (!t)
+                continue;
+            auto it = frozen_.find(t);
+            if (it != frozen_.end())
+                continue;   // 已有冻结层（只吞 move），无需重复安装
+            auto *f = new PopupFreeze(t, skipFirstPress);
+            t->installEventFilter(f);
+            frozen_.insert(t, f);
+            // 兜底：手势没等到抬起（弹窗被销毁 / 窗口切换）也要解冻；
+            // 4s 覆盖最慢的滑动序列，正常手势结束后 ThawAll 会提前解开。
+            QPointer<QWidget> keep = t;
+            QTimer::singleShot(4000, this, [this, keep] {
+                if (keep)
+                    ThawOne(keep);
+            });
+        }
+    }
+
+    void ThawOne(QWidget *t)
+    {
+        auto it = frozen_.find(t);
+        if (it == frozen_.end())
+            return;
+        if (it.value())
+            t->removeEventFilter(it.value());
+        if (it.value())
+            it.value()->deleteLater();
+        frozen_.erase(it);
+    }
+
+    void ThawAll()
+    {
+        const QList<QWidget *> keys = frozen_.keys();
+        for (QWidget *t : keys)
+            ThawOne(t);
+    }
     qint64 lastScrollMs_ = 0;
     bool scrolling_ = false;   // 守卫自己在拖内容（没有惯性），不参与静默期
     QSet<QAbstractScrollArea *> hooked_;
@@ -960,6 +1726,26 @@ int TapGuardSwallowed()
 void ResetTapGuardStats()
 {
     TapGuard::I()->resetStats();
+}
+
+void SetTapGuardLegacy(bool on)
+{
+    g_tapGuardLegacy = on;
+}
+
+bool TapGuardLegacy()
+{
+    return g_tapGuardLegacy;
+}
+
+QString TapGuardTrace()
+{
+    return TapGuard::I()->traceText();
+}
+
+int TapGuardScopeOf(QWidget *w)
+{
+    return w ? TapGuard::I()->ScopeValue(w) : 0;
 }
 
 }  // namespace Touch
@@ -1040,6 +1826,11 @@ void TouchAdapter::UpdateDrag(const QPoint &globalPos)
             ShowHint(0);
             return;
         }
+        // 起手点落在左边缘的可点控件上（返回按钮、抽屉首项）：这一串事件
+        // 从判定为返回手势起就被本适配器吞掉，控件收不到抬起。这里主动解除
+        // 按下态，否则按钮会一直停在"按下"高亮上，看起来像卡住。
+        if (auto *btn = qobject_cast<QAbstractButton *>(pressWidget_))
+            btn->setDown(false);
     }
 
     progress_ = qBound<qreal>(0.0, qreal(dx) / qreal(Threshold()), 1.0);
@@ -1129,6 +1920,7 @@ bool TouchAdapter::eventFilter(QObject *obj, QEvent *ev)
         const QPoint gp = te->points().first().globalPosition().toPoint();
         if (!AtEdge(gp))
             break;
+        pressWidget_ = w;
         BeginDrag(gp);
         break;
     }
@@ -1161,6 +1953,7 @@ bool TouchAdapter::eventFilter(QObject *obj, QEvent *ev)
             break;
         if (!AtEdge(me->globalPosition().toPoint()))
             break;
+        pressWidget_ = w;
         BeginDrag(me->globalPosition().toPoint());
         // 按下先不吞：万一是竖滑，页面还要正常滚。方向判明后再接管。
         break;

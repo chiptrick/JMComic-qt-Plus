@@ -203,3 +203,13 @@ python/.venv-build/
 
 # 本地构建探针（一次性排查产物，不入库）
 .build-probe/
+
+# ---- 签名密钥与已生成的 host_tests 构建产物 ----
+# 调试签名私钥：仅供本机出包，不入库（CI 使用各自的签名配置）
+cpp/shell/ui/keys/*.keystore
+cpp/shell/ui/keys/*.jks
+# host_tests 的 build-win 是本地 CMake/Ninja 生成目录；历史上误提交过，
+# 后续不再跟踪新产物（已跟踪的旧文件在本次提交中一并从索引移除）
+cpp/shell/host_tests/build-win/
+# UI 回归过程落下的本机配置/证书缓存（含运行时域名与证书）
+docs/shots/suite/_uicfg/

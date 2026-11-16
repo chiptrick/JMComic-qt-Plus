@@ -119,7 +119,10 @@ if [ -n "$MANIFEST" ]; then
   echo "    AndroidManifest.xml replaced ($(unzip -p "$WORK/work.apk" AndroidManifest.xml | wc -c) bytes)"
 fi
 
-"$BT/zipalign" -p -f 4 "$WORK/work.apk" "$WORK/aligned.apk"
+# -P 16：.so 条目按 16 KB 对齐（Android 15+ 16 KB 页设备要求；4 KB 是历史默认，
+# 会触发"应用兼容性提醒"）。裸 4 仍对齐其它 STORED 条目（resources.arsc 等）。
+"$BT/zipalign" -f -P 16 4 "$WORK/work.apk" "$WORK/aligned.apk" || { echo "[x] zipalign failed" >&2; exit 1; }
+"$BT/zipalign" -c -P 16 4 "$WORK/aligned.apk" || { echo "[x] zipalign check failed (not 16 KB aligned)" >&2; exit 1; }
 
 if [ "$SIGN" = "release" ]; then
   KS="${JM_KS_FILE:-$HOME/.android/jmcomic-release.keystore}"
@@ -129,7 +132,9 @@ if [ "$SIGN" = "release" ]; then
   [ -f "$KS" ] || { echo "[x] release keystore missing: $KS" >&2; exit 2; }
   [ -n "$PASS" ] || { echo "[x] release password missing (JM_KS_PASS)" >&2; exit 2; }
 else
-  KS="$HOME/.android/debug.keystore"; ALIAS="androiddebugkey"; PASS="android"
+  # 与 build_android.sh 一致：随仓 dev keystore，跨机器签名一致（升级不丢数据）。
+  KS="$HERE/keys/jm-dev.keystore"; ALIAS="jmdev"; PASS="android"
+  [ -f "$KS" ] || { echo "[x] committed dev keystore missing: $KS" >&2; exit 2; }
 fi
 
 "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \

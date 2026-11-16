@@ -1,0 +1,81 @@
+// Pad：正数补齐、负数裁剪（ONNX 允许负 pads，waifu2x 用它裁掉 valid 卷积多出来的边）。
+// mode 0 = constant，1 = reflect。reflect 的镜像按 ONNX 定义在输入上折叠（不含边缘重复）。
+// USE_FP16 变体：存储 half（与 conv.comp 同一套宏）；纯搬运不做格式转换。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer Src { FT x[]; };
+layout(binding = 1) buffer Dst { FT y[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+// GLSL 对负数取模的结果是实现定义的（SPIR-V OpSRem）；实测部分驱动上
+// `-1 % 14` 的结果会让反射索引错位。这里用纯加减把坐标折叠到 [0, period)，
+// 完全避开负数取模。
+int reflectIndex(int v, int n)
+{
+    if (n <= 1)
+        return 0;
+    const int period = 2 * (n - 1);
+    int u = v;
+    while (u < 0)
+        u += period;
+    while (u >= period)
+        u -= period;
+    return u < n ? u : period - u;
+}
+
+void main()
+{
+    const int C = P(0);
+    const int HIn = P(1);
+    const int WIn = P(2);
+    const int OH = P(3);
+    const int OW = P(4);
+    const int padTop = P(5);
+    const int padLeft = P(6);
+    const int mode = P(7);
+    const float fill = uintBitsToFloat(uint(P(8)));
+
+    const int i = int(gl_GlobalInvocationID.x);
+    const int total = C * OH * OW;
+    if (i >= total)
+        return;
+
+    const int ox = i % OW;
+    const int t1 = i / OW;
+    const int oy = t1 % OH;
+    const int c = t1 / OH;
+
+    int sx = ox - padLeft;
+    int sy = oy - padTop;
+    if (mode == 1) {
+        sx = reflectIndex(sx, WIn);
+        sy = reflectIndex(sy, HIn);
+        y[i] = FST(FLD(x[(c * HIn + sy) * WIn + sx]));
+        return;
+    }
+    if (sx < 0 || sx >= WIn || sy < 0 || sy >= HIn) {
+        y[i] = FST(fill);
+        return;
+    }
+    y[i] = FST(FLD(x[(c * HIn + sy) * WIn + sx]));
+}

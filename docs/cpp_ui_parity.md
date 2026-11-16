@@ -59,11 +59,11 @@ Python 版有 64 个 `python/src/view/**/*.py`（含实现细节类与 DB 类）
 | `LocalPage` | `tool/local_read_view.py`、`local_read_eps_view.py` | 目录选择（QFileDialog）、目录列表、阅读入口 |
 | `FavoritePage` | `user/favorite_view.py`、`favorite_fold_view.py` | 收藏夹胶囊、网格、管理入口 |
 | `HistoryPage` | `history/history_view.py` | 今天/昨天/更早分组、继续阅读、清空 |
-| `CommentPage` | `comment/all_comment_view.py`、`my_comment_view.py`、`sub_comment_view.py` | 评论输入与发送、点赞、回复、热排序提示 |
+| `CommentPage` | `comment/all_comment_view.py`、`my_comment_view.py`、`sub_comment_view.py` | 作品评论列表（`/forum?aid=`）+ 输入与发送（`POST /comment`）；点赞/回复/删除未接入 |
 | `SrPage` | `tool/waifu2x_tool_view.py`、`setting/setting_sr_select_view.py` | 模型列表（NPU/CPU 标记）、切换提示、测速、预览区 |
 | `SettingsView` | `setting/setting_view.py` | 五组设置、主题即时切换、开关/下拉、设置项搜索过滤 |
-| `AboutPage` | `help/help_view.py`、`help_log_widget.py` | 版本/工具链信息、导出日志、检查更新 |
-| `LoginPage` | `user/login_new_view.py`、`login_proxy_new_widget.py` | 账号密码校验、登录状态、代理入口跳转、注册/找回占位 |
+| `AboutPage` | `help/help_view.py`、`help_log_widget.py` | 版本/工具链信息、导出日志（单文件 zip，含 summary.txt）、检查更新（version.txt 比较 + 更新日志 + config.txt 同步） |
+| `LoginPage` | `user/login_new_view.py`、`login_proxy_new_widget.py`、`register_new_widget.py`、`user_manager_new_widget.py` | 账号密码校验、登录状态、代理入口跳转、注册/找回密码/重发验证邮件（网页端点 + 图形验证码） |
 
 ### 2.2 未覆盖（按组归并，共 12 组）
 
@@ -694,17 +694,17 @@ C++ 之前写的 `#ffab40`（orange）与 `#ea4c89`（pink）**和 qss 里的值
 - `SwitchCheck` 的规则照搬：第 0 个分区只显示页码，第 1 个分区（连载更新）多显示 `全部/日漫/韩漫` + `周一~周日` 两个下拉，第 3 个起整条隐藏；
 - 两个下拉改值即重新请求该区（对应 Python 的 `LoadSerializationInfo`），实测三组筛选的条目与内容都变了（stderr `home: weekly cat=… day=… items=6`）。
 
-**补齐的 7 个页面**（`ui_pages_extra.cpp`，此前导航里没有对应页面）
+**补齐的 7 个页面**（实现分文件：`ui_pages_cloud.cpp` / `ui_pages_nas.cpp` / `ui_pages_extra.cpp`）
 
-| 导航项 | 页面 | 内容 |
-|---|---|---|
-| 我的评论 | `MyCommentPage` | 评论行（作品/章节/正文/赞与回复/删除，删除走 `ModalDialog` 确认） |
-| 观看记录 | `RemoteHistoryPage` | 云端记录列表 + 同步按钮 + 继续阅读 |
-| 本地收藏 | `LocalFavoritePage` | 本地归档网格 + 重新扫描 |
-| 每周必看 | `WeekPage` | 星期下拉 + 漫画/汉漫/其他三个 tab（对应 `ui_week.ui`） |
-| 网络存储 | `NasPage` | SMB/WebDAV 节点列表 + 状态徽标 + 连接 |
-| 批量超分 | `BatchSrPage` | 目录选择 + 模型/格式 + 进度条 + 开始 |
-| 帮助 | `HelpPage` | 四条常见问题 + 版本号 |
+| 导航项 | 页面 | 内容 | 数据来源 |
+|---|---|---|---|
+| 我的评论 | `MyCommentPage` | 评论行（头像/用户名/时间/赞/正文/作品跳转），四态机 + 刷新 | `GET /forum?mode=undefined&uid=<uid>&page` |
+| 观看记录 | `RemoteHistoryPage` | 云端记录卡片墙 + 同步按钮 + 加载更多 | `GET /watch_list?page` |
+| 本地收藏 | `LocalFavoritePage` | 下载根目录下"含图片的子目录"网格 + 重新扫描 | 本地目录扫描（`DownloadManager::Root()`） |
+| 每周必看 | `WeekPage` | 类别（全部/日漫/韩漫）× 星期（全部/周一~周日）+ 加载更多 | `GET /serialization?type&date&page` |
+| 网络存储 | `NasPage` | 节点增删 + 校验 + 状态徽标 + 打开本地目录 | `ui.ini [nas] nodes` + WebDAV PROPFIND / 本地路径 |
+| 批量超分 | `BatchSrPage` | 目录选择 + 模型/格式 + 进度条 + 开始 | `SrEngine`（本地推理） |
+| 帮助 | `HelpPage` | 四条常见问题 + 版本号 | 静态文案 |
 
 ### 13.3 验收
 
@@ -915,7 +915,12 @@ build\jmcomic_ui.exe --page home --paged --items 2000 --shot out.png
 - **平板**：触摸模式 600dp 断点（抽屉 ↔ 常驻侧栏）；网格按视口 2~6 列；详情 ≥600dp 保持并排。
 - **横屏阅读**：`ReaderView::RenderImage()` 宽>高时按高度适屏（`JM_READER_PROBE` 可打印 target/viewport）。
 - **16 KB**：`cpp/tools/check_ui_apk_16kb.py`，当前 APK 46/46 个 .so 的 PT_LOAD 均 ≥0x4000。
-- 未完成：真实分页/详情/登录落库（业务闭环）、QNN 超分（需 arm64 真机）、真机性能。
+- 未完成：真实分页/详情/登录落库（业务闭环）、QNN/HTP 实推理（需 arm64 真机 + 带 QNN EP 的 ORT）。
+- **Vulkan 超分（2026-11-14）**：新增 `cpp/shell/vk/` 原生 Vulkan compute 后端，
+  `SrEngine` 偏好扩展为 `auto|qnn|vulkan|cpu`（QNN → Vulkan → CPU），设置页四选一。
+  39 个 fp32 模型与 ORT 逐像素对齐；arm64 真机（V2463A / Adreno 830）出包安装并跑通
+  `--vk-report`（46 模型扫描 + 吞吐），QDQ 量化模型 CPU 回退与 DEVICE_LOST 熔断已验证；
+  架构、参数、桌面/移动差异与边界见 `docs/cpp_vulkan_sr_backend.md`。
 
 ## 19. 业务闭环（2026-11-05）
 

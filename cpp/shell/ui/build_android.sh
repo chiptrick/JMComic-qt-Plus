@@ -323,24 +323,30 @@ if [ "$SIGN_RELEASE" = "1" ]; then
   [ -f "$KS" ] || die "release keystore not found: $KS (set JM_KS_FILE)"
   [ -n "$KS_PASS" ] || die "release password missing: set JM_KS_PASS or ~/.android/jmcomic-release.pass"
 else
+  # 签名稳定性（升级丢数据根因之一，见 docs/data_persistence_upgrade_analysis.md
+  # §2.2/§3.4）：~/.android/debug.keystore 每台机器都不一样，Windows 构建的包
+  # 与 Linux 沙箱构建的包互相覆盖安装必然 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+  # 现场被迫卸载重装 -> /data/data/<pkg> 连同登录态一起蒸发。
+  # 改用随仓 dev keystore：任何机器出的 debug 包签名一致，`install -r` 永远可覆盖。
+  # 注意：签名变更只发生一次——从旧的机器级 debug key 换到 jm-dev 时，已装设备
+  # 需要卸载一次（先 --export-data！），此后 debug<->debug 升级不再丢数据。
   SIGN_TAG="debug"
-  KS="$HOME/.android/debug.keystore"
-  KS_ALIAS="androiddebugkey"
+  KS="$HERE/keys/jm-dev.keystore"
+  KS_ALIAS="jmdev"
   KS_PASS="android"
-  if [ ! -f "$KS" ]; then
-    keytool -genkeypair -v -keystore "$KS" -storepass android -keypass android \
-      -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-      -dname "CN=Android Debug,O=Android,C=US" > /dev/null 2>&1 || die "cannot create debug keystore"
-    ok "created debug keystore: $KS"
-  fi
+  [ -f "$KS" ] || die "committed dev keystore missing: $KS"
 fi
 APK="$DIST/JMComic-ui-$VERSION-$ABI$QUIC_TAG-$SIGN_TAG.apk"
 
-"$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+# -P 16：.so 条目按 16 KB 页对齐（Android 15+）。历史默认 4 KB（zipalign -p /
+# AGP）在 16 KB 设备上触发"应用兼容性提醒"。裸 4 仍对齐其它 STORED 条目。
+"$BT/zipalign" -f -P 16 4 "$UNSIGNED" "$ALIGNED"
 # PKCS12 的 storepass 与 keypass 必须相同，所以两处都用 $KS_PASS
 "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
   --ks-key-alias "$KS_ALIAS" --out "$APK" "$ALIGNED"
 "$BT/apksigner" verify "$APK" > /dev/null || die "signature verify failed"
+# 签名后的正式门禁：zip 偏移必须 16 KB 对齐（-c 检查模式，失败即出不了包）
+"$BT/zipalign" -c -P 16 4 "$APK" || die "APK zip offsets not 16 KB aligned"
 ok "signed with $SIGN_TAG key (alias $KS_ALIAS): $KS"
 ok "APK: $APK ($(du -h "$APK" | cut -f1))"
 
@@ -351,7 +357,9 @@ if [ -x "$AAPT" ]; then
   "$AAPT" dump badging "$APK" 2>/dev/null | grep -E "^(package|sdkVersion|targetSdkVersion|native-code)" | sed 's/^/      /'
 fi
 
-# 16 KB page alignment gate (Android 15+): every LOAD segment must be 0x4000.
+# 16 KB page alignment gate (Android 15+): every LOAD segment must be 0x4000
+# or larger (0x10000 is fine). ELF p_align 检查只覆盖 ELF 维度；zip 偏移由上面
+# 的 `zipalign -c -P 16` 门禁负责——两个维度都过才算 16 KB 兼容。
 READELF="$(ls "$NDK_ROOT"/toolchains/llvm/prebuilt/*/bin/llvm-readelf 2>/dev/null | head -1)"
 if [ -n "$READELF" ] && command -v unzip > /dev/null; then
   TMPD="$(mktemp -d)"
@@ -359,12 +367,18 @@ if [ -n "$READELF" ] && command -v unzip > /dev/null; then
   BAD_ALIGN=0
   for so in "$TMPD"/lib/*/*.so; do
     [ -f "$so" ] || continue
-    if "$READELF" -lW "$so" 2>/dev/null | awk '/LOAD/{print $NF}' | grep -qv "0x4000"; then
-      bad "not 16 KB aligned: $(basename "$so")"; BAD_ALIGN=1
+    # 可移植的 hex->dec：BUSY/gawk 通用（strtonum 不是 POSIX awk 的）
+    MISALIGNED="$("$READELF" -lW "$so" 2>/dev/null | awk '
+      /LOAD/ { h=$NF; sub(/^0x/,"",h); d=0
+               for (i=1; i<=length(h); i++) { c=tolower(substr(h,i,1)); d=d*16+index("0123456789abcdef",c)-1 }
+               if (d < 16384) print d }')"
+    if [ -n "$MISALIGNED" ]; then
+      bad "not 16 KB aligned (LOAD <$MISALIGNED): $(basename "$so")"; BAD_ALIGN=1
     fi
   done
   rm -rf "$TMPD"
-  [ "$BAD_ALIGN" = "0" ] && ok "16 KB page alignment: all packaged .so use 0x4000"
+  [ "$BAD_ALIGN" = "0" ] || die "16 KB page alignment failed; rebuild with -Wl,-z,max-page-size=16384 (NDK r27+) or repackage"
+  ok "16 KB page alignment: all packaged .so use >= 0x4000"
 fi
 
 # ---------------------------------------------------------------------------

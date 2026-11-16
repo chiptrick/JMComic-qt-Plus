@@ -1,0 +1,20 @@
+// push constant 诊断：把 16 个 int 原样写回，验证 host 侧的 vk::Params
+// 与 SPIR-V 里的布局逐槽一致。多参数 kernel 出错时先跑这个。
+#version 450
+layout(local_size_x = 64) in;
+
+layout(binding = 0) buffer Src { float x[]; };
+layout(binding = 1) buffer Dst { float y[]; };
+
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+void main()
+{
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= 16)
+        return;
+    y[i] = float(P(i));
+}

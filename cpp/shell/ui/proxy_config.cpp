@@ -3,6 +3,7 @@
 #include "../doh_client.h"
 #include "../net_backend.h"
 #include "app_paths.h"
+#include "data_migrator.h"
 #include "region_code.h"
 
 #include <QDir>
@@ -101,6 +102,8 @@ struct State {
     // 按「隐藏 SNI 优先」回退 TCP+ECH，并在下次启动/换节点时重新尝试组合。
     bool http3Enabled = true;
     QString echConfig;
+    // 节点测速并发线程数：1 = 兼容档（单线程事件循环），2..16 = 工作线程池
+    int speedThreads = 1;
     bool loaded = false;
 };
 
@@ -809,6 +812,25 @@ RoutePlan ResolveRoute(const QUrl &url, bool isApi)
     return plan;
 }
 
+int ClampSpeedThreads(int n)
+{
+    // 0 / 负数 / 缺省都落到兼容档 1；上限 16 是硬约束，UI、ini、CLI 三条入口
+    // 都过这一个函数，任何一条都无法绕过。
+    return qBound(1, n, kMaxSpeedThreads);
+}
+
+int SpeedThreads()
+{
+    Load();
+    return S().speedThreads;
+}
+
+void SetSpeedThreads(int n)
+{
+    Load();
+    S().speedThreads = ClampSpeedThreads(n);
+}
+
 void Load()
 {
     if (S().loaded)
@@ -834,6 +856,9 @@ void Load()
     // proxy/http3On（缺省 true），旧键只在 Save() 里继续写，供旧版本回读。
     S().http3Enabled = s.value(QStringLiteral("proxy/http3On"), true).toBool();
     S().echConfig = s.value(QStringLiteral("proxy/echConfig")).toString();
+    // 新键：老配置没有这个键时取 1（兼容档），因此升级不会悄悄改变测速行为。
+    // 读入即夹紧，避免手工把 ini 改成 999 后起 999 个线程。
+    S().speedThreads = ClampSpeedThreads(s.value(QStringLiteral("proxy/speedThreads"), 1).toInt());
 
     // 节点结果：兼容旧的 5 字段格式，新的 9 字段把分类/组内序号/地区一起带上
     const QStringList rows = s.value(QStringLiteral("proxy/results")).toStringList();
@@ -900,6 +925,7 @@ void Save()
     s.setValue(QStringLiteral("proxy/http3On"), S().http3Enabled);
     s.setValue(QStringLiteral("proxy/http3"), S().http3Enabled);   // 旧版本回读兼容
     s.setValue(QStringLiteral("proxy/echConfig"), S().echConfig);
+    s.setValue(QStringLiteral("proxy/speedThreads"), S().speedThreads);
 
     QStringList rows;
     for (const NodeResult &r : S().results) {
@@ -928,6 +954,10 @@ void Save()
     }
     s.setValue(QStringLiteral("proxy/lineResults"), lineRows);
     s.sync();
+    if (s.status() == QSettings::NoError)
+        DataMigrator::RollingBackup(SettingsPath());   // 写成功才滚动备份
+    else
+        qWarning("proxy-config: 写入失败 status=%d", int(s.status()));
 }
 
 }  // namespace ProxyConfig

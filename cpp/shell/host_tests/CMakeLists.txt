@@ -78,3 +78,18 @@ add_executable(host_test_jm_webp
 )
 target_include_directories(host_test_jm_webp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(host_test_jm_webp PRIVATE Qt6::Core Qt6::Gui jmwebp)
+
+# DataMigrator：升级迁移 / 备份 / 损坏隔离 / 导出导入（JM_UI_CONFIG 隔离，无网络）。
+add_executable(host_test_data_migrator
+    host_test_data_migrator.cpp
+    ../ui/app_paths.cpp
+    ../ui/app_paths.h
+    ../ui/data_migrator.cpp
+    ../ui/data_migrator.h
+    ../ui/session.cpp
+    ../ui/session.h
+)
+target_include_directories(host_test_data_migrator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui)
+target_link_libraries(host_test_data_migrator PRIVATE Qt6::Core Qt6::Gui)

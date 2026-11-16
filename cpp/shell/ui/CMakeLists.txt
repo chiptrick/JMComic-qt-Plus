@@ -6,7 +6,7 @@
 # 不依赖：sr_qnn / onnxruntime / OpenSSL / JNI —— 那些属于设备侧 c1shell 目标。
 cmake_minimum_required(VERSION 3.22)
 # 需要 C：内嵌 libwebp 解码端是 C 源码（Qt 6.12 不带 qwebp 插件）
-project(JmComicUi VERSION 0.93 LANGUAGES CXX C)
+project(JmComicUi VERSION 0.95 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,7 +15,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC OFF)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
-find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Svg Network Quick QuickWidgets Concurrent)
+find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Svg Network Quick QuickWidgets Concurrent
+             ShaderTools)
 
 qt_standard_project_setup()
 
@@ -42,9 +43,13 @@ qt_add_executable(jmcomic_ui
     motion.h
     cache_path.h
     app_paths.h
+    data_migrator.h
     ui_prefs.h
     search_history.h
     sr_model_sheet.h
+    sr_bench.h
+    nas_store.h
+    log_export.h
     main_desktop.cpp
     theme.cpp
     ui_kit.cpp
@@ -53,20 +58,27 @@ qt_add_executable(jmcomic_ui
     motion.cpp
     cache_path.cpp
     app_paths.cpp
+    data_migrator.cpp
     ui_prefs.cpp
     search_history.cpp
     cover_cache.cpp
     cover_provider.cpp
     comic_view.cpp
     ui_pages_extra.cpp
+    ui_pages_cloud.cpp
+    ui_pages_nas.cpp
+    nas_store.cpp
+    log_export.cpp
     page_transition.cpp
     touch.cpp
+    touch_menu.cpp
     app_font.cpp
     ui_main_window.cpp
     ui_pages_browse.cpp
     ui_pages_library.cpp
     ui_pages_misc.cpp
     sr_model_sheet.cpp
+    sr_bench.cpp
     ../reader.cpp
     ../sr_engine.cpp
     ../sr_engine.h
@@ -78,11 +90,27 @@ qt_add_executable(jmcomic_ui
     ../net_backend.cpp
     ../tls/openssl_tls.cpp
     ../quic/quic_http.cpp
+    ../update_checker.cpp
+    ../update_checker.h
+    ../vk/vk_api.h
+    ../vk/vk_device.h
+    ../vk/vk_onnx.h
+    ../vk/sr_graph.h
+    ../vk/vk_api.cpp
+    ../vk/vk_device.cpp
+    ../vk/vk_onnx.cpp
+    ../vk/sr_graph.cpp
+    ../vk/sr_vk.h
+    ../vk/sr_vk.cpp
+    ../jm_account.cpp
+    ../jm_account.h
     page_loader.cpp
     download_manager.cpp
     download_manager.h
     proxy_config.cpp
     node_tester.cpp
+    node_bench_pool.cpp
+    node_bench_pool.h
     proxy_page.cpp
     region_code.cpp
     region_code.h
@@ -98,6 +126,70 @@ target_include_directories(jmcomic_ui PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/onnxruntime/include
 )
+
+# QShader（QtGui 内部头 rhi/qshader.h）：解析 qsb 容器取 SPIR-V。
+# Qt 把这个头放在 include/QtGui/6.12.0/QtGui/rhi/ 下，公共 include 路径里没有，
+# 需要显式补 QtGui 的版本化私有 include 目录（只用公开的 QShader API）。
+target_include_directories(jmcomic_ui PRIVATE
+    "${Qt6_DIR}/../../../include/QtGui/6.12.0"
+    "${Qt6_DIR}/../../../include/QtGui/6.12.0/QtGui")
+
+# ---------------------------------------------------------------- Vulkan 计算后端
+# 头文件：桌面用随仓的 Khronos headers（没有 Vulkan SDK 也能编），Android 用 NDK 自带。
+# 入口全部经 loader 动态解析（VK_NO_PROTOTYPES），运行期缺 Vulkan 时只报原因不崩。
+if (ANDROID)
+    target_compile_definitions(jmcomic_ui PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1 VK_NO_PROTOTYPES=1)
+else()
+    target_include_directories(jmcomic_ui PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/vulkan/include)
+    target_compile_definitions(jmcomic_ui PRIVATE VK_NO_PROTOTYPES=1)
+endif()
+if (ANDROID)
+    message(STATUS "UI: Vulkan compute backend enabled (headers from NDK sysroot)")
+else()
+    message(STATUS "UI: Vulkan compute backend enabled (3rdparty/vulkan/include)")
+endif()
+
+# 着色器：构建期用 Qt 的 qsb 编成 .qsb（内含 SPIR-V），打进 :/vkshader/<name>.qsb。
+# 不用 qt6_add_shaders：它默认为 Windows 追加 --hlsl 50，而 HLSL 的 cbuffer 打包规则
+# 无法表达 int p[16] 这种 push constant（实测 "cannot be expressed with either HLSL
+# packing layout"）。这里只要 SPIR-V，直接调 qsb --glsl 450，参数完全可控。
+# 每个 kernel 生成两份：<name>.qsb（fp32 存储）与 <name>_fp16.qsb（-D USE_FP16，
+# SSBO 存 half、累加 fp32 的 NCNN fp16_packing 模式），运行期按设备能力选择。
+get_filename_component(_qt_bin_dir "${Qt6_DIR}/../../../bin" ABSOLUTE)
+find_program(JM_QSB NAMES qsb qsb.exe HINTS "${_qt_bin_dir}" REQUIRED)
+set(JM_VK_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/vkshaders")
+file(MAKE_DIRECTORY "${JM_VK_SHADER_DIR}")
+set(JM_VK_QSB_FILES "")
+foreach(_sh probe pcdump conv convw deconv act eltwise copy d2s pad reduce resize)
+    set(_src "${CMAKE_CURRENT_SOURCE_DIR}/../vk/shaders/${_sh}.comp")
+    if (EXISTS "${_src}")
+        set(_out "${JM_VK_SHADER_DIR}/${_sh}.qsb")
+        add_custom_command(
+            OUTPUT "${_out}"
+            COMMAND "${JM_QSB}" --glsl 450 -o "${_out}" "${_src}"
+            DEPENDS "${_src}"
+            COMMENT "qsb ${_sh}.comp -> ${_sh}.qsb"
+            VERBATIM)
+        list(APPEND JM_VK_QSB_FILES "${_out}")
+        set(_out16 "${JM_VK_SHADER_DIR}/${_sh}_fp16.qsb")
+        add_custom_command(
+            OUTPUT "${_out16}"
+            COMMAND "${JM_QSB}" --glsl 450 -D USE_FP16=1 -o "${_out16}" "${_src}"
+            DEPENDS "${_src}"
+            COMMENT "qsb ${_sh}.comp -> ${_sh}_fp16.qsb"
+            VERBATIM)
+        list(APPEND JM_VK_QSB_FILES "${_out16}")
+    endif()
+endforeach()
+if (JM_VK_QSB_FILES)
+    set_source_files_properties(${JM_VK_QSB_FILES} PROPERTIES GENERATED TRUE)
+    qt_add_resources(jmcomic_ui "vkshaders"
+        PREFIX "/vkshader"
+        BASE "${JM_VK_SHADER_DIR}"
+        FILES ${JM_VK_QSB_FILES})
+    message(STATUS "UI: Vulkan shaders -> ${JM_VK_SHADER_DIR} (${JM_QSB})")
+endif()
 
 # WebP 解码：Qt 6.12 的安装包不带 qwebp 插件，而 JM 的封面/内页全是 webp。
 # 复用 C1 壳里的 libwebp 解码端（只编 dec/dsp/utils，无编码器）。
@@ -115,6 +207,10 @@ endif()
 target_link_libraries(jmcomic_ui PRIVATE
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Svg Qt6::Network
     Qt6::Quick Qt6::QuickWidgets Qt6::Concurrent jmwebp)
+# 性能测试的进程内存口径（FootprintMb 的 GetProcessMemoryInfo）
+if (WIN32)
+    target_link_libraries(jmcomic_ui PRIVATE psapi)
+endif()
 
 # --- 超分（可选，运行时加载）------------------------------------------------
 # 只拷贝 DLL/模型，不做链接依赖：缺它们时 SrEngine 返回"不可用 + 原因"，
@@ -166,6 +262,21 @@ if(WIN32 AND JM_SR_MODEL_FILES)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${JM_SR_MODEL_FILES}
                 "$<TARGET_FILE_DIR:jmcomic_ui>/sr_models"
         COMMENT "copy sr_models next to jmcomic_ui")
+endif()
+
+# Intel OpenVINO 插件 EP：默认不打包（整套 runtime ~230MB，且只有 Core Ultra
+# 机器用得上）。给出目录时才随包 staging 到 ovep/；SrEngine 运行时按
+# JM_OV_EP_DIR / JM_OV_EP_DLL 或 <程序目录>/ovep/ 查找，缺插件就自动回退。
+set(JM_OVEP_DIR "" CACHE PATH "OpenVINO EP 插件运行时目录（plugin DLL + OpenVINO/TBB DLL + manifest）")
+if(WIN32 AND JM_OVEP_DIR AND EXISTS "${JM_OVEP_DIR}/onnxruntime_providers_openvino_plugin.dll")
+    file(GLOB _ovep_runtime CONFIGURE_DEPENDS
+         "${JM_OVEP_DIR}/*.dll" "${JM_OVEP_DIR}/*.manifest" "${JM_OVEP_DIR}/cache.json")
+    add_custom_command(TARGET jmcomic_ui POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:jmcomic_ui>/ovep"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_ovep_runtime}
+                "$<TARGET_FILE_DIR:jmcomic_ui>/ovep"
+        COMMENT "stage OpenVINO EP plugin runtime into ovep/")
+    message(STATUS "UI: packaging OpenVINO EP runtime from ${JM_OVEP_DIR}")
 endif()
 
 # 注意：这里不能写 `FILES assets.qrc` —— qt_add_resources 会把 .qrc 当成"普通文件"
@@ -462,12 +573,17 @@ if (ANDROID)
     # 一起塞进 UI_ANDROID_EXTRA_LIBS（插件的 .so + libssl/libcrypto 的 _3 别名副本）。
     set(UI_ANDROID_EXTRA_LIBS "" CACHE STRING "androiddeployqt 额外打包的 .so（分号分隔）")
 
+    # versionCode 必须单调递增：回退会 INSTALL_FAILED_VERSION_DOWNGRADE，逼用户
+    # 卸载重装（= 清空 /data/data/<pkg>，登录态一起蒸发）。由 project VERSION 推导
+    # （0.96 -> 196，0.100 -> 1100），不要再手写数字。
+    math(EXPR JM_ANDROID_VERSION_CODE
+         "${PROJECT_VERSION_MAJOR} * 100 + ${PROJECT_VERSION_MINOR}")
     set_target_properties(jmcomic_ui PROPERTIES
         QT_ANDROID_PACKAGE_NAME "org.jmcomic.ui"
         QT_ANDROID_MIN_SDK_VERSION 34
         QT_ANDROID_TARGET_SDK_VERSION 34
-        QT_ANDROID_VERSION_CODE 93
-        QT_ANDROID_VERSION_NAME "0.93"
+        QT_ANDROID_VERSION_CODE ${JM_ANDROID_VERSION_CODE}
+        QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
     )
     if (UI_ANDROID_EXTRA_LIBS)
         set_target_properties(jmcomic_ui PROPERTIES

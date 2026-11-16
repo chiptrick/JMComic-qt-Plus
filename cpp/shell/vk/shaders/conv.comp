@@ -1,0 +1,185 @@
+// 直接卷积（im2col 免展开，寄存器 4 宽）。NCHW。
+// USE_FP16 变体（qsb -D USE_FP16=1）：SSBO 存 half（float16_t），读出 unpack 成
+// float 计算、写回 pack 回 half——即 NCNN 的 fp16_packing 模式（存储/带宽减半，
+// 累加精度仍为 fp32）。默认（无 USE_FP16）与旧版完全一致（fp32）。
+//
+// 分工：workgroup = 64 线程；每个线程负责同一行上连续 4 个输出像素，同一个输出通道。
+//   groupsX = ceil(OW / 256)，groupsY = OH，groupsZ = OC
+// 为什么 4 宽：3x3 卷积每个输出要读 9 个输入；4 个相邻输出共享 6 列，读放大从 9 降到 4.5，
+// 且权重对整组是广播（走 L1）。再宽会挤掉寄存器。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
+// 存储元素类型 + 读/写转换。FP16 下显存每元素 2 字节，shader 内部一律 float。
+#ifdef USE_FP16
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer Src { FT x[]; };
+layout(binding = 1) buffer Ker { FT w[]; };
+layout(binding = 2) buffer Bia { FT bias[]; };
+layout(binding = 3) buffer Dst { FT y[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+const int kBlock = 4;
+
+float FusedAct(float v, int mode, float alpha)
+{
+    if (mode == 1)
+        return max(v, 0.0);                       // Relu
+    if (mode == 2)
+        return v >= 0.0 ? v : v * alpha;          // LeakyRelu
+    if (mode == 3)
+        return 1.0 / (1.0 + exp(-v));             // Sigmoid
+    return v;
+}
+
+void main()
+{
+    const int C = P(0);
+    const int H = P(1);
+    const int W = P(2);
+    const int OC = P(3);
+    const int KH = P(4);
+    const int KW = P(5);
+    const int SX = P(6);
+    const int SY = P(7);
+    const int PX = P(8);
+    const int PY = P(9);
+    const int OH = P(10);
+    const int OW = P(11);
+    const bool hasBias = P(12) != 0;
+    // 算子融合：紧随其后的 Relu / LeakyRelu / Sigmoid 直接在写回时算掉，
+    // 省掉一次 dispatch、一次全图 barrier 和一整张中间张量的显存往返。
+    // P(13)=0 关闭，1=Relu，2=LeakyRelu，3=Sigmoid；P(14)=LeakyRelu alpha 位。
+    const int actMode = P(13);
+    const float actAlpha = uintBitsToFloat(uint(P(14)));
+
+    const int oy = int(gl_WorkGroupID.y);
+    const int oc = int(gl_WorkGroupID.z);
+    if (oy >= OH || oc >= OC)
+        return;
+
+    const int x0 = int(gl_WorkGroupID.x) * 64 * kBlock + int(gl_LocalInvocationID.x) * kBlock;
+    if (x0 >= OW)
+        return;
+
+    const int nOut = min(kBlock, OW - x0);
+    const float b0 = hasBias ? FLD(bias[oc]) : 0.0;
+
+    float acc[kBlock];
+    for (int t = 0; t < kBlock; ++t)
+        acc[t] = b0;
+
+    const int yBase = oy * SY - PY;
+    // NCNN 的做法（RealSR-NCNN-Vulkan 一脉）：把空间邻域读进寄存器滑窗，
+    // 每个 kx 从滑窗取数，而不是每 kx 重新读 kBlock 个输入。
+    // 行连续（SX==1 && SY==1）时输入读放大从 K*kBlock=12 降到 K+kBlock-1=6，
+    // 且内层不再有逐像素边界分支。
+    // 重要：滑窗下标必须全部是编译期常量，否则 Adreno/NVIDIA 都会把数组
+    // 降级到 local memory（实测 NVIDIA 上 waifu2x 从 164ms 退化到 269ms）。
+    // 所以按 KW=1/2/3 三档完全展开；其余形状回落通用路径。
+    if (SX == 1 && SY == 1 && KW >= 1 && KW <= 3 && KH <= 4) {
+        for (int c = 0; c < C; ++c) {
+            const int wBase = ((oc * C + c) * KH) * KW;
+            const int xBase = c * H * W;
+            const int cx = x0 - PX;   // 本线程 4 个输出的公共左边界
+            for (int ky = 0; ky < KH; ++ky) {
+                const int iy = yBase + ky;
+                if (iy < 0 || iy >= H)
+                    continue;
+                const int rowBase = xBase + iy * W;
+                const int wRow = wBase + ky * KW;
+                if (KW == 3) {
+                    const float a0 = (cx + 0 >= 0 && cx + 0 < W) ? FLD(x[rowBase + cx + 0]) : 0.0;
+                    const float a1 = (cx + 1 >= 0 && cx + 1 < W) ? FLD(x[rowBase + cx + 1]) : 0.0;
+                    const float a2 = (cx + 2 >= 0 && cx + 2 < W) ? FLD(x[rowBase + cx + 2]) : 0.0;
+                    const float a3 = (cx + 3 >= 0 && cx + 3 < W) ? FLD(x[rowBase + cx + 3]) : 0.0;
+                    const float a4 = (cx + 4 >= 0 && cx + 4 < W) ? FLD(x[rowBase + cx + 4]) : 0.0;
+                    const float a5 = (cx + 5 >= 0 && cx + 5 < W) ? FLD(x[rowBase + cx + 5]) : 0.0;
+                    const float w0 = FLD(w[wRow + 0]);
+                    const float w1 = FLD(w[wRow + 1]);
+                    const float w2 = FLD(w[wRow + 2]);
+                    acc[0] += (a0 * w0 + a1 * w1) + a2 * w2;
+                    acc[1] += (a1 * w0 + a2 * w1) + a3 * w2;
+                    acc[2] += (a2 * w0 + a3 * w1) + a4 * w2;
+                    acc[3] += (a3 * w0 + a4 * w1) + a5 * w2;
+                } else if (KW == 2) {
+                    const float a0 = (cx + 0 >= 0 && cx + 0 < W) ? FLD(x[rowBase + cx + 0]) : 0.0;
+                    const float a1 = (cx + 1 >= 0 && cx + 1 < W) ? FLD(x[rowBase + cx + 1]) : 0.0;
+                    const float a2 = (cx + 2 >= 0 && cx + 2 < W) ? FLD(x[rowBase + cx + 2]) : 0.0;
+                    const float a3 = (cx + 3 >= 0 && cx + 3 < W) ? FLD(x[rowBase + cx + 3]) : 0.0;
+                    const float a4 = (cx + 4 >= 0 && cx + 4 < W) ? FLD(x[rowBase + cx + 4]) : 0.0;
+                    const float w0 = FLD(w[wRow + 0]);
+                    const float w1 = FLD(w[wRow + 1]);
+                    acc[0] += a0 * w0 + a1 * w1;
+                    acc[1] += a1 * w0 + a2 * w1;
+                    acc[2] += a2 * w0 + a3 * w1;
+                    acc[3] += a3 * w0 + a4 * w1;
+                } else {   // KW == 1
+                    const float w0 = FLD(w[wRow + 0]);
+                    for (int t = 0; t < kBlock; ++t) {
+                        if (t >= nOut)
+                            break;
+                        const int ix = cx + t;
+                        if (ix < 0 || ix >= W)
+                            continue;
+                        acc[t] += FLD(x[rowBase + ix]) * w0;
+                    }
+                }
+            }
+        }
+    } else {
+        for (int c = 0; c < C; ++c) {
+            const int wBase = ((oc * C + c) * KH) * KW;
+            const int xBase = c * H * W;
+            for (int ky = 0; ky < KH; ++ky) {
+                const int iy = yBase + ky;
+                if (iy < 0 || iy >= H)
+                    continue;
+                const int rowBase = xBase + iy * W;
+                const int wRow = wBase + ky * KW;
+                for (int kx = 0; kx < KW; ++kx) {
+                    const float wv = FLD(w[wRow + kx]);
+                    // ixCol 是**列坐标**（不是 x[] 的绝对下标）。rowBase 已经含了通道与行偏移，
+                    // 只有先对列坐标做边界判断，再拼 rowBase+ixCol，才不会越到相邻行/通道。
+                    // 第一版把绝对下标拿去和 W 比较，跨行时直接读错位置（实测单权重用例能复现）。
+                    for (int t = 0; t < kBlock; ++t) {
+                        if (t >= nOut)
+                            break;
+                        const int ox = x0 + t;
+                        const int ixCol = ox * SX - PX + kx;
+                        if (ixCol < 0 || ixCol >= W)
+                            continue;
+                        acc[t] += FLD(x[rowBase + ixCol]) * wv;
+                    }
+                }
+            }
+        }
+    }
+
+    const int oRow = (oc * OH + oy) * OW + x0;
+    for (int t = 0; t < kBlock; ++t) {
+        if (t >= nOut)
+            break;
+        y[oRow + t] = FST(FusedAct(acc[t], actMode, actAlpha));
+    }
+}

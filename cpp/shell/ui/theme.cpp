@@ -809,17 +809,20 @@ QWidget#SrSheetCard {
 }
 QWidget#SrSheetGrip { background: transparent; }
 QWidget#SrSheetGripBar { background: @textFaint; }
-QLabel#SrSheetTitle { color: @text; font-size: 16px; }
+QLabel#SrSheetTitle { color: @text; font-size: 16px; font-weight: 500; }
 QLabel#SrSheetSub { color: @textFaint; font-size: 11px; }
 QPushButton#SrSheetClose {
     background: transparent; color: @textDim; border: 1px solid @border;
     border-radius: @radius; font-size: 13px; padding: 0px;
-    height: 24px; min-height: 24px; max-height: 24px;
-    width: 24px; min-width: 24px; max-width: 24px;
+    height: 26px; min-height: 26px; max-height: 26px;
+    width: 26px; min-width: 26px; max-width: 26px;
 }
 QPushButton#SrSheetClose:hover { background: @surfaceHover; color: @text; }
 QWidget#SrSheetCard QPushButton#Chip {
-    height: 22px; min-height: 22px; max-height: 22px;
+    /* demo 的 chip 是"两行（名称 + 计数）+ 5px padding"≈35px 高；这里是单行、
+       计数跟在名称后面，用 28px 内容盒（+ 1px 边框 = 30px 实高）折中：
+       再矮就不像可点的筛选项了 */
+    height: 28px; min-height: 28px; max-height: 28px;
     padding: 0px 10px; font-size: 11px;
     /* 基座 qss 给 QPushButton 加了 text-transform: uppercase，
        "Real-CUGAN" 会变成 "REAL-CUGAN"，和列表里的大小写对不上 */
@@ -845,6 +848,38 @@ QListWidget#SrModelList QScrollBar::handle:vertical {
     background: @textFaint; min-height: 28px; border-radius: @radius;
 }
 QWidget#SrSheetFoot { background-color: @bgAlt; border-top: 1px solid @border; }
+/* 测速工具条（demo v2）：第 1 行按钮 30px 实高（内容盒 18 + 上下 padding 5 + 边框 2），
+   第 2 行状态 10px 等宽 + 2px 进度条。基座把 QPushButton 钉在 34px，
+   这三个按钮必须用属性选择器解锁高度。 */
+QWidget#SrSheetCard QPushButton[benchBtn="true"] {
+    /* 对象名不再是 #Ghost，必须把中性态写全，否则会落回基座的橙色描边按钮 */
+    background: transparent; color: @textDim; border: 1px solid @border;
+    height: 18px; min-height: 18px; max-height: 18px;
+    /* 11px + 左右 10px：340dp 下三个按钮合计约 291dp，稳放进 314dp；
+       12px 时实测刚好溢出 8dp，"仅"字会被裁掉 */
+    padding: 5px 10px; font-size: 11px; border-radius: @radius;
+}
+QWidget#SrSheetCard QPushButton[benchBtn="true"]:hover {
+    border-color: @textFaint; color: @text;
+}
+QWidget#SrSheetCard QPushButton[benchBtn="true"]:disabled {
+    color: @textFaint; border-color: @border;
+}
+QPushButton[benchBtn="true"][benchPrimary="true"] {
+    border-color: @accent; color: @accent; background: @accentSoft;
+}
+QPushButton[benchBtn="true"][benchStop="true"] {
+    border-color: @danger; color: @danger;
+}
+QLabel#SrBenchStat {
+    color: @textFaint; font-size: 10px;
+    font-family: "Consolas", "Menlo", "DejaVu Sans Mono", monospace;
+}
+QLabel#SrBenchStat[run="true"] { color: @accent; }
+QLabel#SrBenchLegend { color: @textFaint; font-size: 10px; }
+/* 取消后再次打开时的"继续测试"悬浮条 */
+QWidget#SrBenchResume { background-color: @bgAlt; border: 1px solid @accent; }
+QLabel#SrBenchResumeText { color: @text; font-size: 11px; }
 QLabel#SrSheetSelKey { color: @textFaint; font-size: 10px; }
 QLabel#SrSheetSelVal { color: @accent; font-size: 10px; }
 QWidget#SrSheetCard QPushButton#Ghost,

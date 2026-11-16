@@ -1,0 +1,79 @@
+// Resize。两种组合即可覆盖全部模型：
+//   mode 0 = nearest + asymmetric + nearest_mode=floor   （2x / 4x 整数放大）
+//   mode 1 = linear  + half_pixel                        （0.5x 双线性缩小）
+// 统一按 NCHW 逐通道处理，输出元素一一对应。
+// USE_FP16 变体：存储 half、双线性混合用 fp32（与 conv.comp 同一套宏）。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer Src { FT x[]; };
+layout(binding = 1) buffer Dst { FT y[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+void main()
+{
+    const int C = P(0);
+    const int HIn = P(1);
+    const int WIn = P(2);
+    const int OH = P(3);
+    const int OW = P(4);
+    const int mode = P(5);
+
+    const int i = int(gl_GlobalInvocationID.x);
+    if (i >= C * OH * OW)
+        return;
+
+    const int ox = i % OW;
+    const int t1 = i / OW;
+    const int oy = t1 % OH;
+    const int c = t1 / OH;
+
+    const int plane = HIn * WIn;
+    const int base = c * plane;
+
+    if (mode == 0) {
+        // asymmetric：src = dst * in/out（整数运算，避免浮点边界差一）
+        const int ix = min(WIn - 1, ox * WIn / OW);
+        const int iy = min(HIn - 1, oy * HIn / OH);
+        y[i] = FST(FLD(x[base + iy * WIn + ix]));
+        return;
+    }
+
+    // half_pixel：src = (dst + 0.5) * in/out - 0.5
+    const float fx = (float(ox) + 0.5) * (float(WIn) / float(OW)) - 0.5;
+    const float fy = (float(oy) + 0.5) * (float(HIn) / float(OH)) - 0.5;
+    const float cx = clamp(fx, 0.0, float(WIn - 1));
+    const float cy = clamp(fy, 0.0, float(HIn - 1));
+    const int x0 = int(floor(cx));
+    const int y0 = int(floor(cy));
+    const int x1 = min(x0 + 1, WIn - 1);
+    const int y1 = min(y0 + 1, HIn - 1);
+    const float tx = cx - float(x0);
+    const float ty = cy - float(y0);
+    const float v00 = FLD(x[base + y0 * WIn + x0]);
+    const float v01 = FLD(x[base + y0 * WIn + x1]);
+    const float v10 = FLD(x[base + y1 * WIn + x0]);
+    const float v11 = FLD(x[base + y1 * WIn + x1]);
+    const float top = mix(v00, v01, tx);
+    const float bottom = mix(v10, v11, tx);
+    y[i] = FST(mix(top, bottom, ty));
+}

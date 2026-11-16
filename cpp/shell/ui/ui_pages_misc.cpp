@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFontMetrics>
@@ -25,6 +26,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSlider>
+#include <QThread>
 #include <QtConcurrent>
 #include <cstdio>
 #include <functional>
@@ -46,6 +48,7 @@
 #include "session.h"
 #include "theme.h"
 #include "touch.h"
+#include "touch_menu.h"
 #include "ui_kit.h"
 #include "ui_prefs.h"
 
@@ -807,7 +810,36 @@ void ReaderPage::OpenMenuForTest()
     menu->show();
     menu->adjustSize();
     QApplication::processEvents();
+    // JM_READER_MENU_PRESS=<n>：在菜单第 n 个可点项上模拟"按住"，把按压层一起
+    // 抓下来做六套主题的人工核对（按压层配色是本轮修复重点）。
+    bool pressed = false;
+    if (qEnvironmentVariableIsSet("JM_READER_MENU_PRESS")) {
+        const int want = qMax(0, qEnvironmentVariable("JM_READER_MENU_PRESS").toInt());
+        int seen = 0;
+        for (QAction *a : menu->actions()) {
+            if (!a || !a->isVisible() || a->isSeparator() || a->isEnabled() == false)
+                continue;
+            if (seen++ != want)
+                continue;
+            const QRect r = menu->actionGeometry(a);
+            if (r.isValid()) {
+                pressed = Touch::MenuPressController::BeginMenuPress(
+                    menu.get(), menu->mapToGlobal(r.center()));
+                // 按压层进场是 Motion::Fast(120ms) 的淡入：立刻 grab 只会拍到
+                // opacity≈0 的空层。这里等到淡入结束再截。
+                QElapsedTimer warm;
+                warm.start();
+                while (warm.elapsed() < 260) {
+                    QApplication::processEvents(QEventLoop::AllEvents, 20);
+                    QThread::msleep(10);
+                }
+            }
+            break;
+        }
+    }
     const QPixmap menuShot = menu->grab();
+    if (pressed)
+        Touch::MenuPressController::Cancel(menu.get());
     QWidget *top = window();
     QPixmap base = top->grab();
     const QPoint at = menuBtn_->mapTo(top, QPoint(menuBtn_->width(), menuBtn_->height()));
@@ -1790,6 +1822,32 @@ SettingsView::SettingsView(QWidget *parent) : PageBase(parent)
             const auto *label = row->findChild<QLabel *>(QStringLiteral("SettingTitle"));
             row->setVisible(kw.isEmpty() || (label && label->text().contains(kw, Qt::CaseInsensitive)));
         }
+        // 整块的自定义设置项（默认模型的选择栏）不是 SettingRow，
+        // 用 settingTitle 属性参与同一个过滤，否则搜索结果里它会一直露着
+        for (auto *block : body->findChildren<QWidget *>(QStringLiteral("SettingBlock"))) {
+            const QString title = block->property("settingTitle").toString();
+            block->setVisible(kw.isEmpty() || title.contains(kw, Qt::CaseInsensitive));
+        }
+        // 行全被过滤掉的卡片要一起收起：否则搜索"模型"时页面上会留下一排
+        // 只有边框、没有任何内容的空条（视觉上像渲染坏了）
+        for (auto *card : body->findChildren<QWidget *>(QStringLiteral("ListRow"))) {
+            bool anyVisible = false;
+            for (auto *row : card->findChildren<SettingRow *>()) {
+                if (row->isVisibleTo(card)) {
+                    anyVisible = true;
+                    break;
+                }
+            }
+            if (!anyVisible) {
+                for (auto *block : card->findChildren<QWidget *>(QStringLiteral("SettingBlock"))) {
+                    if (block->isVisibleTo(card)) {
+                        anyVisible = true;
+                        break;
+                    }
+                }
+            }
+            card->setVisible(kw.isEmpty() || anyVisible);
+        }
         for (auto *sec : body->findChildren<SectionHeader *>())
             sec->setVisible(kw.isEmpty());
     });
@@ -2071,44 +2129,179 @@ SettingsView::SettingsView(QWidget *parent) : PageBase(parent)
     });
 
     auto *sr = BuildGroup(QStringLiteral("超分"));
-    // 模型下拉框按 SrEngine::Catalog() 全量生成（原来写死三个下标，新增模型
-    // 在设置页根本选不到）。存的是模型名而不是下标：换顺序/增删模型都不会串。
-    QStringList srNames;
-    const QString curSr = SrEngine::CurrentModel();
-    for (const SrEngine::ModelInfo &m : SrEngine::InstalledModels())
-        srNames << m.name;
-    const QStringList srItems =
-        srNames.isEmpty() ? QStringList{QStringLiteral("（没有可用模型）")} : srNames;
-    int srIndex = qMax(0, srNames.indexOf(curSr));
-    auto *srModelCombo = MakeCombo(srItems, srIndex, sr);
-    if (srNames.isEmpty())
-        srModelCombo->setEnabled(false);
-    connect(srModelCombo, &QComboBox::currentIndexChanged, this, [srNames](int idx) {
-        if (idx < 0 || idx >= srNames.size())
+    // 默认模型：整行选择栏 + 选择浮层，与图片超分页/批量超分页同一套控件
+    //（docs/waifu2x_model_list_demo.html 的 .pickfield）。
+    // 不再用 QComboBox：39 项平铺在没有分组、没有"当前使用"回显的弹窗里，
+    // 同名族根本分不清；而且下拉列表的样式跟另外两页是两套。
+    const QVector<SrEngine::ModelInfo> installedSr = SrEngine::InstalledModels();
+    auto *modelBlock = new QWidget(sr);
+    modelBlock->setObjectName(QStringLiteral("SettingBlock"));
+    modelBlock->setProperty("settingTitle", QStringLiteral("默认模型"));
+    auto *mbl = new QVBoxLayout(modelBlock);
+    mbl->setContentsMargins(0, 8, 0, 8);
+    mbl->setSpacing(UiStyle::Fpx(2));
+    auto *modelTitle = new QLabel(QStringLiteral("默认模型"), modelBlock);
+    modelTitle->setObjectName(QStringLiteral("SettingTitle"));
+    mbl->addWidget(modelTitle);
+    auto *modelDesc = new QLabel(
+        QStringLiteral("阅读器 / 图片超分 / 批量超分默认使用的模型（共 %1 个可用）")
+            .arg(installedSr.size()),
+        modelBlock);
+    modelDesc->setObjectName(QStringLiteral("SettingDesc"));
+    modelDesc->setWordWrap(true);
+    modelDesc->setMinimumWidth(0);
+    mbl->addWidget(modelDesc);
+    mbl->addSpacing(UiStyle::Fpx(4));
+    auto *modelField = new SrModelField(modelBlock);
+    modelField->SetModel(SrEngine::CurrentModel());
+    mbl->addWidget(modelField);
+    modelField_ = modelField;
+    if (installedSr.isEmpty())
+        modelField->setEnabled(false);
+    connect(modelField, &SrModelField::clicked, this, [this, modelField] {
+        const QString picked = SrModelSheet::Pick(this, SrEngine::CurrentModel());
+        if (picked.isEmpty())
             return;
-        UiPrefs::Set(QStringLiteral("srModelName"), srNames.at(idx));
-        SrEngine::SetModel(srNames.at(idx));
+        if (!SrEngine::SetModel(picked)) {
+            emit Toast(QStringLiteral("切换到 %1 失败：%2").arg(picked, SrEngine::Status()));
+            return;
+        }
+        UiPrefs::Set(QStringLiteral("srModelName"), picked);
+        modelField->SetModel(picked);
+        emit Toast(QStringLiteral("默认模型已切换为 %1").arg(picked));
     });
-    static_cast<QVBoxLayout *>(sr->layout())
-        ->addWidget(new SettingRow(QStringLiteral("默认模型"),
-                                   QStringLiteral("阅读器/超分页使用的超分模型（共 %1 个可用）")
-                                       .arg(srNames.size()),
-                                   srModelCombo, sr));
-    auto *npu = new ToggleSwitch(sr);
-    npu->setChecked(UiPrefs::GetBool(QStringLiteral("srNpu"), true));
-    // QNN/HTP 后端尚未接入：这一项目前不改变实际执行设备，如实说明，
-    // 不要让用户以为打开就真的跑在 NPU 上。
-    npu->setEnabled(false);
-    connect(npu, &ToggleSwitch::toggled, this, [](bool on) {
-        UiPrefs::Set(QStringLiteral("srNpu"), on);
+    static_cast<QVBoxLayout *>(sr->layout())->addWidget(modelBlock);
+    // 后端优先级 QNN -> Vulkan -> CPU。做成多选一而不是开关：
+    // 加了 Vulkan 之后"开/关 NPU"无法表达 GPU-only 与自动两档；再加两档
+    // Intel OpenVINO 插件 EP（NPU 直连 / XPU 自动），桌面独占、Android 上
+    // 这两项会按回退语义落到原有链路。
+    auto *backendCombo = new TouchCombo(sr);
+    backendCombo->setObjectName(QStringLiteral("SettingCombo"));
+    backendCombo->addItem(QStringLiteral("自动（NPU → GPU → CPU）"), QStringLiteral("auto"));
+    backendCombo->addItem(QStringLiteral("NPU（QNN HTP）"), QStringLiteral("qnn"));
+    backendCombo->addItem(QStringLiteral("Intel NPU（AI Boost）"), QStringLiteral("ov-npu"));
+    backendCombo->addItem(QStringLiteral("Intel XPU 自动（NPU→GPU→CPU）"),
+                          QStringLiteral("xpu"));
+    backendCombo->addItem(QStringLiteral("GPU（Vulkan）"), QStringLiteral("vulkan"));
+    backendCombo->addItem(QStringLiteral("CPU（ONNX Runtime）"), QStringLiteral("cpu"));
+    backendCombo->setMinimumWidth(0);
+    // 说明文字保持单行：设置页的"控件与标题同排"断言按中心量测。
+    auto *backendRow = new SettingRow(
+        QStringLiteral("推理后端"),
+        QStringLiteral("当前：%1").arg(SrEngine::BackendLabel()), backendCombo, sr);
+    const QString prefNow = SrEngine::BackendPref();
+    int prefIndex = 0;
+    for (int k = 0; k < backendCombo->count(); ++k) {
+        if (backendCombo->itemData(k).toString() == prefNow) {
+            prefIndex = k;
+            break;
+        }
+    }
+    backendCombo->setCurrentIndex(prefIndex);
+    backendRow->setToolTip(
+        QStringLiteral("偏好 %1%2")
+            .arg(prefNow, SrEngine::BackendDetail().isEmpty()
+                             ? QString()
+                             : QStringLiteral(" · %1").arg(SrEngine::BackendDetail())));
+    connect(backendCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this, backendCombo, backendRow](int idx) {
+                const QString v = backendCombo->itemData(idx).toString();
+                SrEngine::SetBackendPreference(v);
+                if (auto *desc = backendRow->findChild<QLabel *>(QStringLiteral("SettingDesc")))
+                    desc->setText(QStringLiteral("当前：%1").arg(SrEngine::BackendLabel()));
+                emit Toast(QStringLiteral("已设为 %1（下次超分生效）")
+                               .arg(backendCombo->itemText(idx)));
+            });
+    static_cast<QVBoxLayout *>(sr->layout())->addWidget(backendRow);
+
+    // Vulkan tile 大小：0=自动（平台默认 + watchdog 降档），显式值优先于自动。
+    // env JM_SR_TILE 仍优先于这里（CLI/回归用）。
+    auto *tileCombo = new TouchCombo(sr);
+    tileCombo->setObjectName(QStringLiteral("SettingCombo"));
+    tileCombo->addItem(QStringLiteral("自动"), 0);
+    const QList<int> tileChoices = {64, 96, 128, 160, 192, 256};
+    for (int t : tileChoices)
+        tileCombo->addItem(QStringLiteral("%1 × %1").arg(t), t);
+    tileCombo->setMinimumWidth(0);
+    const int tilePref = SrEngine::TilePreference();
+    int tileIndex = 0;
+    for (int k = 0; k < tileCombo->count(); ++k) {
+        if (tileCombo->itemData(k).toInt() == tilePref) {
+            tileIndex = k;
+            break;
+        }
+    }
+    tileCombo->setCurrentIndex(tileIndex);
+    auto *tileRow = new SettingRow(
+        QStringLiteral("Tile 大小"),
+        QStringLiteral("Vulkan 分块推理的块尺寸；自动=按设备默认（移动端 128，大模型自动降档）"),
+        tileCombo, sr);
+    connect(tileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this, tileCombo](int idx) {
+                const int v = tileCombo->itemData(idx).toInt();
+                SrEngine::SetTilePreference(v);
+                emit Toast(v > 0 ? QStringLiteral("Tile 设为 %1（下次超分生效）").arg(v)
+                                 : QStringLiteral("Tile 恢复自动（下次超分生效）"));
+            });
+    static_cast<QVBoxLayout *>(sr->layout())->addWidget(tileRow);
+
+    // 性能测试：对当前模型跑 Vulkan 两档（tile64 + 自动档）与 CPU 各一次，
+    // 完成后给出推荐的后端优先级与 tile。测试在后台线程跑（会重建 Vulkan
+    // 会话并持有引擎锁），期间禁用按钮防重复触发。
+    auto *perfBtn = new QPushButton(QStringLiteral("开始测试"), sr);
+    perfBtn->setCursor(Qt::PointingHandCursor);
+    auto *perfRow = new SettingRow(
+        QStringLiteral("性能测试"),
+        QStringLiteral("测不同配置的耗时与显存占用，并给出推荐的推理后端与 tile"),
+        perfBtn, sr);
+    auto *perfDesc = perfRow->findChild<QLabel *>(QStringLiteral("SettingDesc"));
+    connect(perfBtn, &QPushButton::clicked, this, [this, perfBtn, perfDesc] {
+        perfBtn->setEnabled(false);
+        if (perfDesc)
+            perfDesc->setText(QStringLiteral("测试中：GPU tile64…（约 10~40s，期间超分暂停）"));
+        auto *watcher = new QFutureWatcher<QVector<SrEngine::SrPerfRow>>(this);
+        connect(watcher, &QFutureWatcher<QVector<SrEngine::SrPerfRow>>::finished, this,
+                [this, perfBtn, perfDesc, watcher] {
+                    const QVector<SrEngine::SrPerfRow> rows = watcher->result();
+                    QStringList lines;
+                    for (const SrEngine::SrPerfRow &r : rows) {
+                        if (r.label.isEmpty())
+                            continue;
+                        if (r.ok)
+                            lines << QStringLiteral("%1 %2ms%3%4")
+                                         .arg(r.label)
+                                         .arg(r.ms, 0, 'f', 0)
+                                         .arg(r.actMb >= 0
+                                                  ? QStringLiteral(" · 激活显存 %1MB").arg(r.actMb)
+                                                  : QString())
+                                         .arg(r.memDeltaMb >= 0
+                                                  ? QStringLiteral(" · 内存 +%1MB").arg(r.memDeltaMb)
+                                                  : QString());
+                        else if (!r.note.isEmpty())
+                            lines << QStringLiteral("%1 不可用（%2）").arg(r.label, r.note);
+                    }
+                    const QString rec = SrEngine::PerfRecommendation(rows);
+                    if (perfDesc)
+                        perfDesc->setText(rec);
+                    emit Toast(rec);
+                    qInfo("sr: perf probe %s", qPrintable(lines.join(QStringLiteral(" | "))));
+                    perfBtn->setEnabled(true);
+                    watcher->deleteLater();
+                });
+        watcher->setFuture(QtConcurrent::run([] {
+            return SrEngine::RunPerfProbe(QVector<int>(), 1);
+        }));
     });
-    static_cast<QVBoxLayout *>(sr->layout())
-        ->addWidget(new SettingRow(QStringLiteral("优先使用 NPU"),
-                                   QStringLiteral("当前版本为 CPU 推理（ONNX Runtime），NPU 后端未接入"),
-                                   npu, sr));
+    static_cast<QVBoxLayout *>(sr->layout())->addWidget(perfRow);
 
     body_->addStretch(1);
     root->addWidget(WrapScroll(body, this));
+}
+
+void SettingsView::OnEnter()
+{
+    if (modelField_)
+        modelField_->SetModel(SrEngine::CurrentModel());
 }
 
 QWidget *SettingsView::BuildGroup(const QString &title)
@@ -2201,9 +2394,15 @@ AboutPage::AboutPage(QWidget *parent) : PageBase(parent)
     name->setFont(nf);
     cl->addWidget(name);
 
-    auto *ver = new QLabel(QStringLiteral("版本 0.88 · Qt 6.12.0 · C++17 · MinGW 13.1"), card);
-    ver->setObjectName(QStringLiteral("PageSub"));
-    cl->addWidget(ver);
+    version_ = new QLabel(
+        QStringLiteral("版本 %1 · Qt %2 · C++17 · MinGW 13.1")
+            .arg(QCoreApplication::applicationVersion(), QString::fromLatin1(qVersion())),
+        card);
+    version_->setObjectName(QStringLiteral("PageSub"));
+    version_->setWordWrap(true);
+    version_->setMinimumWidth(0);
+    version_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    cl->addWidget(version_);
 
     auto *line = new QFrame(card);
     line->setObjectName(QStringLiteral("Divider"));
@@ -2220,26 +2419,129 @@ AboutPage::AboutPage(QWidget *parent) : PageBase(parent)
         auto *l = new QLabel(r, card);
         l->setObjectName(QStringLiteral("SettingDesc"));
         l->setWordWrap(true);
+        l->setMinimumWidth(0);
         cl->addWidget(l);
     }
+
+    // 服务端更新配置（Ver/VerTime）：只展示，不参与网络行为
+    configLine_ = new QLabel(QStringLiteral("服务端配置：未同步"), card);
+    configLine_->setObjectName(QStringLiteral("SettingDesc"));
+    configLine_->setWordWrap(true);
+    configLine_->setMinimumWidth(0);
+    cl->addWidget(configLine_);
     lay->addWidget(card);
 
     auto *btns = new QHBoxLayout();
-    auto *log = new QPushButton(QStringLiteral("导出日志"), body);
-    log->setObjectName(QStringLiteral("Ghost"));
-    log->setCursor(Qt::PointingHandCursor);
-    auto *check = new QPushButton(QStringLiteral("检查更新"), body);
-    check->setObjectName(QStringLiteral("Ghost"));
-    check->setCursor(Qt::PointingHandCursor);
-    btns->addWidget(log);
-    btns->addWidget(check);
+    btns->setSpacing(8);
+    logBtn_ = new QPushButton(QStringLiteral("导出日志"), body);
+    logBtn_->setObjectName(QStringLiteral("Ghost"));
+    logBtn_->setCursor(Qt::PointingHandCursor);
+    logBtn_->setProperty("hitGrow", false);
+    auto *openDir = new QPushButton(QStringLiteral("日志目录"), body);
+    openDir->setObjectName(QStringLiteral("Ghost"));
+    openDir->setCursor(Qt::PointingHandCursor);
+    openDir->setProperty("hitGrow", false);
+    checkBtn_ = new QPushButton(QStringLiteral("检查更新"), body);
+    checkBtn_->setObjectName(QStringLiteral("Ghost"));
+    checkBtn_->setCursor(Qt::PointingHandCursor);
+    checkBtn_->setProperty("hitGrow", false);
+    btns->addWidget(logBtn_);
+    btns->addWidget(openDir);
+    btns->addWidget(checkBtn_);
     btns->addStretch(1);
     lay->addLayout(btns);
-    connect(log, &QPushButton::clicked, this, [this] { emit Toast(QStringLiteral("日志导出尚未接入")); });
-    connect(check, &QPushButton::clicked, this, [this] { emit Toast(QStringLiteral("更新检查尚未接入")); });
+
+    // 状态行：导出/检查的即时反馈（Toast 会消失，这里留一条可回溯的状态）
+    updateStatus_ = new QLabel(QStringLiteral("未检查更新"), body);
+    updateStatus_->setObjectName(QStringLiteral("PageSub"));
+    updateStatus_->setWordWrap(true);
+    updateStatus_->setMinimumWidth(0);
+    updateStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    lay->addWidget(updateStatus_);
+
+    // 更新日志预览（默认隐藏；有新版本才出现）
+    changelog_ = new QLabel(body);
+    changelog_->setObjectName(QStringLiteral("SettingDesc"));
+    changelog_->setWordWrap(true);
+    changelog_->setMinimumWidth(0);
+    changelog_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    changelog_->setVisible(false);
+    lay->addWidget(changelog_);
+
+    downloadBtn_ = new QPushButton(QStringLiteral("前往下载页"), body);
+    downloadBtn_->setObjectName(QStringLiteral("Primary"));
+    UiStyle::MarkSoftButton(downloadBtn_);
+    downloadBtn_->setCursor(Qt::PointingHandCursor);
+    downloadBtn_->setProperty("hitGrow", false);
+    downloadBtn_->setVisible(false);
+    lay->addWidget(downloadBtn_, 0, Qt::AlignLeft);
+
+    connect(logBtn_, &QPushButton::clicked, this, &AboutPage::ExportLogsRequested);
+    connect(openDir, &QPushButton::clicked, this, &AboutPage::OpenLogDirRequested);
+    connect(checkBtn_, &QPushButton::clicked, this, &AboutPage::CheckUpdateRequested);
+    connect(downloadBtn_, &QPushButton::clicked, this,
+            [this] { emit OpenUrlRequested(downloadUrl_); });
 
     lay->addStretch(1);
     root->addWidget(WrapScroll(body, this));
+}
+
+void AboutPage::SetVersionInfo(const QString &appVersion, const QString &releaseLine)
+{
+    if (!version_)
+        return;
+    version_->setText(QStringLiteral("版本 %1（发行线 %2）· Qt %3 · C++17 · MinGW 13.1")
+                          .arg(appVersion, releaseLine, QString::fromLatin1(qVersion())));
+}
+
+void AboutPage::SetUpdateStatus(const QString &text, bool ok)
+{
+    if (!updateStatus_)
+        return;
+    updateStatus_->setText(text);
+    updateStatus_->setStyleSheet(ok ? QString()
+                                    : QStringLiteral("color:%1;").arg(T().danger.name()));
+}
+
+void AboutPage::SetUpdateResult(const QString &newVersion, const QString &changelog)
+{
+    if (changelog_)
+        changelog_->setVisible(!changelog.isEmpty());
+    if (changelog_) {
+        // 更新日志可能很长：截断到 800 字（完整内容在下载页），避免整页被日志顶满
+        const QString text = changelog.size() > 800 ? changelog.left(800) + QStringLiteral("…")
+                                                    : changelog;
+        changelog_->setText(text);
+    }
+    if (downloadBtn_)
+        downloadBtn_->setVisible(!newVersion.isEmpty());
+}
+
+void AboutPage::SetConfigLine(const QString &text)
+{
+    if (configLine_)
+        configLine_->setText(text);
+}
+
+void AboutPage::SetExportResult(bool ok, const QString &detail)
+{
+    if (ok) {
+        SetUpdateStatus(QStringLiteral("日志已导出：%1").arg(detail), true);
+        if (logBtn_)
+            logBtn_->setText(QStringLiteral("再导一次"));
+    } else {
+        SetUpdateStatus(QStringLiteral("日志导出失败：%1").arg(detail), false);
+    }
+}
+
+QString AboutPage::UpdateStatusText() const
+{
+    return updateStatus_ ? updateStatus_->text() : QString();
+}
+
+QString AboutPage::ConfigLineText() const
+{
+    return configLine_ ? configLine_->text() : QString();
 }
 
 namespace {
@@ -2332,9 +2634,13 @@ LoginPage::LoginPage(QWidget *parent) : PageBase(parent)
     auto *reg = new QPushButton(QStringLiteral("注册"), card);
     reg->setObjectName(QStringLiteral("Link"));
     reg->setCursor(Qt::PointingHandCursor);
+    reg->setProperty("hitGrow", false);
     auto *forgot = new QPushButton(QStringLiteral("忘记密码"), card);
     forgot->setObjectName(QStringLiteral("Link"));
     forgot->setCursor(Qt::PointingHandCursor);
+    forgot->setProperty("hitGrow", false);
+    regLink_ = reg;
+    forgotLink_ = forgot;
     links->addWidget(reg);
     links->addStretch(1);
     links->addWidget(forgot);
@@ -2361,6 +2667,8 @@ LoginPage::LoginPage(QWidget *parent) : PageBase(parent)
         status_->setText(QStringLiteral("已登录：%1").arg(UserSession::User().name));
 
     colLay->addWidget(card);
+    // 注册 / 找回密码：不弹新窗口，就在同一列里展开一块面板（手机窄屏也能用）
+    BuildAuthPanel(colLay, column);
     // 整页只有这一列：上下 stretch 让内容垂直居中；窗口变矮时列仍可滚动。
     lay->addStretch(1);
     lay->addWidget(host);
@@ -2387,10 +2695,300 @@ LoginPage::LoginPage(QWidget *parent) : PageBase(parent)
     connect(proxy, &QPushButton::clicked, this, [this] {
         emit Navigate(PageId::Settings);
     });
-    connect(reg, &QPushButton::clicked, this, [this] { emit Toast(QStringLiteral("注册页尚未接入")); });
-    connect(forgot, &QPushButton::clicked, this, [this] { emit Toast(QStringLiteral("找回密码尚未接入")); });
+    connect(reg, &QPushButton::clicked, this, [this] {
+        ShowPanel(panelMode_ == Panel::Register ? Panel::None : Panel::Register);
+    });
+    connect(forgot, &QPushButton::clicked, this, [this] {
+        ShowPanel(panelMode_ == Panel::Forgot ? Panel::None : Panel::Forgot);
+    });
 
     root->addWidget(WrapScroll(body, this));
+}
+
+void LoginPage::BuildAuthPanel(QVBoxLayout *colLay, QWidget *column)
+{
+    panel_ = new QWidget(column);
+    panel_->setObjectName(QStringLiteral("ListRow"));
+    auto *pl = new QVBoxLayout(panel_);
+    pl->setContentsMargins(24, 20, 24, 20);
+    pl->setSpacing(10);
+
+    panelTitle_ = new QLabel(QStringLiteral("注册新账号"), panel_);
+    panelTitle_->setObjectName(QStringLiteral("RowTitle"));
+    pl->addWidget(panelTitle_);
+
+    auto *note = new QLabel(
+        QStringLiteral("注册与找回密码走站点网页接口；若域名不可达，可用浏览器打开官网完成。"),
+        panel_);
+    note->setObjectName(QStringLiteral("SettingDesc"));
+    note->setWordWrap(true);
+    note->setMinimumWidth(0);
+    pl->addWidget(note);
+
+    regUser_ = new QLineEdit(panel_);
+    regUser_->setObjectName(QStringLiteral("Input"));
+    regUser_->setPlaceholderText(QStringLiteral("用户名"));
+    regUser_->setFixedHeight(38);
+    pl->addWidget(regUser_);
+
+    regEmail_ = new QLineEdit(panel_);
+    regEmail_->setObjectName(QStringLiteral("Input"));
+    regEmail_->setPlaceholderText(QStringLiteral("邮箱"));
+    regEmail_->setFixedHeight(38);
+    pl->addWidget(regEmail_);
+
+    regPass_ = new QLineEdit(panel_);
+    regPass_->setObjectName(QStringLiteral("Input"));
+    regPass_->setPlaceholderText(QStringLiteral("密码"));
+    regPass_->setEchoMode(QLineEdit::Password);
+    regPass_->setFixedHeight(38);
+    pl->addWidget(regPass_);
+
+    regPass2_ = new QLineEdit(panel_);
+    regPass2_->setObjectName(QStringLiteral("Input"));
+    regPass2_->setPlaceholderText(QStringLiteral("确认密码"));
+    regPass2_->setEchoMode(QLineEdit::Password);
+    regPass2_->setFixedHeight(38);
+    pl->addWidget(regPass2_);
+
+    regGender_ = new QComboBox(panel_);
+    regGender_->setObjectName(QStringLiteral("SettingCombo"));
+    regGender_->addItem(QStringLiteral("男"), QStringLiteral("Male"));
+    regGender_->addItem(QStringLiteral("女"), QStringLiteral("Female"));
+    regGender_->setMinimumWidth(0);
+    pl->addWidget(regGender_);
+
+    // 验证码：图片来自 /captcha（同一站点会话）；点图片刷新
+    auto *captchaRow = new QHBoxLayout();
+    captchaRow->setSpacing(8);
+    regCaptcha_ = new QLineEdit(panel_);
+    regCaptcha_->setObjectName(QStringLiteral("Input"));
+    regCaptcha_->setPlaceholderText(QStringLiteral("验证码"));
+    regCaptcha_->setFixedHeight(38);
+    captchaRow->addWidget(regCaptcha_, 1);
+    captchaView_ = new QLabel(panel_);
+    captchaView_->setFixedSize(96, 38);
+    captchaView_->setAlignment(Qt::AlignCenter);
+    captchaView_->setCursor(Qt::PointingHandCursor);
+    captchaView_->setStyleSheet(
+        QStringLiteral("background:%1; color:%2; border-radius:%3px; font-size:11px;")
+            .arg(T().surfaceHover.name(), T().textFaint.name())
+            .arg(UiStyle::Radius));
+    captchaView_->setText(QStringLiteral("加载中"));
+    captchaBtn_ = new QPushButton(QStringLiteral("刷新"), panel_);
+    captchaBtn_->setObjectName(QStringLiteral("Ghost"));
+    captchaBtn_->setCursor(Qt::PointingHandCursor);
+    captchaBtn_->setProperty("hitGrow", false);
+    captchaRow->addWidget(captchaView_);
+    captchaRow->addWidget(captchaBtn_);
+    pl->addLayout(captchaRow);
+
+    resendBtn_ = new QPushButton(QStringLiteral("没收到验证邮件？重发一次"), panel_);
+    resendBtn_->setObjectName(QStringLiteral("Link"));
+    resendBtn_->setCursor(Qt::PointingHandCursor);
+    resendBtn_->setProperty("hitGrow", false);
+    pl->addWidget(resendBtn_, 0, Qt::AlignLeft);
+
+    panelStatus_ = new QLabel(QString(), panel_);
+    panelStatus_->setObjectName(QStringLiteral("PageSub"));
+    panelStatus_->setWordWrap(true);
+    panelStatus_->setMinimumWidth(0);
+    panelStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    pl->addWidget(panelStatus_);
+
+    auto *actions = new QHBoxLayout();
+    actions->setSpacing(8);
+    panelSubmit_ = new QPushButton(QStringLiteral("注册"), panel_);
+    panelSubmit_->setObjectName(QStringLiteral("Primary"));
+    UiStyle::MarkSoftButton(panelSubmit_);
+    panelSubmit_->setCursor(Qt::PointingHandCursor);
+    panelSubmit_->setProperty("hitGrow", false);
+    panelCancel_ = new QPushButton(QStringLiteral("取消"), panel_);
+    panelCancel_->setObjectName(QStringLiteral("Ghost"));
+    panelCancel_->setCursor(Qt::PointingHandCursor);
+    panelCancel_->setProperty("hitGrow", false);
+    actions->addWidget(panelSubmit_, 0);
+    actions->addWidget(panelCancel_, 0);
+    actions->addStretch(1);
+    pl->addLayout(actions);
+
+    panel_->setVisible(false);
+    colLay->addWidget(panel_);
+
+    connect(panelSubmit_, &QPushButton::clicked, this, &LoginPage::SubmitPanel);
+    connect(panelCancel_, &QPushButton::clicked, this, [this] { ShowPanel(Panel::None); });
+    connect(captchaBtn_, &QPushButton::clicked, this, &LoginPage::CaptchaRefreshRequested);
+    connect(resendBtn_, &QPushButton::clicked, this, [this] {
+        if (panelMode_ != Panel::Register)
+            return;
+        const QString user = regUser_ ? regUser_->text().trimmed() : QString();
+        const QString pass = regPass_ ? regPass_->text() : QString();
+        if (user.isEmpty() || pass.isEmpty()) {
+            SetPanelStatus(QStringLiteral("重发验证邮件需要填写用户名与密码"), false);
+            return;
+        }
+        SetPanelBusy(true);
+        SetPanelStatus(QStringLiteral("正在请求重发验证邮件…"), true);
+        emit ResendVerifyRequested(user, pass);
+    });
+}
+
+void LoginPage::ShowPanel(Panel panel)
+{
+    panelMode_ = panel;
+    ApplyPanelMode();
+}
+
+void LoginPage::ApplyPanelMode()
+{
+    if (!panel_)
+        return;
+    const bool open = panelMode_ != Panel::None;
+    panel_->setVisible(open);
+    if (!open)
+        return;
+    const bool reg = panelMode_ == Panel::Register;
+    if (panelTitle_)
+        panelTitle_->setText(reg ? QStringLiteral("注册新账号") : QStringLiteral("找回密码"));
+    if (panelSubmit_)
+        panelSubmit_->setText(reg ? QStringLiteral("注册") : QStringLiteral("发送找回邮件"));
+    // 各字段按模式显隐：找回密码只需要邮箱；注册需要整套字段
+    if (regUser_)
+        regUser_->setVisible(reg);
+    if (regEmail_)
+        regEmail_->setVisible(true);
+    if (regPass_)
+        regPass_->setVisible(reg);
+    if (regPass2_)
+        regPass2_->setVisible(reg);
+    if (regGender_)
+        regGender_->setVisible(reg);
+    if (regCaptcha_)
+        regCaptcha_->setVisible(reg);
+    if (captchaView_)
+        captchaView_->setVisible(reg);
+    if (captchaBtn_)
+        captchaBtn_->setVisible(reg);
+    if (resendBtn_)
+        resendBtn_->setVisible(reg);
+    if (regEmail_)
+        regEmail_->setPlaceholderText(reg ? QStringLiteral("邮箱") : QStringLiteral("注册邮箱"));
+    if (panelStatus_)
+        panelStatus_->clear();
+    if (reg && captchaView_ && captchaView_->pixmap().isNull())
+        emit CaptchaRefreshRequested();
+    if (regUser_ && reg)
+        regUser_->setFocus();
+    // 面板在登录卡片下方，视口矮时会被推到折叠线以下：展开后主动滚到可见位置，
+    // 否则用户点了"注册"看起来像没反应。
+    if (open) {
+        if (auto *area = findChild<QScrollArea *>()) {
+            QPointer<QWidget> panel = panel_;
+            QTimer::singleShot(0, this, [area, panel] {
+                if (panel)
+                    area->ensureWidgetVisible(panel, 0, 16);
+            });
+        }
+    }
+}
+
+void LoginPage::SetPanelStatus(const QString &text, bool ok)
+{
+    if (!panelStatus_)
+        return;
+    panelStatus_->setText(text);
+    panelStatus_->setStyleSheet(ok ? QString()
+                                   : QStringLiteral("color:%1;").arg(T().danger.name()));
+}
+
+void LoginPage::SetPanelBusy(bool busy)
+{
+    panelBusy_ = busy;
+    if (panelSubmit_) {
+        panelSubmit_->setEnabled(!busy);
+        const bool reg = panelMode_ == Panel::Register;
+        panelSubmit_->setText(busy ? QStringLiteral("提交中…")
+                                   : (reg ? QStringLiteral("注册") : QStringLiteral("发送找回邮件")));
+    }
+    if (resendBtn_)
+        resendBtn_->setEnabled(!busy);
+    if (captchaBtn_)
+        captchaBtn_->setEnabled(!busy);
+}
+
+void LoginPage::SetCaptcha(const QImage &image)
+{
+    if (!captchaView_)
+        return;
+    if (image.isNull()) {
+        SetCaptchaError(QStringLiteral("验证码为空"));
+        return;
+    }
+    const QPixmap pm = QPixmap::fromImage(image).scaled(
+        captchaView_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    captchaView_->setPixmap(pm);
+    captchaView_->setText(QString());
+}
+
+void LoginPage::SetCaptchaError(const QString &why)
+{
+    if (!captchaView_)
+        return;
+    captchaView_->setPixmap(QPixmap());
+    captchaView_->setText(QStringLiteral("不可用"));
+    captchaView_->setToolTip(why);
+    SetPanelStatus(QStringLiteral("验证码加载失败：%1（可改用浏览器注册）").arg(why), false);
+}
+
+QString LoginPage::PanelStatusText() const
+{
+    return panelStatus_ ? panelStatus_->text() : QString();
+}
+
+void LoginPage::SubmitPanel()
+{
+    if (panelBusy_)
+        return;
+    if (panelMode_ == Panel::Register) {
+        const QString user = regUser_ ? regUser_->text().trimmed() : QString();
+        const QString email = regEmail_ ? regEmail_->text().trimmed() : QString();
+        const QString pass = regPass_ ? regPass_->text() : QString();
+        const QString pass2 = regPass2_ ? regPass2_->text() : QString();
+        const QString code = regCaptcha_ ? regCaptcha_->text().trimmed() : QString();
+        if (user.isEmpty() || email.isEmpty() || pass.isEmpty()) {
+            SetPanelStatus(QStringLiteral("请填写用户名、邮箱与密码"), false);
+            return;
+        }
+        if (pass != pass2) {
+            SetPanelStatus(QStringLiteral("两次输入的密码不一致"), false);
+            return;
+        }
+        if (!email.contains(QLatin1Char('@'))) {
+            SetPanelStatus(QStringLiteral("邮箱格式不正确"), false);
+            return;
+        }
+        if (code.isEmpty()) {
+            SetPanelStatus(QStringLiteral("请填写验证码"), false);
+            return;
+        }
+        SetPanelBusy(true);
+        SetPanelStatus(QStringLiteral("正在提交注册…"), true);
+        emit RegisterRequested(user, email, pass, pass2,
+                               regGender_ ? regGender_->currentData().toString()
+                                          : QStringLiteral("Male"),
+                               code);
+        return;
+    }
+    if (panelMode_ == Panel::Forgot) {
+        const QString email = regEmail_ ? regEmail_->text().trimmed() : QString();
+        if (email.isEmpty() || !email.contains(QLatin1Char('@'))) {
+            SetPanelStatus(QStringLiteral("请填写注册邮箱"), false);
+            return;
+        }
+        SetPanelBusy(true);
+        SetPanelStatus(QStringLiteral("正在提交找回密码请求…"), true);
+        emit ResetPasswordRequested(email);
+    }
 }
 
 void LoginPage::SetStatus(const QString &text, bool ok)

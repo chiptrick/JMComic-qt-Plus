@@ -1,0 +1,61 @@
+// 逐元素激活：Relu / LeakyRelu / Sigmoid / PRelu / Clip（8s 实现，够用且无发散）。
+// USE_FP16 变体：存储 half、计算 fp32（与 conv.comp 同一套宏）。
+#version 450
+layout(local_size_x = 64) in;
+
+#ifdef USE_FP16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define FT float16_t
+#define FLD(v) float(v)
+#define FST(v) float16_t(v)
+#else
+#define FT float
+#define FLD(v) (v)
+#define FST(v) (v)
+#endif
+
+layout(binding = 0) buffer In { FT x[]; };
+layout(binding = 1) buffer Slope { FT slope[]; };
+layout(binding = 2) buffer Out { FT y[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+void main()
+{
+    const int n = P(0);
+    const int mode = P(1);
+    const int C = P(2);
+    const int HW = P(3);
+    const float alpha = uintBitsToFloat(uint(P(4)));
+    const float lo = uintBitsToFloat(uint(P(5)));
+    const float hi = uintBitsToFloat(uint(P(6)));
+
+    const int i = int(gl_GlobalInvocationID.x);
+    if (i >= n)
+        return;
+
+    const float v = FLD(x[i]);
+    float r = v;
+    if (mode == 0) {
+        r = max(v, 0.0);
+    } else if (mode == 1) {
+        r = v >= 0.0 ? v : v * alpha;
+    } else if (mode == 2) {
+        r = 1.0 / (1.0 + exp(-v));
+    } else if (mode == 3) {
+        // PRelu：slope 是每通道一个（[C] 或 [C,1,1]）
+        const int c = HW > 0 ? (i / HW) % max(C, 1) : 0;
+        const float s = FLD(slope[c]);
+        r = v >= 0.0 ? v : v * s;
+    } else if (mode == 4) {
+        r = clamp(v, lo, hi);
+    }
+    y[i] = FST(r);
+}

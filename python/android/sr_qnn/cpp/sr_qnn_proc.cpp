@@ -27,6 +27,12 @@
 #include <vector>
 
 #include <dlfcn.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#if defined(__ANDROID__)
+#include <android/dlext.h>
+#endif
 #include <unistd.h>
 
 #include "sr_qnn.h"
@@ -390,10 +396,67 @@ bool HandleInfo() {
  * dlopen 一次并 RTLD_GLOBAL，之后 QNN 的 soname 查找会命中这个已加载对象 ——
  * 相当于把"厂商库找不到"这件事绕开了，同时不需要把库打进 APK。
  */
+// 从 fd 加载 .so：ANDROID_DLEXT_USE_LIBRARY_FD 让 linker 直接读 fd，
+// 不再按路径比对 namespace 的 permitted_paths。/vendor/lib64 下这些库的
+// SELinux 标签是 same_process_hal_file（允许 app 域 execute），
+// 所以只要绕过 namespace 的**路径**白名单，就不再需要把厂商库复制进 APK。
+void* DlopenByFd(const char* path, const char* soname) {
+#if defined(__ANDROID__)
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "[sr_qnn_proc] fd open failed: %s", path);
+        perror(" ");
+        return nullptr;
+    }
+    android_dlextinfo ext;
+    memset(&ext, 0, sizeof(ext));
+    ext.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
+    ext.library_fd = fd;
+    void* h = android_dlopen_ext(soname, RTLD_NOW | RTLD_GLOBAL, &ext);
+    if (h == nullptr) {
+        fprintf(stderr, "[sr_qnn_proc] fd dlopen failed: %s", path);
+        const char* e = dlerror();
+        fprintf(stderr, " -> %s", e != nullptr ? e : "unknown");
+        fputc(10, stderr);
+    }
+    close(fd);
+    return h;
+#else
+    (void)path;
+    (void)soname;
+    return nullptr;
+#endif
+}
+
 void PreloadFastRpc(const std::string& dir) {
+    // 先让 libcdsprpc 的两个 vendor 依赖就位：它们是 libcdsprpc 的 NEEDED，
+    // 用 fd 方式加载（RTLD_GLOBAL）后 soname 会注册进全局，主库解析依赖时
+    // 直接复用，不会再被 namespace 的路径白名单拦住。
+    struct Dep {
+        const char* path;
+        const char* soname;
+    };
+    const Dep deps[] = {
+        {"/vendor/lib64/libvmmem.so", "libvmmem.so"},
+        {"/odm/lib64/libvmmem.so", "libvmmem.so"},
+        {"/vendor/lib64/vendor.qti.hardware.dsp-V1-ndk.so",
+         "vendor.qti.hardware.dsp-V1-ndk.so"},
+        {"/odm/lib64/vendor.qti.hardware.dsp-V1-ndk.so",
+         "vendor.qti.hardware.dsp-V1-ndk.so"},
+    };
+    for (const Dep& d : deps) {
+        if (dlopen(d.soname, RTLD_NOW | RTLD_GLOBAL) != nullptr) {
+            continue;   // 已在（打过包或已被其它库带进来）
+        }
+        if (DlopenByFd(d.path, d.soname) != nullptr) {
+            fprintf(stderr, "[sr_qnn_proc] dep preloaded(fd): %s", d.path);
+            fputc(10, stderr);
+        }
+    }
+
     std::vector<std::string> paths;
     if (!dir.empty()) {
-        paths.push_back(dir + "/libcdsprpc.so");     // 万一以后打进 APK
+        paths.push_back(dir + "/libcdsprpc.so");     // 若曾打进 APK，优先用同目录那份
     }
     const char* systemPaths[] = {"/vendor/lib64/libcdsprpc.so",
                                  "/odm/lib64/libcdsprpc.so",
@@ -404,25 +467,125 @@ void PreloadFastRpc(const std::string& dir) {
     }
     std::string firstErr;
     for (const auto& p : paths) {
+        // 1) 普通 dlopen：同目录 / 已注册 soname / namespace 放行时最快
         void* h = dlopen(p.c_str(), RTLD_NOW | RTLD_GLOBAL);
         if (h != nullptr) {
-            fprintf(stderr, "[sr_qnn_proc] fastrpc preloaded: %s\n", p.c_str());
+            fprintf(stderr, "[sr_qnn_proc] fastrpc preloaded: %s", p.c_str());
+            fputc(10, stderr);
             return;
         }
         const char* msg = dlerror();
         if (firstErr.empty()) {
             firstErr = std::string(p) + " -> " + (msg != nullptr ? msg : "unknown");
         }
+        // 2) fd 方式：绝对路径时绕过 namespace 的路径白名单
+        if (!p.empty() && p[0] == '/') {
+            const std::string base = p.substr(p.find_last_of('/') + 1);
+            h = DlopenByFd(p.c_str(), base.c_str());
+            if (h != nullptr) {
+                fprintf(stderr, "[sr_qnn_proc] fastrpc preloaded(fd): %s", p.c_str());
+                fputc(10, stderr);
+                return;
+            }
+        }
     }
-    fprintf(stderr, "[sr_qnn_proc] fastrpc preload failed: %s\n", firstErr.c_str());
+    fprintf(stderr, "[sr_qnn_proc] fastrpc preload failed: %s", firstErr.c_str());
+    fputc(10, stderr);
 }
 
 }  // namespace
 
+// NDK 的 unistd.h 不导出 bionic 的 closefrom()，按 /proc/self/fd 自己实现。
+static void CloseFrom(int lowfd) {
+    DIR* d = opendir("/proc/self/fd");
+    if (d == nullptr) {
+        struct rlimit rl{};
+        if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+            const int maxFd = rl.rlim_cur > 4096 ? 4096 : static_cast<int>(rl.rlim_cur);
+            for (int fd = lowfd; fd < maxFd; ++fd) {
+                close(fd);
+            }
+        }
+        return;
+    }
+    const int dfd = dirfd(d);
+    std::vector<int> fds;
+    struct dirent* ent = nullptr;
+    while ((ent = readdir(d)) != nullptr) {
+        const int fd = atoi(ent->d_name);
+        if (fd >= lowfd && fd != dfd) {
+            fds.push_back(fd);
+        }
+    }
+    closedir(d);
+    for (int fd : fds) {
+        close(fd);
+    }
+}
+
 int main() {
+    // 第一件事：关掉所有继承的 fd（3 以上）。
+    // 宿主若是 Qt 应用，父进程带着数百个 Vulkan/GL/dmabuf/eventfd 进来；Android 的
+    // 这些 fd 多数没有 O_CLOEXEC，exec 后会一路留在子进程里。QNN 的 HTP 后端在
+    // QnnDevice_create 阶段要自己开 /dev/adsprpc-smd 并做 mmap，残留 fd 会干扰它的
+    // 设备探测（Python 宿主走 posix_spawn + pass_fds，天生只有 0/1/2 三个 fd，
+    // 所以同一份二进制在那边一直是好的）。协议通道用的 0/1 不受影响。
+    CloseFrom(3);
     // 第一行必须无条件打到 stderr：父进程靠它区分"exec/动态链接就失败"和"崩在引擎里"。
     fprintf(stderr, "[sr_qnn_proc] entry (build " __DATE__ " " __TIME__ ")\n");
     fflush(stderr);
+    {
+        // 残留 fd 计数：排障时和 Python 宿主（应为 0）对照
+        int openFds = 0;
+        DIR* fdDir = opendir("/proc/self/fd");
+        if (fdDir != nullptr) {
+            while (readdir(fdDir) != nullptr) {
+                ++openFds;
+            }
+            closedir(fdDir);
+        }
+        fprintf(stderr, "[sr_qnn_proc] openFds(>2)=%d\n", openFds > 2 ? openFds - 2 : 0);
+        const char* adsp = getenv("ADSP_LIBRARY_PATH");
+        fprintf(stderr, "[sr_qnn_proc] ADSP_LIBRARY_PATH=%s\n", adsp != nullptr ? adsp : "(unset)");
+        const char* dsp = getenv("DSP_LIBRARY_PATH");
+        fprintf(stderr, "[sr_qnn_proc] DSP_LIBRARY_PATH=%s\n", dsp != nullptr ? dsp : "(unset)");
+        fflush(stderr);
+    }
+    // 进程属性诊断：QNN 的 device_create 对 SELinux 域 / seccomp / cgroup 敏感。
+    // 能跑通 NPU 的 Python 版和失败的 C++ 版都是 untrusted_app，差在哪只能逐项比。
+    {
+        char buf[1024];
+        FILE *pf = fopen("/proc/self/attr/current", "r");
+        if (pf != nullptr) {
+            if (fgets(buf, sizeof(buf), pf) != nullptr) {
+                buf[strcspn(buf, "\n")] = 0;
+                fprintf(stderr, "[sr_qnn_proc] selinux=%s\n", buf);
+            }
+            fclose(pf);
+        }
+        pf = fopen("/proc/self/cgroup", "r");
+        if (pf != nullptr) {
+            int ci = 0;
+            while (fgets(buf, sizeof(buf), pf) != nullptr && ci < 4) {
+                buf[strcspn(buf, "\n")] = 0;
+                fprintf(stderr, "[sr_qnn_proc] cgroup[%d]=%s\n", ci++, buf);
+            }
+            fclose(pf);
+        }
+        pf = fopen("/proc/self/status", "r");
+        if (pf != nullptr) {
+            while (fgets(buf, sizeof(buf), pf) != nullptr) {
+                if (strncmp(buf, "Seccomp", 7) == 0 || strncmp(buf, "CapEff", 6) == 0
+                    || strncmp(buf, "NoNewPrivs", 10) == 0
+                    || strncmp(buf, "Cpus_allowed_list", 17) == 0) {
+                    buf[strcspn(buf, "\n")] = 0;
+                    fprintf(stderr, "[sr_qnn_proc] %s\n", buf);
+                }
+            }
+            fclose(pf);
+        }
+        fflush(stderr);
+    }
     // 抢走协议 fd，再把 fd1 指向 stderr：引擎里的 printf 不能污染协议流。
     int protoFd = dup(1);
     if (protoFd >= 0) {

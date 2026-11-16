@@ -6,15 +6,20 @@
 #pragma once
 
 #include <QImage>
+#include <QStringList>
 #include <QWidget>
 
+#include "../jm_api.h"
 #include "../sr_engine.h"
 #include "comic_view.h"
 #include "models.h"
+#include "nas_store.h"
 
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QBoxLayout;
+class QResizeEvent;
 class QScrollArea;
 class QStackedWidget;
 class QTabWidget;
@@ -224,6 +229,8 @@ signals:
     // 关键词原样传入（作者名不拼前缀、不再追加"作品"之类的修饰），
     // 落到搜索页即自动搜索，用户不需要再点一次"搜索"。
     void SearchRequested(const QString &keyword);
+    // 详情页"评论"：带着作品进入评论区（Python BookInfoView 的评论入口）
+    void CommentsRequested(const Comic &c);
 
 private:
     void BuildChapters();
@@ -231,7 +238,14 @@ private:
     void UpdateCover();
     // 顶部元信息：章节数未到（/=0 未知）时不写"更新至 0 话"；作者名做成可点链接
     void UpdateMeta();
+    // 顶部"封面 + 信息列"的横排/堆叠必须在**页面实际宽度**上算，
+    // 且在窗口 size 变化时重算（见 .cpp 里 ApplyTopLayout 的注释）。
+    void ApplyTopLayout();
 
+protected:
+    void resizeEvent(QResizeEvent *e) override;
+
+private:
     Comic c_;
     QVector<Chapter> chapters_;   // 只来自 /album；空 = 显示"暂无章节"
     QString coverUrl_;
@@ -245,6 +259,12 @@ private:
     FlowLayout *tagFlow_ = nullptr;   // 标签多时自动换行（对齐 Python 版 FlowLayout）
     QWidget *chapterHost_ = nullptr;
     QPushButton *favBtn_ = nullptr;
+    QBoxLayout *topLayout_ = nullptr;  // 封面 + 信息列的容器布局，运行时切方向（横排/堆叠）
+    class QScrollArea *scroll_ = nullptr;   // 详情页的纵向滚动区（量可用宽度用）
+    QWidget *body_ = nullptr;         // 滚动内容（页边距从这里读，避免与构造期口径不一致）
+    bool topSide_ = false;            // 当前是否"左图右文"
+    bool topApplied_ = false;         // 是否已按真实宽度算过一次
+    bool topCheckPending_ = false;    // 已排了一次"布局稳定后再算"
     int currentChapter_ = 0;
 };
 
@@ -451,15 +471,45 @@ private:
     QVBoxLayout *list_ = nullptr;
 };
 
-// ---------------------------------------------------------------- 评论
+// ---------------------------------------------------------------- 评论（作品评论）
 class CommentPage : public PageBase
 {
     Q_OBJECT
 public:
+    enum class State { NoAlbum, Loading, Empty, Error, Ready };
     explicit CommentPage(QWidget *parent = nullptr);
+    // 进入某本书的评论区（详情页"评论"按钮 / 回归 CLI 共用）
+    void SetAlbum(const QString &albumId, const QString &title);
+    void SetItems(const QVector<JmComment> &items, int total, int page, const QString &albumId);
+    void SetState(State state, const QString &detail = QString());
+    void SetSendResult(bool ok, const QString &message);
+    QString StateName() const;
+    int RowCount() const;
+    QString AlbumId() const { return albumId_; }
+
+signals:
+    void RefreshRequested(const QString &albumId, int page);
+    void SendRequested(const QString &albumId, const QString &text);
+    void LoginRequested();
 
 private:
+    void ApplyState();
+    void Submit();
+
     QVBoxLayout *list_ = nullptr;
+    QLineEdit *edit_ = nullptr;
+    QPushButton *send_ = nullptr;
+    QLabel *hint_ = nullptr;
+    QLabel *sendStatus_ = nullptr;
+    class LoadingBar *loading_ = nullptr;
+    class EmptyState *empty_ = nullptr;
+    QString albumId_;
+    QString albumTitle_;
+    State state_ = State::NoAlbum;
+    QString stateDetail_;
+    int total_ = 0;
+    int page_ = 1;
+    int rows_ = 0;
 };
 
 // ---------------------------------------------------------------- 超分
@@ -525,6 +575,9 @@ class SettingsView : public PageBase
     Q_OBJECT
 public:
     explicit SettingsView(QWidget *parent = nullptr);
+    // 进页时对齐引擎当前模型：在超分页换过模型后回到设置页，
+    // 选择栏不能还显示旧值（下拉框时代这里是靠重建页面才对上的）
+    void OnEnter() override;
 
     // 阅读模式：0~8，与 ReaderView/Python ReadMode 同序
     void SetReadingMode(int mode, bool persist = true);
@@ -548,6 +601,7 @@ private:
     QString filter_;
     class QComboBox *readMode_ = nullptr;
     class QLabel *cacheLabel_ = nullptr;
+    SrModelField *modelField_ = nullptr;
 };
 
 // ---------------------------------------------------------------- 我的评论
@@ -555,21 +609,70 @@ class MyCommentPage : public PageBase
 {
     Q_OBJECT
 public:
+    // 与收藏页同一套四态：未登录 / 加载中 / 空 / 失败 / 就绪
+    enum class State { NotLoggedIn, Loading, Empty, Error, Ready };
     explicit MyCommentPage(QWidget *parent = nullptr);
+    void OnEnter() override;
+    // page == 1 时替换整列，> 1 时追加（翻页）
+    void SetItems(const QVector<JmComment> &items, int total, int page);
+    void SetState(State state, const QString &detail = QString());
+    QString StateName() const;
+    int RowCount() const;
+
+signals:
+    void RefreshRequested(int page);
+    void LoginRequested();
+    void OpenAlbum(const QString &albumId);
 
 private:
+    void ApplyState();
     QVBoxLayout *list_ = nullptr;
+    QScrollArea *area_ = nullptr;
+    class LoadingBar *loading_ = nullptr;
+    QLabel *hint_ = nullptr;
+    EmptyState *empty_ = nullptr;
+    QPushButton *refresh_ = nullptr;
+    State state_ = State::NotLoggedIn;
+    QString stateDetail_;
+    int total_ = 0;
+    int page_ = 1;
+    int rows_ = 0;
 };
 
-// ---------------------------------------------------------------- 观看记录
+// ---------------------------------------------------------------- 观看记录（云端）
 class RemoteHistoryPage : public PageBase
 {
     Q_OBJECT
 public:
+    enum class State { NotLoggedIn, Loading, Empty, Error, Ready };
+    static constexpr int kPageSize = 80;   // 服务端每页条数（实测 80）
     explicit RemoteHistoryPage(QWidget *parent = nullptr);
+    void OnEnter() override;
+    void SetItems(const QVector<Comic> &items, int total, int page);
+    void SetState(State state, const QString &detail = QString());
+    QString StateName() const;
+    int CardCount() const;
+
+signals:
+    void RefreshRequested(int page);
+    void OpenComic(const Comic &c);
+    void LoginRequested();
 
 private:
-    QVBoxLayout *list_ = nullptr;
+    void ApplyState();
+    ComicGrid *grid_ = nullptr;
+    class LoadingBar *loading_ = nullptr;
+    QWidget *content_ = nullptr;
+    QWidget *emptyHost_ = nullptr;
+    QWidget *moreHost_ = nullptr;
+    EmptyState *empty_ = nullptr;
+    QLabel *hint_ = nullptr;
+    QPushButton *sync_ = nullptr;
+    QPushButton *more_ = nullptr;
+    State state_ = State::NotLoggedIn;
+    QString stateDetail_;
+    int total_ = 0;
+    int page_ = 1;
 };
 
 // ---------------------------------------------------------------- 本地收藏
@@ -578,17 +681,59 @@ class LocalFavoritePage : public PageBase
     Q_OBJECT
 public:
     explicit LocalFavoritePage(QWidget *parent = nullptr);
+    void OnEnter() override;
+    void Rescan();
+    // 回归：ASCII 一行（root=... items=N）
+    QString Report() const;
+
+signals:
+    // 打开某个本地归档目录（id 存的是绝对路径，走本地页浏览图片）
+    void OpenLocal(const QString &path);
 
 private:
-    QVBoxLayout *list_ = nullptr;
+    ComicGrid *grid_ = nullptr;
+    EmptyState *empty_ = nullptr;
+    QLabel *hint_ = nullptr;
+    QString root_;
 };
 
-// ---------------------------------------------------------------- 每周必看
+// ---------------------------------------------------------------- 每周必看 / 连载更新
 class WeekPage : public PageBase
 {
     Q_OBJECT
 public:
+    enum class State { Loading, Empty, Error, Ready };
     explicit WeekPage(QWidget *parent = nullptr);
+    void OnEnter() override;
+    void SetItems(const QVector<Comic> &items, int total, int page);
+    void SetState(State state, const QString &detail = QString());
+    QString StateName() const;
+    int CardCount() const;
+    // 回归：直接切换筛选并请求（等价于点下拉框）
+    void SelectFilter(int typeIndex, int dayIndex);
+
+signals:
+    // type: all/manga/hanman；day: 0=全部，1~7=周一~周日
+    void RefreshRequested(const QString &type, int day, int page);
+    void OpenComic(const Comic &c);
+
+private:
+    void ApplyState();
+    void Request(int page);
+    ComicGrid *grid_ = nullptr;
+    class LoadingBar *loading_ = nullptr;
+    QWidget *content_ = nullptr;
+    QWidget *emptyHost_ = nullptr;
+    QWidget *pager_ = nullptr;
+    EmptyState *empty_ = nullptr;
+    QLabel *hint_ = nullptr;
+    QPushButton *more_ = nullptr;
+    QComboBox *type_ = nullptr;
+    QComboBox *day_ = nullptr;
+    State state_ = State::Loading;
+    QString stateDetail_;
+    int total_ = 0;
+    int page_ = 1;
 };
 
 // ---------------------------------------------------------------- 网络存储
@@ -597,9 +742,41 @@ class NasPage : public PageBase
     Q_OBJECT
 public:
     explicit NasPage(QWidget *parent = nullptr);
+    void OnEnter() override;
+    // 重新读 ui.ini 并重建行（添加/删除/校验完成后都会走这里）
+    void Reload();
+    // 回归：直接增删（不经过表单），成功返回节点 id
+    QString AddNodeForTest(const QString &name, const QString &type, const QString &target,
+                           const QString &user, const QString &pass, QString *error);
+    bool RemoveNodeForTest(const QString &id);
+    bool ProbeNodeForTest(const QString &id);   // 同步校验 local/smb；webdav 返回 false
+    // 回归：ASCII 一行（nodes=N ready=M form=0/1）
+    QString Report() const;
+
+signals:
+    // 本地/SMB 归档目录交给本地页浏览
+    void OpenLocal(const QString &path);
 
 private:
+    void BuildForm(QVBoxLayout *lay, QWidget *body);
+    void SetFormOpen(bool open);
+    void RebuildRows();
+    void Persist();
+    void ProbeOne(int index);
+    void AddFromForm();
+
     QVBoxLayout *list_ = nullptr;
+    QWidget *form_ = nullptr;
+    QLineEdit *nameEdit_ = nullptr;
+    QLineEdit *targetEdit_ = nullptr;
+    QLineEdit *userEdit_ = nullptr;
+    QLineEdit *passEdit_ = nullptr;
+    QComboBox *typeCombo_ = nullptr;
+    QPushButton *addBtn_ = nullptr;
+    QLabel *hint_ = nullptr;
+    QVector<NasNode> nodes_;
+    bool formOpen_ = false;
+    bool busy_ = false;
 };
 
 // ---------------------------------------------------------------- 批量超分
@@ -642,28 +819,95 @@ class AboutPage : public PageBase
     Q_OBJECT
 public:
     explicit AboutPage(QWidget *parent = nullptr);
+    // 版本行：构造号 + 参与更新比较的发行线（两条线不同，必须都写出来）
+    void SetVersionInfo(const QString &appVersion, const QString &releaseLine);
+    // 更新检查的状态文案（"正在检查…" / "已是最新 v1.3.7" / "有更新：v1.3.8"）
+    void SetUpdateStatus(const QString &text, bool ok);
+    // 有新版本时的更新日志预览 + 下载入口
+    void SetUpdateResult(const QString &newVersion, const QString &changelog);
+    void SetConfigLine(const QString &text);
+    // 日志导出结果（成功给路径，失败给原因）
+    void SetExportResult(bool ok, const QString &detail);
+    QString UpdateStatusText() const;
+    QString ConfigLineText() const;
+
+signals:
+    void ExportLogsRequested();
+    void CheckUpdateRequested();
+    void OpenLogDirRequested();
+    void OpenUrlRequested(const QString &url);
+
+private:
+    QLabel *version_ = nullptr;
+    QLabel *updateStatus_ = nullptr;
+    QLabel *configLine_ = nullptr;
+    QLabel *changelog_ = nullptr;
+    QPushButton *downloadBtn_ = nullptr;
+    QPushButton *logBtn_ = nullptr;
+    QPushButton *checkBtn_ = nullptr;
+    QString downloadUrl_ = QStringLiteral("https://github.com/tonquer/JMComic-qt/");
 };
 
-// ---------------------------------------------------------------- 登录
+// ---------------------------------------------------------------- 登录 / 注册 / 找回密码
 class LoginPage : public PageBase
 {
     Q_OBJECT
 public:
+    enum class Panel { None, Register, Forgot };
     explicit LoginPage(QWidget *parent = nullptr);
     void SetStatus(const QString &text, bool ok);
     void SetBusy(bool busy);
     // 登录成功后状态行 + "退出登录"按钮要立刻跟着变（原来只在构造时读一次
-    // 会话，登录完还得切页/重启才看得到退出入口）。
+    // 会话，登录完还得切页/重启才看到退出入口）。
     void SetLoggedIn(bool on, const QString &name = QString());
+
+    // ---- 注册 / 找回密码面板 ----
+    void ShowPanel(Panel panel);
+    Panel CurrentPanel() const { return panelMode_; }
+    void SetPanelStatus(const QString &text, bool ok);
+    void SetPanelBusy(bool busy);
+    void SetCaptcha(const QImage &image);
+    void SetCaptchaError(const QString &why);
+    QString PanelStatusText() const;
 
 signals:
     // 真实登录：外壳调 /login，成功后把 avs 落库并刷新侧栏
     void LoginRequested(const QString &user, const QString &pass);
     // 退出登录：页面已清 UI，外壳还要把 JmApi 里的 avs 一起清掉
     void LogoutRequested();
+    // 注册（字段与 Python RegisterReq 一致）
+    void RegisterRequested(const QString &user, const QString &email, const QString &pass,
+                           const QString &pass2, const QString &gender, const QString &captcha);
+    void ResetPasswordRequested(const QString &email);
+    // 重发注册验证邮件（Python RegisterVerifyMailReq）
+    void ResendVerifyRequested(const QString &user, const QString &pass);
+    void CaptchaRefreshRequested();
 
 private:
+    void BuildAuthPanel(QVBoxLayout *colLay, QWidget *column);
+    void ApplyPanelMode();
+    void SubmitPanel();
+
     QLabel *status_ = nullptr;
     QPushButton *loginBtn_ = nullptr;
     QPushButton *logoutBtn_ = nullptr;
+    QPushButton *regLink_ = nullptr;
+    QPushButton *forgotLink_ = nullptr;
+
+    QWidget *panel_ = nullptr;
+    QLabel *panelTitle_ = nullptr;
+    QLabel *panelStatus_ = nullptr;
+    QLineEdit *regUser_ = nullptr;
+    QLineEdit *regEmail_ = nullptr;
+    QLineEdit *regPass_ = nullptr;
+    QLineEdit *regPass2_ = nullptr;
+    QLineEdit *regCaptcha_ = nullptr;
+    QComboBox *regGender_ = nullptr;
+    QLabel *captchaView_ = nullptr;
+    QPushButton *captchaBtn_ = nullptr;
+    QPushButton *panelSubmit_ = nullptr;
+    QPushButton *panelCancel_ = nullptr;
+    QPushButton *resendBtn_ = nullptr;
+    Panel panelMode_ = Panel::None;
+    bool panelBusy_ = false;
 };

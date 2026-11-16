@@ -161,6 +161,19 @@ void SortResults(QVector<NodeResult> &results, const QString &selectedIp,
                  NodeSortMode mode = NodeSortMode::Smart);
 QString PickBest(const QVector<NodeResult> &results, const QString &current);
 
+// ---------------- 节点测速并发度（0.91 新增） ----------------
+// proxy/speedThreads，读写入 ui.ini 的 proxy/ 分组；取值恒被夹在 [1,16]。
+// 语义（刻意让「1」不等于「1 个工作线程」，以保证升级后行为逐字节不变）：
+//   1     = 兼容档（默认）：沿用 NodeTester 的单线程事件循环 + 8 个在飞请求，
+//           不创建任何工作线程，是 0.90 及以前的全部行为；
+//   2..16 = 新增工作线程池：每个线程一次只跑 1 个阻塞探测，最多 16 个线程
+//           同时测速；线程数即真实 OS 线程数，不是"在飞请求数"。
+// ClampSpeedThreads 是纯函数（不读盘、不改状态），供 UI 与离线自检共用。
+constexpr int kMaxSpeedThreads = 16;
+int ClampSpeedThreads(int n);
+int SpeedThreads();
+void SetSpeedThreads(int n);
+
 // ---------------- 线路测速结果与线路推荐 ----------------
 QVector<LineTestResult> LineResults();
 void SetLineResults(const QVector<LineTestResult> &results);

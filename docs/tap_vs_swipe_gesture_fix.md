@@ -1,5 +1,10 @@
 # 滑动 vs 点击：下拉选项框与二级菜单的误触修复
 
+> **后续修订（2026-11-15，共两轮）**：保护范围已扩展到所有可交互区域，补齐
+> Android 触摸链路，并修复了弹窗/二级子菜单 mouse replay 造成的残留误触。
+> 最新阈值与作用域以 `docs/tap_vs_swipe_popups_overlay_fix.md` 和
+> `cpp/shell/ui/touch.h` 的注释为准；本文仅作历史记录。
+
 日期：2026-11-13
 涉及文件：`cpp/shell/ui/touch.cpp`、`cpp/shell/ui/touch.h`、`cpp/shell/ui/ui_kit.cpp`、
 `cpp/shell/ui/ui_kit.h`、`cpp/shell/ui/ui_main_window.cpp`

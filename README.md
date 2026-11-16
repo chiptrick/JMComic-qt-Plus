@@ -94,3 +94,58 @@ CI：`.github/workflows/android.yml` 跑宿主回归（字节码、`*.sh` 语法
 * 沿用上游 **GNU LGPL v3**，见 [LICENSE](LICENSE)；修改部分同样以 LGPL v3 提供。
 * 上游项目：[tonquer/JMComic-qt](https://github.com/tonquer/JMComic-qt)；第三方组件与归属见 [NOTICE.md](NOTICE.md)。
 * 上游桌面端代码版权归原作者所有，本分支不主张其版权。
+
+---
+
+## 5. 开源项目声明与感谢
+
+本项目在实现与参考过程中使用了下列开源项目及其成果。正是这些项目让本仓库的
+两套客户端成为可能，在此向所有作者与维护者表示诚挚感谢。许可证与归属信息
+**以上游项目为准**，完整清单亦见 [NOTICE.md](NOTICE.md)。
+
+### 5.1 上游与直接参考的项目
+
+| 项目 | 在本项目中的角色 | 许可（以上游为准） |
+|---|---|---|
+|[JMComic-qt](https://github.com/tonquer/JMComic-qt)|本仓库的上游项目，Python 版桌面端代码与 Android 移植基础；C++ 版主题 QSS 亦复用其设计|LGPL-3.0|
+|[JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python)|接口协议与图片分割/还原算法的参考实现|MIT|
+|[sr-vulkan](https://github.com/tonquer/sr-vulkan)|Python 版桌面端超分后端参考|以上游为准|
+|[waifu2x-ncnn-vulkan](https://github.com/nihui/waifu2x-ncnn-vulkan)、[Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)、[realcugan-ncnn-vulkan](https://github.com/nihui/realcugan-ncnn-vulkan)|超分算法与模型格式的参考实现|各项目上游许可|
+|[local-dream](https://github.com/xororz/local-dream)|Android 端 QNN/HTP 超分实现（运行时库部署、FastRPC 依赖解析等）的参考|以上游为准|
+|[RealSR-NCNN-Android](https://github.com/tumuyan/RealSR-NCNN-Android)|C++ 版 Vulkan 超分后端（tile 分档、性能与 DEVICE_LOST 处理）的参考实现|以上游为准|
+
+### 5.2 界面、运行时与构建
+
+| 项目 | 在本项目中的角色 | 许可（以上游为准） |
+|---|---|---|
+|[Qt / PySide6](https://www.qt.io/qt-for-python)|C++ 版 Qt 6 Widgets/Quick 与 Python 版界面框架（含 Android）|LGPL-3.0|
+|[CPython](https://www.python.org/)|Python 版及打进 APK 的 Python 运行时|PSF-2.0|
+|[python-for-android](https://github.com/kivy/python-for-android)、[buildozer](https://github.com/kivy/buildozer)|Python Android APK 打包链|MIT|
+|[Android NDK](https://developer.android.com/ndk)、CMake、Ninja|C++ 版 Android 与本地构建|各项目上游许可|
+|[Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers)|C++ Vulkan 超分后端所用头文件|Khronos 上游许可|
+
+### 5.3 网络、安全与图像处理
+
+| 项目 | 在本项目中的角色 | 许可（以上游为准） |
+|---|---|---|
+|[OpenSSL](https://www.openssl.org/)|TLS / ECH / QUIC-TLS 实现|Apache-2.0|
+|[ngtcp2](https://github.com/ngtcp2/ngtcp2)、[nghttp3](https://github.com/nghttp3/nghttp3)|C++ 版 HTTP/3 协议栈|MIT|
+|[curl_cffi](https://github.com/lexiforest/curl_cffi)（内含 [curl-impersonate](https://github.com/lwthiker/curl-impersonate) / curl）|Python 版 HTTP 客户端与浏览器指纹模拟|MIT|
+|[ONNX Runtime](https://github.com/microsoft/onnxruntime)|C++ 版与 Python 版的超分推理运行时|MIT|
+|[libwebp](https://github.com/webmproject/libwebp)|C++ 版内嵌的 WebP 图片解码|BSD-3-Clause|
+|[Pillow](https://python-pillow.org/)|Python 版图片解码/编码|MIT-CMU|
+
+### 5.4 Python 工具库
+
+Python 版还使用了 [lxml](https://lxml.de/)、[beautifulsoup4](https://www.crummy.com/software/BeautifulSoup/)、
+[pycryptodomex](https://www.pycryptodome.org/)、[PySocks](https://github.com/Anorov/PySocks)、
+[natsort](https://github.com/SethMMorton/natsort)、[webdavclient3](https://github.com/designerror/webdav-client-python-3)、
+[tqdm](https://github.com/tqdm/tqdm)、[pysmb](https://github.com/miketeo/pysmb)、
+[smbprotocol](https://github.com/jborean93/smbprotocol)、[cryptography](https://github.com/pyca/cryptography)
+等库，分别用于 HTML 解析、加解密、代理、自然排序、WebDAV/SMB 上传、进度显示等。
+感谢这些项目的维护者。
+
+> **说明**：[Qualcomm QNN SDK](https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct)
+> 运行时属于 Qualcomm 专有组件，并非开源软件；本仓库仅提供接入脚本，不授予其任何权利，
+> 分发含该运行时的 APK 前请自行确认符合 Qualcomm 许可条款。
+> 超分 ONNX 权重文件不在本仓库中，许可证以来源仓库为准。

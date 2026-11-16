@@ -3,6 +3,7 @@
 #include <QSettings>
 
 #include "app_paths.h"
+#include "data_migrator.h"
 
 namespace {
 
@@ -93,6 +94,7 @@ bool Add(const QString &keyword)
                  qPrintable(path));
         return false;
     }
+    DataMigrator::RollingBackup(path);
     return true;
 }
 
@@ -108,6 +110,8 @@ void Clear()
     s.sync();
     if (s.status() != QSettings::NoError)
         qWarning("search-history: 清空失败 status=%d", int(s.status()));
+    else
+        DataMigrator::RollingBackup(path);
 }
 
 QString Report()

@@ -46,6 +46,8 @@ struct NodeHttpJob
     bool truncated = false;
     QString location;
     QByteArray altSvc;      // HTTP/1.1 响应头 alt-svc（Q3：命中才值得走 H3）
+    // 响应头原样留存（键小写，同名拼接）：账号网页流程要拿 set-cookie 复用会话
+    QHash<QString, QString> respHeaders;
     bool finished = false;
     int redirects = 0;
     QElapsedTimer clock;
@@ -257,6 +259,12 @@ bool ParseHead(NodeHttpJob *j)
             continue;
         const QByteArray key = line.left(colon).trimmed().toLower();
         const QByteArray val = line.mid(colon + 1).trimmed();
+        // 全量留存（保留原始大小写以外的全部信息）；同名头换行拼接。
+        const QString k = QString::fromLatin1(key);
+        const QString v = QString::fromUtf8(val);
+        const auto it = j->respHeaders.find(k);
+        j->respHeaders.insert(k, it == j->respHeaders.end() ? v
+                                                            : it.value() + QLatin1Char('\n') + v);
         if (key == QByteArrayLiteral("content-length")) {
             j->contentLength = val.toLongLong();
         } else if (key == QByteArrayLiteral("transfer-encoding")) {
@@ -409,6 +417,7 @@ NodeHttpResponse MakeResponse(NodeHttpJob *j, bool ok, const QString &error)
     r.error = error;
     r.elapsedMs = j->clock.elapsed();
     r.finalUrl = j->req.url.toString();
+    r.headers = j->respHeaders;
     return r;
 }
 

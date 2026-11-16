@@ -545,6 +545,7 @@ struct ModelEntry {
     int nativeScale = 2;   // 模型原生放大倍数
     int denoise = 0;       // 降噪等级
     int tile = 192;        // 固定输入边长(QNN 不支持动态 shape)
+    bool quant = false;    // QDQ 量化模型(w8a16)：图首/图尾自带 Q/DQ
 };
 
 struct ModelSlot {
@@ -556,13 +557,15 @@ std::vector<ModelSlot> g_models;
 std::mutex g_modelsMutex;
 std::string g_modelDir;
 
-void AddModel(const std::string& name, const std::string& file, int scale, int denoise, int tile) {
+void AddModel(const std::string& name, const std::string& file, int scale, int denoise, int tile,
+              bool quant = false) {
     ModelSlot slot;
     slot.entry.name = name;
     slot.entry.file = file;
     slot.entry.nativeScale = scale;
     slot.entry.denoise = denoise;
     slot.entry.tile = tile;
+    slot.entry.quant = quant;
     g_models.push_back(slot);
     return;
 }
@@ -653,7 +656,9 @@ void BuildBuiltinModels() {
     return;
 }
 
-/* models.txt 覆盖内置表：每行 "<模型名> <文件名> <倍数> <降噪> <tile>"，以空白分隔 */
+/* models.txt 覆盖内置表：每行 "<模型名> <文件名> <倍数> <降噪> <tile> [arch]"，
+ * 以空白分隔。第 6 列 arch 可省略；写 quant 表示 QDQ 量化模型，会话会改用
+ * "整图归 QNN"的量化 I/O 策略（见 CreateSession）。 */
 void LoadModelOverride(const std::string& dir) {
     std::string path = JoinPath(dir, "models.txt");
     FILE* fp = fopen(path.c_str(), "r");
@@ -668,13 +673,16 @@ void LoadModelOverride(const std::string& dir) {
         }
         char name[128] = {0};
         char file[256] = {0};
+        char arch[32] = {0};
         int scale = 2;
         int denoise = 0;
         int tile = 192;
-        int n = sscanf(text.c_str(), "%127s %255s %d %d %d", name, file, &scale, &denoise, &tile);
+        int n = sscanf(text.c_str(), "%127s %255s %d %d %d %31s", name, file, &scale, &denoise,
+                       &tile, arch);
         if (n < 2) {
             continue;
         }
+        const bool quant = (n >= 6 && strcmp(arch, "quant") == 0);
         std::string key(name);
         bool found = false;
         for (auto& slot : g_models) {
@@ -683,12 +691,13 @@ void LoadModelOverride(const std::string& dir) {
                 slot.entry.nativeScale = scale > 0 ? scale : 2;
                 slot.entry.denoise = denoise;
                 slot.entry.tile = tile > 0 ? tile : 192;
+                slot.entry.quant = quant;
                 found = true;
                 break;
             }
         }
         if (!found) {
-            AddModel(key, file, scale > 0 ? scale : 2, denoise, tile > 0 ? tile : 192);
+            AddModel(key, file, scale > 0 ? scale : 2, denoise, tile > 0 ? tile : 192, quant);
         }
     }
     fclose(fp);
@@ -871,6 +880,13 @@ bool SharedMemoryAvailable() {
 }
 
 void PrepareQnnSearchPath() {
+    // 调用方已完整接管 DSP skel 路径时跳过（JM_QNN_NO_ADSP=1）：
+    // App 子进程里"厂商签名 skel 优先"反而是坑 —— 签名的 V79 是给设备自带
+    // QNN 2.51 用的，与随包的 2.42 运行时 ABI 不匹配，分区为 0；改用我们
+    // 复制到 filesDir 的那份同版本未签名 skel 才能配上对。
+    if (getenv("JM_QNN_NO_ADSP") != nullptr) {
+        return;
+    }
     Dl_info info;
     if (dladdr(reinterpret_cast<void*>(&srq_init), &info) == 0 || info.dli_fname == nullptr) {
         return;
@@ -941,6 +957,9 @@ OrtSession* CreateSession(const std::string& modelPath, const ModelEntry& entry,
         return nullptr;
     }
     g_api->SetIntraOpNumThreads(options, g_threads);
+    if (EnvFlag("JM_QNN_ORTLOG", false)) {
+        g_api->AddSessionConfigEntry(options, "session.log_severity_level", "0");
+    }
     // 关键：QNN 会话只开 BASIC 级优化。
     // ORT 的 Level-2 优化会把 Conv+LeakyRelu 融合成 CPU EP 专属的
     // com.microsoft.FusedConv —— QNN EP 不认识这个算子，分区时整张图连带所有下游
@@ -1007,6 +1026,15 @@ OrtSession* CreateSession(const std::string& modelPath, const ModelEntry& entry,
         addOption("backend_path", backend);
         addOption("device_id", std::to_string(g_device));
         addOption("profiling_level", "off");
+        // 量化模型（w8a16 的 QDQ 图）在输入端/输出端各有一对 QuantizeLinear /
+        // DequantizeLinear。QNN EP 默认把这些 I/O 量化 offload 给 CPU EP
+        // (offload_graph_io_quantization=1)，而严格档同时设了
+        // session.disable_cpu_ep_fallback=1 —— 一边把节点推给 CPU、一边禁止 CPU
+        // 兜底，建会话就会失败，外部表现就是"量化模型死活只能跑 CPU"。
+        // 让 QNN 自己执行 I/O 量化，整图才真正落在 NPU 上。
+        if (entry.quant) {
+            addOption("offload_graph_io_quantization", "0");
+        }
         // GPU(Adreno) 与 HTP(DSP) 的选项互不通用：把 htp_* / vtcm_mb /
         // enable_htp_fp16_precision 传给 GPU 后端，QnnBackend 初始化会直接失败，
         // 表现为"EP 挂上了但一个节点都不接"。所以按后端类型分流。
@@ -1070,6 +1098,18 @@ OrtSession* CreateSession(const std::string& modelPath, const ModelEntry& entry,
         for (size_t i = 0; i < keysStore.size(); ++i) {
             keys.push_back(keysStore[i].c_str());
             values.push_back(valuesStore[i].c_str());
+        }
+        // 诊断：把本档位真正下发的 provider options 打到 stderr。
+        // 这是排障的核心证据链 —— 只有两边参数逐项可比，才能定位 device_create
+        // 为什么在某个宿主里报 INVALID_CONFIG。
+        if (g_debug) {
+            fprintf(stderr, "[sr_qnn] try tier=%d strict=%d cache=%d opts=%zu\n", tier,
+                    strictHtp ? 1 : 0, useContextCache ? 1 : 0, keysStore.size());
+            for (size_t oi = 0; oi < keysStore.size(); ++oi) {
+                fprintf(stderr, "[sr_qnn]   %s=%s\n", keysStore[oi].c_str(),
+                        valuesStore[oi].c_str());
+            }
+            fflush(stderr);
         }
         status = g_api->SessionOptionsAppendExecutionProvider(options, "QNN", keys.data(),
                                                              values.data(), keys.size());
@@ -1956,6 +1996,11 @@ static void ApplyQuantizedPreference() {
 int srq_init(void) {
     if (g_inited) {
         return 0;
+    }
+    // 排障开关：JM_QNN_DEBUG=1 打开引擎级诊断（options 明细、降级链、缓存命中）。
+    // 之前只由 Python 侧调 srq_set_debug 打开，C++ 宿主没有入口。
+    if (getenv("JM_QNN_DEBUG") != nullptr) {
+        g_debug = true;
     }
     if (g_api == nullptr) {
         const OrtApiBase* apiBase = g_ortGetApiBase != nullptr ? g_ortGetApiBase() : nullptr;

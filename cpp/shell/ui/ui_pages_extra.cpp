@@ -83,147 +83,204 @@ QScrollArea *WrapScroll(QWidget *content, QWidget *parent)
 
 }  // namespace
 
-// ============================================================ 我的评论
-MyCommentPage::MyCommentPage(QWidget *parent) : PageBase(parent)
-{
-    auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(0, 0, 0, 0);
-    auto *body = PageBody(this);
-    auto *lay = BodyLayout(body);
+// 我的评论 / 观看记录 / 本地收藏 / 网络存储 已迁到独立 TU：
+//   ui_pages_cloud.cpp（前三者）、ui_pages_nas.cpp（网络存储）。
 
-    QHBoxLayout *header = nullptr;
-    lay->addWidget(MakeHeader(QStringLiteral("我的评论"),
-                              QStringLiteral("评论数据来自账号接口"), body, &header));
-
-    auto *host = new QWidget(body);
-    list_ = new QVBoxLayout(host);
-    list_->setContentsMargins(0, 0, 0, 0);
-    list_->setSpacing(10);
-    lay->addWidget(host);
-    lay->addStretch(1);
-
-    list_->addWidget(new EmptyState(QStringLiteral("暂无评论"),
-                                    QStringLiteral("账号评论接口返回后会显示在这里。"),
-                                    QString(), host));
-
-    root->addWidget(body);
-}
-
-// ============================================================ 观看记录
-RemoteHistoryPage::RemoteHistoryPage(QWidget *parent) : PageBase(parent)
-{
-    auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(0, 0, 0, 0);
-    auto *body = PageBody(this);
-    auto *lay = BodyLayout(body);
-
-    QHBoxLayout *header = nullptr;
-    lay->addWidget(MakeHeader(QStringLiteral("观看记录"),
-                              QStringLiteral("云端记录（接口尚未接入）"), body, &header));
-    auto *refresh = new QPushButton(QStringLiteral("同步"), body);
-    refresh->setObjectName(QStringLiteral("Ghost"));
-    refresh->setCursor(Qt::PointingHandCursor);
-    header->addWidget(refresh);
-    connect(refresh, &QPushButton::clicked, this,
-            [this] { emit Toast(QStringLiteral("云端记录接口尚未接入")); });
-
-    auto *host = new QWidget(body);
-    list_ = new QVBoxLayout(host);
-    list_->setContentsMargins(0, 0, 0, 0);
-    list_->setSpacing(10);
-    lay->addWidget(host);
-    lay->addStretch(1);
-
-    list_->addWidget(new EmptyState(QStringLiteral("暂无观看记录"),
-                                    QStringLiteral("账号云端记录接口接入后，\n这里会显示跨设备进度。"),
-                                    QString(), host));
-
-    root->addWidget(body);
-}
-
-// ============================================================ 本地收藏
-LocalFavoritePage::LocalFavoritePage(QWidget *parent) : PageBase(parent)
-{
-    auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(0, 0, 0, 0);
-    auto *body = PageBody(this);
-    auto *lay = BodyLayout(body);
-
-    QHBoxLayout *header = nullptr;
-    lay->addWidget(MakeHeader(QStringLiteral("本地收藏"),
-                              QStringLiteral("已归档到本地的作品 · 不依赖网络"), body, &header));
-    auto *scan = new QPushButton(QStringLiteral("重新扫描"), body);
-    scan->setObjectName(QStringLiteral("Ghost"));
-    scan->setCursor(Qt::PointingHandCursor);
-    header->addWidget(scan);
-
-    auto *host = new QWidget(body);
-    list_ = new QVBoxLayout(host);
-    list_->setContentsMargins(0, 0, 0, 0);
-    list_->setSpacing(10);
-    lay->addWidget(host, 1);
-
-    auto *empty = new EmptyState(QStringLiteral("暂无本地收藏"),
-                                 QStringLiteral("本地归档目录为空。\n下载或导入作品后会显示在这里。"),
-                                 QString(), host);
-    list_->addWidget(empty);
-    connect(scan, &QPushButton::clicked, this, [this] {
-        emit Toast(QStringLiteral("本地归档目录为空"));
-    });
-
-    root->addWidget(body);
-}
-
-// ============================================================ 每周必看
+// ============================================================ 每周必看 / 连载更新
+// Python 对应 view/index/index_view.py 的 GetSerializationInfo：
+//   day  = weekBox 索引 + 1，> 7 -> 0（0 = 全部）
+//   type = ["all", "manga", "hanman"][categoryBox 索引]
+// 响应形状与观看记录一致（{list,total}），因此复用 JmApi 的列表解析。
 WeekPage::WeekPage(QWidget *parent) : PageBase(parent)
 {
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
-    auto *body = PageBody(this);
-    auto *lay = BodyLayout(body);
+    loading_ = new LoadingBar(this);
+    root->addWidget(loading_);
 
-    lay->addWidget(MakeHeader(QStringLiteral("每周必看"),
-                              QStringLiteral("按星期分区的连载更新列表"), body, nullptr));
-    lay->addWidget(new EmptyState(QStringLiteral("暂无每周必看数据"),
-                                  QStringLiteral("该列表需要连载更新接口，\n接入后按星期返回作品。"),
-                                  QString(), body),
-                   1);
-
-    root->addWidget(body);
-}
-
-// ============================================================ 网络存储
-NasPage::NasPage(QWidget *parent) : PageBase(parent)
-{
-    auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(0, 0, 0, 0);
     auto *body = PageBody(this);
     auto *lay = BodyLayout(body);
 
     QHBoxLayout *header = nullptr;
-    lay->addWidget(MakeHeader(QStringLiteral("网络存储"),
-                              QStringLiteral("SMB / WebDAV 节点 · 添加后可在阅读器直接打开"),
-                              body, &header));
-    auto *add = new QPushButton(QStringLiteral("添加节点"), body);
-    add->setObjectName(QStringLiteral("Primary"));
-    add->setCursor(Qt::PointingHandCursor);
-    header->addWidget(add);
-    connect(add, &QPushButton::clicked, this,
-            [this] { emit Toast(QStringLiteral("节点管理尚未接入")); });
+    auto *head = MakeHeader(QStringLiteral("每周必看"),
+                            QStringLiteral("按类别与星期查看连载更新"), body, &header);
+    lay->addWidget(head);
+    hint_ = head->findChild<QLabel *>(QStringLiteral("PageSub"));
 
-    auto *host = new QWidget(body);
-    list_ = new QVBoxLayout(host);
-    list_->setContentsMargins(0, 0, 0, 0);
-    list_->setSpacing(10);
-    lay->addWidget(host);
-    lay->addStretch(1);
+    type_ = new TouchCombo(body);
+    type_->setObjectName(QStringLiteral("SettingCombo"));
+    type_->addItem(QStringLiteral("全部"), QStringLiteral("all"));
+    type_->addItem(QStringLiteral("日漫"), QStringLiteral("manga"));
+    type_->addItem(QStringLiteral("韩漫"), QStringLiteral("hanman"));
+    type_->setMinimumWidth(0);
+    header->addWidget(type_);
 
-    // 节点列表来自用户配置（真实添加的 SMB/WebDAV 节点）；没有配置就是空态。
-    list_->addWidget(new EmptyState(QStringLiteral("尚未添加节点"),
-                                    QStringLiteral("添加 SMB / WebDAV 节点后，\n可直接在阅读器打开。"),
-                                    QString(), host));
+    day_ = new TouchCombo(body);
+    day_->setObjectName(QStringLiteral("SettingCombo"));
+    day_->addItem(QStringLiteral("全部"), 0);
+    const QStringList weekdays = {QStringLiteral("周一"), QStringLiteral("周二"),
+                                  QStringLiteral("周三"), QStringLiteral("周四"),
+                                  QStringLiteral("周五"), QStringLiteral("周六"),
+                                  QStringLiteral("周日")};
+    for (int i = 0; i < weekdays.size(); ++i)
+        day_->addItem(weekdays.at(i), i + 1);
+    day_->setMinimumWidth(0);
+    header->addWidget(day_);
 
+    auto *content = new QWidget(body);
+    content_ = content;
+    auto *cl = new QVBoxLayout(content);
+    cl->setContentsMargins(0, 0, 0, 0);
+    cl->setSpacing(0);
+    grid_ = new ComicGrid(content);
+    connect(grid_, &ComicGrid::Activated, this, &WeekPage::OpenComic);
+    cl->addWidget(grid_, 1);
+
+    emptyHost_ = new QWidget(content);
+    new QVBoxLayout(emptyHost_);
+    emptyHost_->layout()->setContentsMargins(0, 0, 0, 0);
+    cl->addWidget(emptyHost_, 1);
+
+    pager_ = new QWidget(content);
+    auto *pl = new QHBoxLayout(pager_);
+    pl->setContentsMargins(0, 12, 0, 0);
+    more_ = new QPushButton(QStringLiteral("加载更多"), pager_);
+    more_->setObjectName(QStringLiteral("Ghost"));
+    more_->setCursor(Qt::PointingHandCursor);
+    more_->setProperty("hitGrow", false);
+    pl->addStretch(1);
+    pl->addWidget(more_);
+    pl->addStretch(1);
+    pager_->setVisible(false);
+    cl->addWidget(pager_);
+
+    lay->addWidget(content, 1);
     root->addWidget(body);
+
+    connect(more_, &QPushButton::clicked, this, [this] { Request(page_ + 1); });
+    auto onFilter = [this] { Request(1); };
+    connect(type_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, onFilter);
+    connect(day_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, onFilter);
+
+    SetState(State::Loading);
+}
+
+void WeekPage::OnEnter()
+{
+    if (state_ != State::Ready && state_ != State::Empty)
+        SetState(State::Loading);
+    Request(1);
+}
+
+void WeekPage::Request(int page)
+{
+    const QString t = type_ ? type_->currentData().toString() : QStringLiteral("all");
+    const int d = day_ ? day_->currentData().toInt() : 0;
+    page_ = qMax(1, page);
+    SetState(State::Loading);
+    emit RefreshRequested(t, d, page_);
+}
+
+void WeekPage::SelectFilter(int typeIndex, int dayIndex)
+{
+    if (type_)
+        type_->setCurrentIndex(qBound(0, typeIndex, type_->count() - 1));
+    if (day_)
+        day_->setCurrentIndex(qBound(0, dayIndex, day_->count() - 1));
+    Request(1);
+}
+
+QString WeekPage::StateName() const
+{
+    switch (state_) {
+    case State::Loading:
+        return QStringLiteral("loading");
+    case State::Empty:
+        return QStringLiteral("empty");
+    case State::Error:
+        return QStringLiteral("error");
+    case State::Ready:
+        return QStringLiteral("ready");
+    }
+    return QStringLiteral("unknown");
+}
+
+int WeekPage::CardCount() const
+{
+    return grid_ ? grid_->Count() : 0;
+}
+
+void WeekPage::SetItems(const QVector<Comic> &items, int total, int page)
+{
+    total_ = total >= 0 ? total : items.size();
+    page_ = qMax(1, page);
+    if (page_ == 1) {
+        if (grid_)
+            grid_->SetComics(items);
+    } else if (grid_) {
+        grid_->AddComics(items);
+    }
+    if (grid_ && grid_->Count() == 0) {
+        SetState(State::Empty);
+        return;
+    }
+    SetState(State::Ready);
+}
+
+void WeekPage::SetState(State state, const QString &detail)
+{
+    state_ = state;
+    stateDetail_ = detail;
+    ApplyState();
+}
+
+void WeekPage::ApplyState()
+{
+    if (!grid_ || !emptyHost_)
+        return;
+    if (loading_) {
+        if (state_ == State::Loading)
+            loading_->Start();
+        else
+            loading_->Stop();
+    }
+    const bool ready = state_ == State::Ready;
+    grid_->setVisible(ready);
+    emptyHost_->setVisible(!ready);
+    if (pager_)
+        pager_->setVisible(ready && total_ > 0 && page_ * 80 < total_);
+    if (hint_)
+        hint_->setText(ready || state_ == State::Empty
+                           ? QStringLiteral("共 %1 部 · 第 %2 页").arg(total_).arg(page_)
+                           : (state_ == State::Loading ? QStringLiteral("正在加载…")
+                                                       : QStringLiteral("加载失败")));
+    if (ready)
+        return;
+
+    while (QLayoutItem *it = emptyHost_->layout()->takeAt(0)) {
+        if (QWidget *w = it->widget())
+            w->deleteLater();
+        delete it;
+    }
+    QString title;
+    QString text;
+    QString action;
+    if (state_ == State::Loading) {
+        title = QStringLiteral("正在加载连载列表…");
+        text = QStringLiteral("按类别与星期请求 /serialization。");
+    } else if (state_ == State::Error) {
+        title = QStringLiteral("连载列表加载失败");
+        text = stateDetail_.isEmpty() ? QStringLiteral("请检查网络后重试。") : stateDetail_;
+        action = QStringLiteral("重试");
+    } else {
+        title = QStringLiteral("该筛选下没有作品");
+        text = QStringLiteral("换个类别或星期再看。");
+    }
+    empty_ = new EmptyState(title, text, action, emptyHost_);
+    emptyHost_->layout()->addWidget(empty_);
+    if (QPushButton *b = empty_->ActionButton()) {
+        connect(b, &QPushButton::clicked, this, [this] { Request(1); });
+    }
 }
 
 // ============================================================ 批量超分

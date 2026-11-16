@@ -48,6 +48,24 @@ struct JmChapter
     QString sort;
 };
 
+// /forum（mode=undefined & uid=<uid>）返回的一条评论。
+// 字段对应 Python ToolUtil.ParseBookComment：CID/UID/username/content/likes/addtime
+// 以及外层的 expinfo.level_name、关联作品 name/AID。回复（replys）这里不收：
+// "我的评论"列表只展示本人发言，回复属于详情页评论区的职责。
+struct JmComment
+{
+    QString id;        // CID
+    qint64 uid = 0;
+    QString user;      // username
+    QString levelName; // expinfo.level_name
+    int level = 0;
+    QString content;
+    int likes = 0;
+    qint64 addTime = 0;
+    QString albumId;   // AID：点评论可回到对应作品
+    QString albumName; // name
+};
+
 // /login 返回的账号资料。字段与 Python 版 ToolUtil.ParseLogin2 一一对应：
 //   uid / username / level_name / level / coin / album_favorites /
 //   album_favorites_max / exp / nextLevelExp
@@ -129,6 +147,27 @@ public:
     void Login(const QString &username, const QString &password);
     void FavoriteFolder(int page = 1);
     void FavoriteAdd(const QString &albumId);
+
+    // ---- 云端记录 / 我的评论（与 Python GetHistoryReq2 / GetMyCommentReq2 对齐）----
+    // GET /watch_list?page=N        账号的跨设备观看记录，匿名访问返回 code=401
+    // GET /forum?mode=undefined&uid=<uid>&page=N&lang=cn  本人评论
+    // 两者响应体形状与 /favorite 同源（data 段解密后是 {list,total}），因此共用
+    // 同一套条目解析；401 走与收藏一致的"会话失效"收口。
+    void FetchWatchList(int page = 1);
+    void FetchMyComments(int page = 1);
+    // GET /serialization?type=<all|manga|hanman>&date=<0..7>&page=N&lang=cn
+    // date=0 表示"全部"，1~7 = 周一~周日（与 Python index_view 的 weekBox 同义）。
+    // 响应形状同样是 {list,total}，与观看记录共用解析。
+    void FetchSerialization(int day, const QString &type, int page = 1);
+    // 作品评论：GET /forum?mode=manhua&aid=<id>&page&lang ；POST /comment (aid, comment, comment_id)
+    // 列表形状与 /watch_list 同源（{list,total}），评论字段由 ParseCommentListPayload 解析。
+    void FetchComments(const QString &albumId, int page = 1);
+    void SendComment(const QString &albumId, const QString &text, const QString &replyTo = QString());
+    // 回归/单测：解密后的明文 -> 列表（不发网络请求）
+    static QVector<JmComicItem> ParseItemListPayload(const QByteArray &plain, int *total,
+                                                     bool *ok);
+    static QVector<JmComment> ParseCommentListPayload(const QByteArray &plain, int *total,
+                                                      bool *ok);
     // 回归/单测：把 /login 解密后的明文解析成账号资料（不发网络请求）。
     static JmUserInfo ParseLoginPayload(const QByteArray &plain);
     // 回归/单测：/album 与 /chapter 解密后的明文 -> 界面模型（不发网络请求）。
@@ -174,6 +213,16 @@ signals:
     // 加/取消收藏：与列表分开，避免"谁在飞"只能靠一个 int 猜（列表请求把
     // 加收藏的响应当成自己的，刷新收藏页时会出现空列表/错提示）。
     void FavoriteAddReady(bool ok, const QString &error);
+    // 观看记录：page 原样带回，调用方据此丢弃过期响应（快速切页会并发两页）
+    void WatchListReady(bool ok, const QVector<JmComicItem> &items, int total, int page,
+                        const QString &error);
+    void MyCommentsReady(bool ok, const QVector<JmComment> &items, int total, int page,
+                         const QString &error);
+    void SerializationReady(bool ok, const QVector<JmComicItem> &items, int total, int page,
+                            const QString &error);
+    void CommentsReady(bool ok, const QVector<JmComment> &items, int total, int page,
+                       const QString &albumId, const QString &error);
+    void CommentSendReady(bool ok, const QString &message, const QString &error);
     // 会话失效（服务端 code 401）：AVS 已不可用，外壳必须清登录态并提示重新登录。
     // 实测 /favorite 匿名访问返回 {"code":401,"errorMsg":"請先登入會員"}。
     void SessionExpired(const QString &message);

@@ -138,3 +138,105 @@ done
 ./jmcomic_ui.exe --reader-dir build/testpages --reader-touch-selftest \
   --shot /tmp/t.png --shot-delay 1800 --quiet
 ```
+
+## 6. 详情页 363dp 横向溢出（2026-11-13）
+
+### 6.1 现象
+
+```text
+$ ./jmcomic_ui.exe --page detail --win-size 363x800 --touch \
+    --open-album 313833 --scroll-report --shot /tmp/d.png --shot-delay 16000 --quiet
+scroll-report: window=427x800
+scroll-report: obj=- hmax=87 vmax=0 viewport=427x697 widget=514x697
+scroll-report:   wide-widget class=QWidget name=- min=482 w=482
+```
+
+`/album` 返回 `chapters=81` 之后依旧：标题、标签、简介整块在右侧被裁掉，
+「收藏」按钮完全看不见（只能看到「开始阅读 / 下载本章」，且「下载本章」被切边）。
+
+### 6.2 根因
+
+`DetailPage` 在**构造期**用主屏宽度判横排/堆叠：
+
+```cpp
+const QScreen *scr = QGuiApplication::primaryScreen();
+const bool wideScreen = scr && scr->availableGeometry().width() >= UiStyle::Fpx(600);
+```
+
+页面是在主窗口构造期创建的，桌面主屏恒为 1920px，`wideScreen` 永远为真 ——
+即使验收窗口只有 427px 宽也走"左图右文"。该模式下的最小宽：
+
+| 组成 | px |
+|---|---|
+| 封面 `setFixedSize(180, 240)` | 180 |
+| 横排间距 | 22 |
+| 信息列最小宽（三个按钮 104+94+62 + 2×10 间距） | 280 |
+| `PageBody` 左右边距（`Fpx(12)` = 16） | 32 |
+| **内容最小宽** | **514** |
+
+视口 427 → `hmax=87`。而且宽度变化时没有任何重算，窗口从宽拖窄也不会切回堆叠。
+
+### 6.3 修复
+
+`ui_pages_browse.cpp` / `ui_pages.h`：
+
+1. 顶部改为**一个** `QBoxLayout`（不再在构造期二选一），新增
+   `DetailPage::ApplyTopLayout()`：
+   - 可用宽 = **滚动视口宽 − 2×`BodyMargin()`**（不是主屏宽）；
+   - `>= UiStyle::Fpx(600)` → `LeftToRight`（间距 22、封面 180×240、简介 max 620）；
+   - 否则 → `TopToBottom`（间距 14、封面 120×160 居中、简介不限宽）。
+2. `resizeEvent` 里用 `QTimer::singleShot(0, ...)` 延后判一次（同 `SettingRow`
+   的做法）：resize 当拍视口/边距还没落到最终值，判早了会停在错误模式。
+3. 加锚点日志 `detail-layout: vp= avail= side=`，一行定位"谁按什么宽度判的"。
+
+验收工具同时修了两处（`main_desktop.cpp`）：
+
+- `--scroll-report` 快照从固定 600ms 改为跟 `--shot-delay` 走
+  （有 `--shot` 时 `max(600, delay-1200)`，与 `blank-report` 同策略）——
+  固定 600ms 只能量到"加载中"骨架，异步内容回来后才撑宽的页面会被漏掉；
+- 每个 `QScrollArea` 挂 `rangeChanged`，hmax 从 0 变 >0 时补一条
+  `scroll-report: late obj=... hmax=... viewport=... widget=...`（每区只报一次）。
+
+### 6.4 验收
+
+```bash
+cd cpp/shell/ui/build
+# 空态
+./jmcomic_ui.exe --page detail --win-size 363x800 --touch \
+  --scroll-report --shot /tmp/d0.png --shot-delay 2000 --quiet
+# 真实作品（/album 81 话，H3 通道）
+./jmcomic_ui.exe --page detail --win-size 363x800 --touch --http3-on --doh-on \
+  --open-album 313833 --scroll-report --shot /tmp/d1.png --shot-delay 40000 --quiet
+```
+
+| 用例 | 修复前 | 修复后 |
+|---|---|---|
+| 363dp 空态 | `hmax=87 widget=514` | `hmax=0 viewport=427 widget=427` |
+| 363dp + /album 81 话 | `hmax=87`，右侧裁切 | `hmax=0 viewport=417x1097 widget=417x1887` |
+| 1280 桌面 | `hmax=0`（横排） | `hmax=0`，`side=1` 保持左图右文 |
+| 760 / 900 宽 | — | `hmax=0`，`side=0` 堆叠 |
+| 340dp（窗口下限 427） | — | `hmax=0` |
+
+真实作品那一条的完整输出（`--win-size 363x1200 --shot-delay 60000`，先等 `/album`）：
+
+```text
+detail-real: id=313833 chapters=81 cover=...313833_3x4.jpg
+scroll-report: window=427x1200
+scroll-report: obj=- hmax=0 vmax=790 viewport=417x1097 widget=417x1887
+```
+
+窗口 1280 桌面（同一份二进制）：
+
+```text
+detail-layout: vp=933 avail=877 side=1
+scroll-report: obj=NavScroll hmax=0 vmax=844 viewport=339x214 widget=339x1058
+scroll-report: obj=- hmax=0 vmax=0 viewport=933x737 widget=933x737
+```
+
+截图核对（`.workbuddy/shots/final_363_album.png`，窗口 363×1200）：封面居中、
+标题三行折行完整、5+1 个标签自动换行、简介通栏、三个按钮同排且全部在屏内、
+章节目录「共 81 话」按 4 列等宽排布、最右列完整可见。
+
+遗留：启动瞬间偶发一条 `scroll-report: late ... hmax=10`（内容 427 宽、视口刚被
+纵向滚动条挤到 417 的那一帧），下一帧即回到 `hmax=0`，不影响交互与验收快照
+（上述最终验收里未出现）。

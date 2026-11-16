@@ -1,6 +1,7 @@
 #include "app_font.h"
 
 #include "app_paths.h"
+#include "data_migrator.h"
 
 #include <QAbstractNativeEventFilter>
 #include <QApplication>
@@ -225,7 +226,9 @@ void AppFont::Persist() const
     s.setValue(QStringLiteral("size"), cfg_.pointSize);
     s.endGroup();
     s.sync();
-    if (s.status() != QSettings::NoError)
+    if (s.status() == QSettings::NoError)
+        DataMigrator::RollingBackup(path);   // 写成功才滚动备份
+    else
         qWarning("app-font: 写入失败 status=%d path=%s", int(s.status()), qPrintable(path));
 }
 

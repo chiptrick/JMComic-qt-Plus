@@ -1215,6 +1215,8 @@ ModalDialog::ModalDialog(QWidget *host, const QString &title, const QString &tex
     : QWidget(host)
 {
     setAttribute(Qt::WA_StyledBackground, false);
+    // 自绘浮层不是顶层窗口：显式声明，让浮层里每一行/按钮都进统一仲裁
+    setProperty("tapGuardOverlay", true);
     setGeometry(host->rect());
     setFocusPolicy(Qt::StrongFocus);
     host->installEventFilter(this);
@@ -1409,9 +1411,31 @@ void ModalDialog::paintEvent(QPaintEvent *)
 
 void ModalDialog::mousePressEvent(QMouseEvent *e)
 {
-    if (!card_->geometry().contains(e->position().toPoint()))
+    // 只记下"按下落在卡片外"，真正的关闭放到 mouseReleaseEvent。
+    // 旧实现在 press 里就 Finish(false)：手指从遮罩上滑过（或滑进卡片）
+    // 都会立刻关掉对话框，应用级防误触层只吞抬起根本拦不住。
+    outsideArmed_ = !card_->geometry().contains(e->position().toPoint());
+    outsidePress_ = e->position().toPoint();
+    // A/B 对照：复刻修复前"按下即关闭"的行为，让浮层用例也能在 legacy 档失败
+    if (outsideArmed_ && Touch::TapGuardLegacy())
         Finish(false);
     QWidget::mousePressEvent(e);
+}
+
+void ModalDialog::mouseReleaseEvent(QMouseEvent *e)
+{
+    if (outsideArmed_) {
+        outsideArmed_ = false;
+        const QPoint p = e->position().toPoint();
+        const bool stillOutside = !card_->geometry().contains(p);
+        const bool notSwipe = (p - outsidePress_).manhattanLength() <= Touch::Dp(8, this);
+        if (stillOutside && notSwipe) {
+            // 滑动的抬起已被 Touch::TapGuard 吞掉，走不到这里；8dp 是第二道保险
+            Finish(false);
+            return;
+        }
+    }
+    QWidget::mouseReleaseEvent(e);
 }
 
 void ModalDialog::keyPressEvent(QKeyEvent *e)
@@ -1440,6 +1464,9 @@ bool ModalDialog::eventFilter(QObject *obj, QEvent *ev)
 ComicCard::ComicCard(const Comic &c, QWidget *parent) : QWidget(parent), c_(c)
 {
     setCursor(Qt::PointingHandCursor);
+    // 显式声明"我是可点控件"：点击防误触层据此在滑动后吞掉抬起（见 touch.h）。
+    // 卡片是自绘的，Qt 不认识它的点击语义，只有这一条能让它参与滑动/点击仲裁。
+    setProperty("tapGuardItem", true);
     setAttribute(Qt::WA_Hover, true);
     cover_ = CoverArt::Render(c.title, QSize(width_, CoverHeight()), int(qHash(c.title) & 0x7fffffff));
     setFixedSize(width_, CoverHeight() + 40);

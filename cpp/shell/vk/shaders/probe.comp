@@ -1,0 +1,25 @@
+// 端到端探针：c[i] = a[i] * 2 + b[i]
+// 用途：验证 loader/设备/arena/描述符/push constant/dispatch/回读整条链路，
+// 让 --vk-probe 能在没有模型的情况下给出"设备可用"的确定结论。
+#version 450
+layout(local_size_x = 64) in;
+
+layout(binding = 0) buffer A { float a[]; };
+layout(binding = 1) buffer B { float b[]; };
+layout(binding = 2) buffer C { float c[]; };
+
+// std140 下 `int p[16]` 的数组步长是 16 字节，而 C++ 侧 vk::Params 是 16 个
+// 紧排 int（64 字节）。用 ivec4[4] 固定步长 16 字节，布局与 C++ 完全一致。
+// 探针着色器只用 p[0] 看不出差别，多参数 kernel 会全部错位（实测首个卷积即错）。
+layout(push_constant) uniform PC {
+    ivec4 q[4];
+} pc;
+#define P(i) pc.q[(i) >> 2][(i) & 3]
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(P(0)))
+        return;
+    c[i] = a[i] * 2.0 + b[i];
+}

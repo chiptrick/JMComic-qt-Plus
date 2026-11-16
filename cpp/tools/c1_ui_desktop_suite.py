@@ -709,6 +709,21 @@ def Main():
         Check(ok, "节点排序与选优策略（Python IpItem.__lt__ + CheckSelectBox）",
               m.group(0) if m is not None else "未输出 proxy-selftest")
 
+        # ---- 节点测速线程池（离线确定性自检：不联网、不读写 ui.ini）----
+        # 注意别覆盖上面的 err：后续 proxy-align 断言复用的就是 proxy_sort 的输出
+        rc_b, _, err_b, _ = r.shot("node_bench_selftest", ["--node-bench-selftest"],
+                                   delay="300", timeout=40)
+        m_bench = re.search(r"node-bench: all=(PASS|FAIL)", err_b)
+        m_cap = re.search(r"node-bench: cap batch tasks=(\d+) threads=(\d+) peak=(\d+)", err_b)
+        m_cancel = re.search(r"node-bench: cancel tasks=100 executed=(\d+)", err_b)
+        ok_bench = (m_bench is not None and m_bench.group(1) == "PASS"
+                    and m_cap is not None and int(m_cap.group(2)) == 16
+                    and int(m_cap.group(3)) <= 16
+                    and m_cancel is not None and int(m_cancel.group(1)) < 100)
+        Check(ok_bench,
+              "节点测速线程池（16 上限 / 任务唯一 / 同序汇总 / 异常超时取消）",
+              m_bench.group(0) if m_bench is not None else "未输出 node-bench-selftest")
+
         # ---- 与 Python 版对齐的确定性事实 ----
         a = re.search(r"proxy-align: lines=(\d+) order=(\S+) labels=", err)
         Check(a is not None and a.group(1) == "6" and a.group(2) == "1,2,3,4,6,5",

@@ -7,6 +7,7 @@
 #include <QStandardPaths>
 
 #include "app_paths.h"
+#include "data_migrator.h"
 
 namespace {
 
@@ -82,10 +83,12 @@ bool SetRoot(const QString &path)
 {
     const QString clean = path.trimmed();
     if (clean.isEmpty()) {
-        QSettings s(ConfigFile(), QSettings::IniFormat);
-        s.remove(QStringLiteral("cache/root"));
-        s.sync();
-        qInfo("cache-path: reset to default %s", qPrintable(DefaultRoot()));
+    QSettings s(ConfigFile(), QSettings::IniFormat);
+    s.remove(QStringLiteral("cache/root"));
+    s.sync();
+    if (s.status() == QSettings::NoError)
+        DataMigrator::RollingBackup(ConfigFile());
+    qInfo("cache-path: reset to default %s", qPrintable(DefaultRoot()));
         return EnsureDir(DefaultRoot());
     }
     if (!EnsureDir(clean)) {
@@ -95,6 +98,8 @@ bool SetRoot(const QString &path)
     QSettings s(ConfigFile(), QSettings::IniFormat);
     s.setValue(QStringLiteral("cache/root"), QDir::cleanPath(clean));
     s.sync();
+    if (s.status() == QSettings::NoError)
+        DataMigrator::RollingBackup(ConfigFile());
     qInfo("cache-path: set %s", qPrintable(clean));
     return true;
 }

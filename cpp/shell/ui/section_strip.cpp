@@ -23,6 +23,9 @@ SectionStrip::SectionStrip(QWidget *parent) : QWidget(parent)
     setObjectName(QStringLiteral("SectionStrip"));
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
+    // 分区栏自己就有 8dp 滑动判定（moved_ + 首末同项），点击防误触层必须让路：
+    // 吞掉它的抬起会让 EmitDragState(false) 与惯性都不执行，停在"拖动中"。
+    setProperty("tapGuardSelfManaged", true);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setFixedHeight(sizeHintHeight());
     setFocusPolicy(Qt::NoFocus);

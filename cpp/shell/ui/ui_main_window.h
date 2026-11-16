@@ -92,7 +92,8 @@ public:
     QString HomeStripState() const;
     void HomeStripTap(int x);
     // 回归：菜单栏防误触（拖动超阈值不跳页 / 阈值内的点击照常生效）
-    bool TapGuardSelfTest();
+    // report 非空时把逐项结果写回，供 Android 端落盘（logcat 在部分 ROM 会丢）。
+    bool TapGuardSelfTest(QString *report = nullptr);
     // 回归：抽屉打开状态下点一次导航项（必须走"先收抽屉、再播同级淡入"的路径）
     void DrawerNavForTest(PageId id);
     // 回归：点一次阅读器标题栏的"恢复原尺寸"按钮，打印缩放结果
@@ -148,6 +149,20 @@ public:
     // 用支持 ECH 的 OpenSSL 4.x 通道直连 host:443，输出 ECH 状态/TLS 版本/ALPN/证书校验
     void EchProbe(const QString &host);
 
+    // ---- 关于页：日志导出 / 检查更新（都是真实动作，不做假成功）----
+    // dir 为空 = 系统下载目录；成功时把 zip 路径写进关于页状态行并 Toast。
+    QString ExportLogsTo(const QString &dir = QString());
+    void CheckUpdates();        // version.txt + config.txt 一起拉（配置只展示，不改网络行为）
+    // 回归：把关于页的状态行/配置行打成 ASCII（--about-report）
+    QString AboutReport() const;
+
+    // ---- 云端记录 / 我的评论 / 连载更新（回归入口，与页面按钮同一条路径）----
+    void RequestWatchList(int page = 1);
+    void RequestMyComments(int page = 1);
+    void RequestWeek(const QString &type = QStringLiteral("all"), int day = 0, int page = 1);
+    // 回归：网络存储的增/查/校验/删全链路（用临时目录，不污染用户配置）
+    QString NasSelfTest();
+
 protected:
     void mousePressEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
@@ -197,6 +212,8 @@ private:
     // 启动后校验一次会话（/favorite 的 401 是唯一可验证的"会话失效"信号）
     void ProbeSession();
     void OpenDetail(const Comic &c);
+    // 把"一个真实图片目录"交给阅读器（本地收藏 / 网络存储 / 本地页共用一条路径）
+    void OpenLocalImages(const QString &dir);
     void RefreshFavoriteList();
     // /album 的真实章节数 → 首页/搜索/收藏里同 id 的卡片（按 id 局部刷新）
     void ApplyChapterCount(const QString &id, int chapters);
@@ -286,6 +303,11 @@ private:
     ReaderPage *reader_ = nullptr;
     HomePage *home_ = nullptr;
     SearchPage *search_ = nullptr;
+
+    // 关于页的"检查更新 / 导出日志"与登录页的"注册 / 找回密码"都在外壳里做网络，
+    // 页面只负责显示状态：这样同一份逻辑既能被按钮触发，也能被回归 CLI 触发。
+    class UpdateChecker *updates_ = nullptr;
+    class JmAccount *account_ = nullptr;
 
     // 阅读器当前章节：章末"下一章"据此定位
     QString currentChapterId_;

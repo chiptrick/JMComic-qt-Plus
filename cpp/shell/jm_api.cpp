@@ -915,3 +915,264 @@ void JmApi::FavoriteAdd(const QString &albumId)
         }, true, form.toString(QUrl::FullyEncoded).toLatin1());
     });
 }
+
+// ---------------------------------------------------------------- 云端记录 / 我的评论
+namespace {
+
+JmComment JCommentItem(const QJsonObject &o)
+{
+    JmComment c;
+    c.id = JStr(o, "CID");
+    c.uid = JInt64(o, "UID");
+    c.user = JStr(o, "username");
+    const QJsonObject exp = o.value(QLatin1String("expinfo")).toObject();
+    c.levelName = JStr(exp, "level_name");
+    c.level = JInt(exp, "level");
+    c.content = JStr(o, "content");
+    c.likes = JInt(o, "likes");
+    c.addTime = JInt64(o, "addtime");
+    c.albumId = JStr(o, "AID");
+    c.albumName = JStr(o, "name");
+    return c;
+}
+
+}  // namespace
+
+QVector<JmComicItem> JmApi::ParseItemListPayload(const QByteArray &plain, int *total, bool *ok)
+{
+    QVector<JmComicItem> items;
+    if (ok)
+        *ok = false;
+    const QJsonDocument doc = QJsonDocument::fromJson(plain);
+    if (!doc.isObject())
+        return items;
+    const QJsonObject o = doc.object();
+    // 服务端在未登录/风控时可能只回 {"code":401,"errorMsg":...}：没有 list 就是失败，
+    // 不能当成"空记录"——否则界面会把"登录失效"显示成"你还没看过任何作品"。
+    if (!o.contains(QLatin1String("list")) && !o.contains(QLatin1String("total")))
+        return items;
+    for (const QJsonValue &v : o.value(QLatin1String("list")).toArray())
+        items.append(JItem(v.toObject()));
+    if (total)
+        *total = o.value(QLatin1String("total")).toInt(items.size());
+    if (ok)
+        *ok = true;
+    return items;
+}
+
+QVector<JmComment> JmApi::ParseCommentListPayload(const QByteArray &plain, int *total, bool *ok)
+{
+    QVector<JmComment> out;
+    if (ok)
+        *ok = false;
+    const QJsonDocument doc = QJsonDocument::fromJson(plain);
+    if (!doc.isObject())
+        return out;
+    const QJsonObject o = doc.object();
+    if (!o.contains(QLatin1String("list")) && !o.contains(QLatin1String("total")))
+        return out;
+    for (const QJsonValue &v : o.value(QLatin1String("list")).toArray())
+        out.append(JCommentItem(v.toObject()));
+    if (total)
+        *total = o.value(QLatin1String("total")).toInt(out.size());
+    if (ok)
+        *ok = true;
+    return out;
+}
+
+void JmApi::FetchWatchList(int page)
+{
+    if (avs_.isEmpty()) {
+        // 与 /favorite 同一策略：没有会话就不发请求，避免把"未登录"混成网络错误。
+        emit WatchListReady(false, {}, 0, page, QStringLiteral("未登录"));
+        return;
+    }
+    Enqueue([this, page] {
+        Request(QStringLiteral("/watch_list"),
+                {{QStringLiteral("page"), QString::number(page)}},
+                [this, page](const NetResult &r, const QString &ts) {
+                    QString err;
+                    int code = -1;
+                    const QByteArray plain = Unwrap(r, ts, &err, &code);
+                    if (plain.isEmpty()) {
+                        if (code == 401) {
+                            avs_.clear();
+                            uid_ = 0;
+                            emit Log(QStringLiteral("watch_list auth expired (code 401)"));
+                            emit SessionExpired(QStringLiteral("登录已失效，请重新登录"));
+                        }
+                        emit WatchListReady(false, {}, 0, page, err);
+                        return;
+                    }
+                    int total = 0;
+                    bool parsed = false;
+                    const QVector<JmComicItem> items =
+                        ParseItemListPayload(plain, &total, &parsed);
+                    if (!parsed) {
+                        emit WatchListReady(false, {}, 0, page,
+                                            QStringLiteral("响应格式不符（缺少 list）"));
+                        return;
+                    }
+                    emit Log(QStringLiteral("watch_list page=%1 items=%2 total=%3")
+                                 .arg(page).arg(items.size()).arg(total));
+                    emit WatchListReady(true, items, total, page, QString());
+                });
+    });
+}
+
+void JmApi::FetchMyComments(int page)
+{
+    if (avs_.isEmpty()) {
+        emit MyCommentsReady(false, {}, 0, page, QStringLiteral("未登录"));
+        return;
+    }
+    Enqueue([this, page] {
+        // Python GetMyCommentReq2：mode=undefined + uid=<自己的 uid> + page + lang
+        QVector<QPair<QString, QString>> query{
+            {QStringLiteral("mode"), QStringLiteral("undefined")},
+            {QStringLiteral("page"), QString::number(page)},
+            {QStringLiteral("lang"), QStringLiteral("cn")}};
+        if (uid_ > 0)
+            query.append({QStringLiteral("uid"), QString::number(uid_)});
+        Request(QStringLiteral("/forum"), query, [this, page](const NetResult &r, const QString &ts) {
+            QString err;
+            int code = -1;
+            const QByteArray plain = Unwrap(r, ts, &err, &code);
+            if (plain.isEmpty()) {
+                if (code == 401) {
+                    avs_.clear();
+                    uid_ = 0;
+                    emit Log(QStringLiteral("forum(uid) auth expired (code 401)"));
+                    emit SessionExpired(QStringLiteral("登录已失效，请重新登录"));
+                }
+                emit MyCommentsReady(false, {}, 0, page, err);
+                return;
+            }
+            int total = 0;
+            bool parsed = false;
+            const QVector<JmComment> items = ParseCommentListPayload(plain, &total, &parsed);
+            if (!parsed) {
+                emit MyCommentsReady(false, {}, 0, page,
+                                     QStringLiteral("响应格式不符（缺少 list）"));
+                return;
+            }
+            emit Log(QStringLiteral("forum uid=%1 page=%2 items=%3 total=%4")
+                         .arg(uid_).arg(page).arg(items.size()).arg(total));
+            emit MyCommentsReady(true, items, total, page, QString());
+        });
+    });
+}
+
+void JmApi::FetchSerialization(int day, const QString &type, int page)
+{
+    // 公开接口：不需要登录态，也用不上 401 收口
+    Enqueue([this, day, type, page] {
+        Request(QStringLiteral("/serialization"),
+                {{QStringLiteral("type"), type},
+                 {QStringLiteral("date"), QString::number(qBound(0, day, 7))},
+                 {QStringLiteral("page"), QString::number(qMax(1, page))},
+                 {QStringLiteral("lang"), QStringLiteral("cn")}},
+                [this, page](const NetResult &r, const QString &ts) {
+                    QString err;
+                    const QByteArray plain = Unwrap(r, ts, &err);
+                    if (plain.isEmpty()) {
+                        emit SerializationReady(false, {}, 0, page, err);
+                        return;
+                    }
+                    int total = 0;
+                    bool parsed = false;
+                    const QVector<JmComicItem> items =
+                        ParseItemListPayload(plain, &total, &parsed);
+                    if (!parsed) {
+                        emit SerializationReady(false, {}, 0, page,
+                                                QStringLiteral("响应格式不符（缺少 list）"));
+                        return;
+                    }
+                    emit Log(QStringLiteral("serialization page=%1 items=%2 total=%3")
+                                 .arg(page).arg(items.size()).arg(total));
+                    emit SerializationReady(true, items, total, page, QString());
+                });
+    });
+}
+
+void JmApi::FetchComments(const QString &albumId, int page)
+{
+    // 公开接口（未登录也能看评论）：不需要 401 收口，但发送评论需要登录。
+    const QString aid = albumId.trimmed();
+    if (aid.isEmpty()) {
+        emit CommentsReady(false, {}, 0, page, aid, QStringLiteral("缺少作品 ID"));
+        return;
+    }
+    Enqueue([this, aid, page] {
+        Request(QStringLiteral("/forum"),
+                {{QStringLiteral("mode"), QStringLiteral("manhua")},
+                 {QStringLiteral("aid"), aid},
+                 {QStringLiteral("page"), QString::number(qMax(1, page))},
+                 {QStringLiteral("lang"), QStringLiteral("cn")}},
+                [this, aid, page](const NetResult &r, const QString &ts) {
+                    QString err;
+                    const QByteArray plain = Unwrap(r, ts, &err);
+                    if (plain.isEmpty()) {
+                        emit CommentsReady(false, {}, 0, page, aid, err);
+                        return;
+                    }
+                    int total = 0;
+                    bool parsed = false;
+                    const QVector<JmComment> items = ParseCommentListPayload(plain, &total, &parsed);
+                    if (!parsed) {
+                        emit CommentsReady(false, {}, 0, page, aid,
+                                           QStringLiteral("响应格式不符（缺少 list）"));
+                        return;
+                    }
+                    emit Log(QStringLiteral("forum aid=%1 page=%2 items=%3 total=%4")
+                                 .arg(aid).arg(page).arg(items.size()).arg(total));
+                    emit CommentsReady(true, items, total, page, aid, QString());
+                });
+    });
+}
+
+void JmApi::SendComment(const QString &albumId, const QString &text, const QString &replyTo)
+{
+    if (avs_.isEmpty()) {
+        emit CommentSendReady(false, QString(), QStringLiteral("未登录"));
+        return;
+    }
+    const QString aid = albumId.trimmed();
+    const QString body = text.trimmed();
+    if (aid.isEmpty() || body.isEmpty()) {
+        emit CommentSendReady(false, QString(), QStringLiteral("作品或内容为空"));
+        return;
+    }
+    EnqueueFront([this, aid, body, replyTo] {
+        QUrlQuery form;
+        form.addQueryItem(QStringLiteral("comment"), body);
+        form.addQueryItem(QStringLiteral("aid"), aid);
+        if (!replyTo.isEmpty())
+            form.addQueryItem(QStringLiteral("comment_id"), replyTo);
+        Request(QStringLiteral("/comment"), {}, [this, aid](const NetResult &r, const QString &ts) {
+            QString err;
+            int code = -1;
+            const QByteArray plain = Unwrap(r, ts, &err, &code);
+            if (plain.isEmpty()) {
+                if (code == 401) {
+                    avs_.clear();
+                    uid_ = 0;
+                    emit Log(QStringLiteral("comment auth expired (code 401)"));
+                    emit SessionExpired(QStringLiteral("登录已失效，请重新登录"));
+                }
+                emit CommentSendReady(false, QString(), err);
+                return;
+            }
+            const QJsonObject o = QJsonDocument::fromJson(plain).object();
+            const QString msg = o.value(QLatin1String("msg")).toString();
+            const QString errMsg = o.value(QLatin1String("errorMsg")).toString();
+            if (!msg.isEmpty()) {
+                emit Log(QStringLiteral("comment sent aid=%1 msg=%2").arg(aid, msg));
+                emit CommentSendReady(true, msg, QString());
+                return;
+            }
+            emit CommentSendReady(false, QString(),
+                                  errMsg.isEmpty() ? QStringLiteral("服务端未返回结果") : errMsg);
+        }, true, form.toString(QUrl::FullyEncoded).toLatin1());
+    });
+}

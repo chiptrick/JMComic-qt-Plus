@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型测速 · 列表内跑分 Demo（v2）</title>
+<style>
+  *{box-sizing:border-box}
+  /* 类选择器里的 display 会盖掉浏览器对 [hidden] 的 display:none（.sheet/.resume 都是 flex） */
+  [hidden]{display:none !important}
+  html,body{margin:0;padding:0}
+  :root{
+    /* 与 C++ 版一致的主题 token（dark_orange） */
+    --bg:#31363b; --bg2:#2a2e32; --surface:#3a4045; --hover:#444b51;
+    --line:#232629; --line2:#43474d;
+    --tx:#ffffff; --dim:#b6bec2; --faint:#7d868b;
+    --acc:#ff7b00; --acc2:#ffb066; --accSoft:rgba(255,123,0,.14);
+    --danger:#dc3545; --danger2:#ff8b96; --ok:#5cbd8f;
+    --mono:Consolas,"SF Mono",Menlo,"DejaVu Sans Mono",monospace;
+    --sw:480px; --sh:878px;
+  }
+  body{
+    background:radial-gradient(1100px 620px at 14% -8%,#3a4046 0%,#2c3136 55%,#23272b 100%);
+    color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",
+                "Microsoft YaHei","Noto Sans SC",sans-serif;
+    -webkit-font-smoothing:antialiased;min-height:100vh;
+  }
+  .wrap{display:flex;gap:26px;padding:24px 26px 48px;align-items:flex-start;max-width:1360px;margin:0 auto}
+
+  /* ================= 左侧说明 ================= */
+  .side{width:396px;flex:none}
+  .side h1{font-size:19px;line-height:1.4;margin:0 0 6px}
+  .side h1 em{font-style:normal;color:var(--acc2)}
+  .side .sub{margin:0 0 16px;font-size:12.5px;line-height:1.65;color:var(--dim)}
+  .side h2{font-size:12px;margin:18px 0 7px;color:var(--faint);font-weight:600;letter-spacing:.06em}
+  .side ul{margin:0;padding-left:18px}
+  .side li{font-size:12.5px;line-height:1.7;color:var(--dim);margin-bottom:4px}
+  .side li b{color:var(--tx);font-weight:500}
+  .side code{font-family:var(--mono);font-size:11px;color:var(--acc2);background:rgba(255,123,0,.08);padding:0 3px}
+  table.t{width:100%;border-collapse:collapse;font-size:11.5px}
+  table.t th,table.t td{border:1px solid var(--line2);padding:5px 7px;text-align:left;line-height:1.5}
+  table.t th{color:var(--faint);font-weight:500;background:var(--bg2)}
+  table.t td{color:var(--dim)}
+  table.t td.k{color:var(--tx)}
+
+  /* ================= 右侧屏幕 ================= */
+  .stage{flex:none;display:flex;flex-direction:column;gap:10px;align-items:center}
+  .screen{
+    position:relative;width:var(--sw);height:var(--sh);background:var(--bg);
+    border:1px solid #1b1e21;box-shadow:0 18px 50px rgba(0,0,0,.45);
+    overflow:hidden;flex:none;
+  }
+  .bgtop{height:34px;display:flex;align-items:center;gap:8px;padding:0 14px;
+    background:var(--bg2);border-bottom:1px solid var(--line);font-size:12px;color:var(--dim)}
+  .bgtop .dot{width:6px;height:6px;background:var(--acc)}
+  .bgpage{padding:16px 13px}
+  .bgpage h4{margin:0 0 4px;font-size:18px;font-weight:500}
+  .bgpage p{margin:0 0 14px;font-size:11.5px;color:var(--faint)}
+  .bgstage{height:150px;background:var(--bg2);border:1px solid var(--line);
+    display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--faint)}
+  .bgcard{margin-top:10px;height:64px;background:var(--surface);border:1px solid var(--line)}
+  .scrim{position:absolute;inset:0;background:rgba(0,0,0,.52)}
+  .reopen{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    height:36px;padding:0 16px;border:1px solid var(--acc);background:rgba(255,123,0,.14);
+    color:var(--acc2);font-size:12px;font-family:inherit;cursor:pointer}
+
+  /* ================= 浮层 ================= */
+  .sheet{position:absolute;left:0;right:0;bottom:0;height:92%;background:var(--surface);
+    border-top:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+  .grip{width:36px;height:4px;background:var(--faint);margin:7px auto 0;flex:none}
+  .shead{flex:none;display:flex;align-items:flex-start;gap:8px;padding:8px 13px 0}
+  .shead h3{margin:0 0 3px;font-size:16px;font-weight:500}
+  .shead p{margin:0;font-size:11px;color:var(--faint);line-height:1.5}
+  .shead .stitles{flex:1;min-width:0}
+  .shead .x{flex:none;width:26px;height:26px;background:transparent;border:1px solid var(--line2);
+    color:var(--dim);font-size:13px;line-height:1;cursor:pointer;font-family:inherit}
+  .shead .x:hover{background:var(--hover);color:#fff}
+
+  .chips{flex:none;display:flex;flex-wrap:wrap;gap:6px;padding:8px 13px 0}
+  .chip{height:30px;padding:0 10px;border:1px solid var(--line2);background:transparent;
+    color:var(--dim);font-size:11px;font-family:inherit;cursor:pointer;display:inline-flex;
+    align-items:center;gap:6px}
+  .chip b{font-weight:400;color:var(--faint);font-family:var(--mono);font-size:10px}
+  .chip:hover{border-color:var(--faint);color:var(--tx)}
+  .chip.on{border-color:var(--acc);color:var(--acc2);background:var(--accSoft)}
+  .chip.on b{color:var(--acc2)}
+
+  /* ---- 测速工具条：第一行按钮，第二行状态 + 进度 ---- */
+  .tools{flex:none;display:flex;align-items:center;gap:8px;padding:9px 13px 0;flex-wrap:wrap}
+  .tbtn{height:30px;padding:0 12px;border:1px solid var(--line2);background:transparent;
+    color:var(--dim);font-size:12px;font-family:inherit;cursor:pointer;white-space:nowrap}
+  .tbtn:hover:enabled{border-color:var(--faint);color:var(--tx)}
+  .tbtn.primary{border-color:rgba(255,123,0,.65);color:var(--acc2);background:rgba(255,123,0,.10)}
+  .tbtn.primary:hover:enabled{border-color:var(--acc);color:#fff}
+  .tbtn.stop{margin-left:auto;border-color:rgba(220,53,69,.65);color:var(--danger2)}
+  .tbtn:disabled{opacity:.42;cursor:default}
+  .trow2{flex:none;display:flex;align-items:center;gap:8px;padding:7px 13px 0}
+  .tstat{flex:none;max-width:78%;font-size:10px;color:var(--faint);font-family:var(--mono);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tstat.run{color:var(--acc2)}
+  .hbar{flex:1;height:2px;background:var(--line);opacity:0;transition:opacity .15s}
+  .hbar.on{opacity:1}
+  .hbar i{display:block;height:2px;width:0;background:var(--acc);transition:width .12s linear}
+  .legend{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:6px;
+    padding:6px 13px 7px;font-size:10px;color:var(--faint);line-height:1.5}
+  .legend b{font-weight:400;font-family:var(--mono);color:var(--dim);border:1px solid var(--line2);
+    padding:0 4px}
+  .legend em{font-style:normal}
+  .legend .miss{color:#8d949d;text-decoration:line-through}
+  .legend .why{color:var(--faint)}
+
+  .lhead{flex:none;display:grid;grid-template-columns:1fr 54px 62px;column-gap:8px;align-items:center;
+    height:26px;padding:0 13px;background:var(--bg2);border-top:1px solid var(--line);
+    border-bottom:1px solid var(--line);font-size:10px;color:var(--faint)}
+  .lhead .cnt{font-family:var(--mono);margin-left:5px}
+  .lhead .r{text-align:right}
+
+  .mwrap{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+  .mlist{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;position:relative;background:var(--surface)}
+  .mlist::-webkit-scrollbar{width:4px}
+  .mlist::-webkit-scrollbar-thumb{background:var(--faint)}
+  .group{position:relative}
+  .grp{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:7px;height:26px;padding:0 13px;
+    background:var(--bg2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+    font-size:10px;color:var(--faint)}
+  .grp .gd{width:6px;height:6px;flex:none}
+  .grp em{margin-left:auto;font-style:normal;font-family:var(--mono);font-size:10px;color:var(--faint)}
+
+  .row{display:grid;grid-template-columns:1fr 54px 62px;column-gap:8px;
+    padding:7px 13px;border-bottom:1px solid rgba(255,255,255,.055);cursor:pointer;position:relative}
+  .row:hover{background:rgba(255,255,255,.045)}
+  .r-name{grid-column:1;grid-row:1;min-width:0;font-size:13px;color:var(--tx);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .r-id{grid-column:1;grid-row:2;min-width:0;font-family:var(--mono);font-size:10px;color:var(--faint);
+    line-height:1.4;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .r-size{grid-column:2;grid-row:1 / span 2;align-self:center;text-align:right;
+    font-family:var(--mono);font-size:11px;color:var(--dim)}
+  .r-state{grid-column:3;grid-row:1 / span 2;align-self:center;text-align:right}
+  .badge{display:inline-block;font-size:10px;color:var(--faint);padding:1px 6px;border:1px solid transparent}
+  .badge.cur{background:var(--acc);color:#1b1e21;border-color:var(--acc)}
+  .badge.sel{color:var(--tx);border-color:var(--faint)}
+  .rail{position:absolute;left:0;top:6px;bottom:6px;width:3px;background:transparent}
+  .row.on{background:var(--accSoft)}
+  .row.on .rail{background:var(--acc)}
+  .row.on .r-name{color:var(--acc)}
+  .row.sel .rail{background:rgba(255,123,0,.45)}
+  .row.sel{background:var(--hover)}
+
+  /* 名称下方的耗时行 */
+  .r-time{grid-column:1 / -1;grid-row:3;display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;
+    margin-top:3px;font-family:var(--mono);font-size:10.5px;color:var(--faint);min-height:0}
+  .hw{display:inline-flex;align-items:baseline;gap:4px;white-space:nowrap}
+  .hw i{font-style:normal;color:var(--faint)}
+  .hw b{font-weight:400;color:var(--dim)}
+  .hw u{text-decoration:none;font-size:9px;color:var(--faint);margin-left:1px}
+  .hw.best i,.hw.best b{color:var(--acc2)}
+  .hw.run i{color:var(--faint)}
+  .hw.run b{color:var(--acc2)}
+  .hw.fail i,.hw.fail b{color:var(--danger2)}
+  .r-sep{color:var(--faint);opacity:.55}
+
+  /* 取消后再次打开时的“恢复测试”悬浮条 */
+  .resume{position:absolute;left:9px;right:9px;top:7px;z-index:6;display:flex;align-items:center;gap:8px;
+    background:var(--bg2);border:1px solid var(--acc);padding:7px 9px;
+    box-shadow:0 10px 24px rgba(0,0,0,.45)}
+  .resume .rt{flex:1;min-width:0;font-size:11px;color:var(--tx);line-height:1.45}
+  .resume .rt b{color:var(--acc2);font-family:var(--mono);font-size:10px;margin-left:4px}
+  .resume button{height:26px;padding:0 9px;font-size:11px;font-family:inherit;cursor:pointer;
+    border:1px solid var(--line2);background:transparent;color:var(--dim);white-space:nowrap}
+  .resume .go{border-color:var(--acc);color:var(--acc2);background:var(--accSoft)}
+  .resume button:hover{filter:brightness(1.1)}
+
+  .sfoot{flex:none;border-top:1px solid var(--line);background:var(--bg2);padding:8px 13px 10px}
+  .selrow{display:flex;gap:6px;align-items:center;font-size:10px;margin-bottom:8px}
+  .selrow span{color:var(--faint)}
+  .selrow b{font-weight:400;font-family:var(--mono);color:var(--acc2);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+  .fbtns{display:flex;gap:8px}
+  .fbtns button{flex:1;height:36px;font-size:13px;font-family:inherit;cursor:pointer;border:1px solid var(--line2);
+    background:transparent;color:var(--tx)}
+  .fbtns .primary{background:var(--acc);border-color:var(--acc);color:#1b1e21}
+  .fbtns button:hover{filter:brightness(1.08)}
+
+  .toast{position:absolute;left:50%;bottom:96px;transform:translateX(-50%);background:var(--bg2);
+    border:1px solid var(--line2);color:var(--tx);font-size:12px;padding:7px 14px;opacity:0;
+    pointer-events:none;transition:opacity .18s;white-space:nowrap;z-index:9}
+  .toast.on{opacity:1}
+
+  /* ---- 演示控制（屏幕外） ---- */
+  .ctrl{width:var(--sw);display:flex;flex-direction:column;gap:8px}
+  .seg{display:flex;flex-direction:column;gap:6px}
+  .seg button{text-align:left;padding:7px 10px;border:1px solid var(--line2);background:transparent;
+    color:var(--dim);font-size:11.5px;font-family:inherit;cursor:pointer;line-height:1.5}
+  .seg button.on{border-color:var(--acc);color:var(--tx);background:var(--accSoft)}
+  .seg button small{display:block;color:var(--faint);font-size:10px;font-family:var(--mono)}
+  .rowline{display:flex;gap:8px}
+  .mini{flex:1;height:30px;border:1px solid var(--line2);background:transparent;color:var(--dim);
+    font-size:11.5px;font-family:inherit;cursor:pointer}
+  .mini:hover{border-color:var(--faint);color:var(--tx)}
+
+  @media (max-width:1080px){
+    .wrap{flex-direction:column}
+    .side{width:min(640px,100%)}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ================= 说明 ================= -->
+  <aside class="side">
+    <h1>模型测速 <em>· 列表内跑分（v2）</em></h1>
+    <p class="sub">
+      在「选择超分模型」浮层里加三个按钮：<b>一键测试全部</b> / <b>测试选中模型</b> /
+      <b>仅测试当前分组</b>。测完把每个硬件（多 GPU 各一条）的耗时写在模型名称下方。
+    </p>
+
+    <h2>演示控制</h2>
+    <div class="ctrl" style="width:auto">
+      <div class="seg" id="seg">
+        <button data-preset="phone" class="on">手机 · Adreno 740 + QNN HTP + CPU
+          <small>3 个硬件 · 1 块 GPU</small></button>
+        <button data-preset="dual">桌面 · RTX 3060 + UHD 770 + CPU
+          <small>3 个硬件 · 2 块 GPU 各一条 · NPU 不可用</small></button>
+        <button data-preset="cpu">仅 CPU（无 GPU / NPU）
+          <small>1 个硬件 · 两个不可用项标在硬件图例里</small></button>
+      </div>
+      <div class="rowline">
+        <button class="mini" id="btnReset">清空测试结果</button>
+        <button class="mini" id="btnFill">直接看完成态</button>
+      </div>
+    </div>
+
+    <h2>本轮定稿（按你的 6 条）</h2>
+    <ul>
+      <li><b>不可用硬件只说一次</b>：标在工具条下的硬件图例里，行内不重复。</li>
+      <li><b>不暴露测试次数</b>：固定 192×192 单块输入（GPU 3 次取中位数，CPU/NPU 1 次），
+        界面不出现次数。</li>
+      <li><b>关闭浮层 = 取消</b>，已完成结果保留；再次打开时浮层顶部弹出「继续测试」提示。</li>
+      <li><b>测试结束恢复原模型</b>（含后端偏好），不会替你切模型。</li>
+      <li><b>耗时结果始终保留</b>：切筛选、关浮层、切页都不丢；重测只覆盖被测的那几个模型。</li>
+      <li><b>新增「仅测试当前分组」</b>：只测当前筛选分组；在「全部」下禁用。</li>
+    </ul>
+
+    <h2>布局：工具条两行</h2>
+    <ul>
+      <li>第 1 行：三个按钮；运行时最右侧出现「停止」。</li>
+      <li>第 2 行：状态文字（左）+ 2px 进度条（右）。三个按钮一行放不下状态，
+        所以状态独占第二行——这是相对上一版 demo 的唯一结构性改动。</li>
+      <li>第 3 行：硬件图例（可用/不可用只写一次）。</li>
+    </ul>
+
+    <h2>字段契约</h2>
+    <table class="t">
+      <tr><th>字段</th><th>位置与规则</th></tr>
+      <tr><td class="k">模型名</td><td>第 1 行，完整显示不省略</td></tr>
+      <tr><td class="k">完整 ID</td><td>第 2 行，等宽 10px onnx 文件名</td></tr>
+      <tr><td class="k">耗时</td><td>第 3 行，等宽 10.5px；每个物理 GPU 一条 + NPU + CPU；
+        最快的用主色；失败写原因</td></tr>
+      <tr><td class="k">体积 / 状态</td><td>右侧两列不变（当前使用 / 已选 / —）</td></tr>
+    </table>
+
+    <h2>行状态</h2>
+    <table class="t">
+      <tr><th>状态</th><th>表现</th></tr>
+      <tr><td class="k">未测试</td><td>没有第 3 行，行高 52px</td></tr>
+      <tr><td class="k">测试中</td><td>当前硬件写「测试中…」，行高 68px</td></tr>
+      <tr><td class="k">完成</td><td>逐硬件耗时，最快用主色</td></tr>
+      <tr><td class="k">失败</td><td>该硬件写原因（红），其余照常</td></tr>
+      <tr><td class="k">取消</td><td>已完成的行保留；未跑的无第 3 行，并在下次打开时提示继续</td></tr>
+    </table>
+
+    <h2>演示怎么做</h2>
+    <ul>
+      <li>点「一键测试全部」→ 运行中可点「停止」，或点右上角 × 关闭浮层（= 取消）。</li>
+      <li>关闭后屏幕上出现「重新打开浮层」；再打开会看到顶部「上次测试未完成 23/46」提示。</li>
+      <li>提示里点「继续测试」只跑剩下的模型；点「忽略」保留现有结果并收起提示。</li>
+      <li>切换筛选后「仅测试当前分组」才可用（在「全部」下禁用）。</li>
+    </ul>
+
+    <h2>待确认（仅剩 2 条）</h2>
+    <ul>
+      <li><b>结果写不写盘</b>：demo 只存在页面内存；C++ 里我打算写进 <code>ui.ini</code>
+        （带硬件指纹，换显卡/换设备自动丢弃），这样重启也“始终保留”。</li>
+      <li><b>全量耗时</b>：46 模型 × 3 硬件，真机预计 3~6 分钟；「仅测试当前分组」就是为这个加的，
+        若仍嫌长，可以再限制“每模型只测 1 个 tile”（已经是 1 个）。</li>
+    </ul>
+  </aside>
+
+  <!-- ================= 屏幕 ================= -->
+  <main class="stage">
+    <div class="screen" id="screen">
+      <div class="bgtop"><span class="dot"></span>图片超分</div>
+      <div class="bgpage">
+        <h4>图片超分</h4>
+        <p>选择本地超分模型 · 一次一张</p>
+        <div class="bgstage">预览区</div>
+        <div class="bgcard"></div>
+      </div>
+
+      <div class="scrim" id="scrim"></div>
+      <button class="reopen" id="btnReopen" hidden>重新打开浮层</button>
+
+      <section class="sheet" id="sheet">
+        <div class="grip"></div>
+        <div class="shead">
+          <div class="stitles">
+            <h3>选择超分模型</h3>
+            <p>按算法分组 · 分组条吸顶 · 当前使用高亮</p>
+          </div>
+          <button class="x" id="btnClose">×</button>
+        </div>
+
+        <div class="chips" id="chips"></div>
+
+        <!-- 工具条 1：按钮 -->
+        <div class="tools">
+          <button class="tbtn primary" id="btnAll">一键测试全部</button>
+          <button class="tbtn" id="btnSel">测试选中模型</button>
+          <button class="tbtn" id="btnGroup">仅测试当前分组</button>
+          <button class="tbtn stop" id="btnStop" hidden>停止</button>
+        </div>
+        <!-- 工具条 2：状态 + 进度 -->
+        <div class="trow2">
+          <div class="tstat" id="tstat">—</div>
+          <div class="hbar" id="hbar"><i id="hfill"></i></div>
+        </div>
+        <div class="legend" id="legend"></div>
+
+        <div class="lhead">
+          <div>模型 · 完整 ID<span class="cnt" id="cnt">46 / 46</span></div>
+          <div class="r">体积</div>
+          <div class="r">状态</div>
+        </div>
+
+        <div class="mwrap" id="mwrap">
+          <div class="mlist" id="mlist"></div>
+          <div class="resume" id="resume" hidden>
+            <div class="rt">上次测试未完成<b id="resumeCnt">0/46</b></div>
+            <button class="go" id="btnResumeGo">继续测试</button>
+            <button id="btnResumeNo">忽略</button>
+          </div>
+        </div>
+
+        <div class="sfoot">
+          <div class="selrow"><span>已选</span><b id="selName">—</b></div>
+          <div class="fbtns">
+            <button id="btnCancel">关闭</button>
+            <button class="primary" id="btnOk">确定</button>
+          </div>
+        </div>
+      </section>
+
+      <div class="toast" id="toast"></div>
+    </div>
+
+    <p class="sub" style="font-size:11px;color:var(--faint);margin:0;text-align:center;max-width:480px">
+      提示：点「一键测试全部」看整表刷新；运行中点 × 关闭 → 重新打开会提示是否继续。
+    </p>
+  </main>
+</div>
+
+<script>
+const MODELS = [{"arch":"waifu2x","name":"waifu2x cunet 2x 降噪3","file":"waifu2x_cunet_up2x_denoise3.onnx","scale":2,"dn":3,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 2x 降噪2","file":"waifu2x_cunet_up2x_denoise2.onnx","scale":2,"dn":2,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 2x 降噪1","file":"waifu2x_cunet_up2x_denoise1.onnx","scale":2,"dn":1,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 2x 降噪0","file":"waifu2x_cunet_up2x_denoise0.onnx","scale":2,"dn":0,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 2x","file":"waifu2x_cunet_up2x.onnx","scale":2,"dn":0,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 1x 降噪3","file":"waifu2x_cunet_up1x_denoise3.onnx","scale":1,"dn":3,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 1x 降噪2","file":"waifu2x_cunet_up1x_denoise2.onnx","scale":1,"dn":2,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 1x 降噪1","file":"waifu2x_cunet_up1x_denoise1.onnx","scale":1,"dn":1,"mb":4.9},{"arch":"waifu2x","name":"waifu2x cunet 1x 降噪0","file":"waifu2x_cunet_up1x_denoise0.onnx","scale":1,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 2x","file":"realcugan_se_up2x.onnx","scale":2,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 2x 保守","file":"realcugan_se_up2x_conservative.onnx","scale":2,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 2x 降噪1","file":"realcugan_se_up2x_denoise1.onnx","scale":2,"dn":1,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 2x 降噪2","file":"realcugan_se_up2x_denoise2.onnx","scale":2,"dn":2,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 2x 降噪3","file":"realcugan_se_up2x_denoise3.onnx","scale":2,"dn":3,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 3x","file":"realcugan_se_up3x.onnx","scale":3,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 3x 保守","file":"realcugan_se_up3x_conservative.onnx","scale":3,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 3x 降噪3","file":"realcugan_se_up3x_denoise3.onnx","scale":3,"dn":3,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN SE 4x","file":"realcugan_se_up4x.onnx","scale":4,"dn":0,"mb":5.4},{"arch":"realcugan","name":"Real-CUGAN SE 4x 保守","file":"realcugan_se_up4x_conservative.onnx","scale":4,"dn":0,"mb":5.4},{"arch":"realcugan","name":"Real-CUGAN SE 4x 降噪3","file":"realcugan_se_up4x_denoise3.onnx","scale":4,"dn":3,"mb":5.4},{"arch":"realcugan","name":"Real-CUGAN Pro 2x","file":"realcugan_pro_up2x.onnx","scale":2,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN Pro 2x 保守","file":"realcugan_pro_up2x_conservative.onnx","scale":2,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN Pro 2x 降噪3","file":"realcugan_pro_up2x_denoise3.onnx","scale":2,"dn":3,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN Pro 3x","file":"realcugan_pro_up3x.onnx","scale":3,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN Pro 3x 保守","file":"realcugan_pro_up3x_conservative.onnx","scale":3,"dn":0,"mb":4.9},{"arch":"realcugan","name":"Real-CUGAN Pro 3x 降噪3","file":"realcugan_pro_up3x_denoise3.onnx","scale":3,"dn":3,"mb":4.9},{"arch":"realesrgan","name":"Real-ESRGAN anime 2x","file":"realesrgan_animevideo_v3_up2x.onnx","scale":2,"dn":0,"mb":2.4},{"arch":"realesrgan","name":"Real-ESRGAN anime 3x","file":"realesrgan_animevideo_v3_up3x.onnx","scale":3,"dn":0,"mb":2.4},{"arch":"realesrgan","name":"Real-ESRGAN anime 4x","file":"realesrgan_animevideo_v3_up4x.onnx","scale":4,"dn":0,"mb":2.4},{"arch":"realesrgan","name":"Real-ESRGAN x4plus 4x","file":"realesrgan_x4plus_up4x.onnx","scale":4,"dn":0,"mb":64.0},{"arch":"realesrgan","name":"Real-ESRGAN x4plus anime 4x","file":"realesrgan_x4plus_anime_up4x.onnx","scale":4,"dn":0,"mb":17.1},{"arch":"realesrgan","name":"Real-ESRGAN general 4x","file":"realesrgan_general_up4x.onnx","scale":4,"dn":0,"mb":4.6},{"arch":"realesrgan","name":"Real-ESRGAN general wdn 4x","file":"realesrgan_general_wdn_up4x.onnx","scale":4,"dn":0,"mb":4.6},{"arch":"srmd","name":"SRMD 2x","file":"srmd_x2.onnx","scale":2,"dn":0,"mb":5.8},{"arch":"srmd","name":"SRMD 3x","file":"srmd_x3.onnx","scale":3,"dn":0,"mb":5.8},{"arch":"srmd","name":"SRMD 4x","file":"srmd_x4.onnx","scale":4,"dn":0,"mb":5.9},{"arch":"srmd","name":"SRMD-NF 2x","file":"srmdnf_x2.onnx","scale":2,"dn":0,"mb":5.8},{"arch":"srmd","name":"SRMD-NF 3x","file":"srmdnf_x3.onnx","scale":3,"dn":0,"mb":5.8},{"arch":"srmd","name":"SRMD-NF 4x","file":"srmdnf_x4.onnx","scale":4,"dn":0,"mb":5.9},{"arch":"quant","name":"量化 · realcugan_pro_up2x_q16_lowq","file":"realcugan_pro_up2x_q16_lowq.onnx","scale":2,"dn":0,"mb":1.3},{"arch":"quant","name":"量化 · realcugan_pro_up3x_conservative_q16_lowq","file":"realcugan_pro_up3x_conservative_q16_lowq.onnx","scale":3,"dn":0,"mb":1.3},{"arch":"quant","name":"量化 · realcugan_pro_up3x_q16_lowq","file":"realcugan_pro_up3x_q16_lowq.onnx","scale":3,"dn":0,"mb":1.3},{"arch":"quant","name":"量化 · realesrgan_general_up4x_q16_lowq","file":"realesrgan_general_up4x_q16_lowq.onnx","scale":4,"dn":0,"mb":1.2},{"arch":"quant","name":"量化 · realesrgan_general_wdn_up4x_q16_lowq","file":"realesrgan_general_wdn_up4x_q16_lowq.onnx","scale":4,"dn":0,"mb":1.2},{"arch":"quant","name":"量化 · srmdnf_x2_q16_lowq","file":"srmdnf_x2_q16_lowq.onnx","scale":2,"dn":0,"mb":1.5},{"arch":"quant","name":"量化 · srmdnf_x3_q16_lowq","file":"srmdnf_x3_q16_lowq.onnx","scale":2,"dn":0,"mb":1.5}];
+
+const ARCH = {
+  waifu2x:    {label:'waifu2x',    chip:'waifu2x',    dot:'#57a9a1'},
+  realcugan:  {label:'Real-CUGAN', chip:'Real-CUGAN', dot:'#8f83d6'},
+  realesrgan: {label:'Real-ESRGAN',chip:'Real-ESRGAN',dot:'#d3a03c'},
+  srmd:       {label:'SRMD',       chip:'SRMD',       dot:'#6f9ad6'},
+  quant:      {label:'量化模型（QNN / CPU）', chip:'量化', dot:'#b07a8c'}
+};
+
+const PRESETS = {
+  phone: {hw:[
+      {id:'gpu0', short:'GPU0', kind:'gpu', div:13.5},
+      {id:'npu',  short:'NPU',  kind:'npu', div:21.0},
+      {id:'cpu',  short:'CPU',  kind:'cpu', div:1}],
+    missing:[]},
+  dual: {hw:[
+      {id:'gpu0', short:'GPU0', kind:'gpu', div:16.0},
+      {id:'gpu1', short:'GPU1', kind:'gpu', div:6.5},
+      {id:'cpu',  short:'CPU',  kind:'cpu', div:1}],
+    missing:[{short:'NPU', why:'QNN 库缺失'}]},
+  cpu: {hw:[
+      {id:'cpu', short:'CPU', kind:'cpu', div:1}],
+    missing:[{short:'GPU', why:'Vulkan 未初始化'}, {short:'NPU', why:'QNN 库缺失'}]}
+};
+
+const CURRENT = 'waifu2x cunet 2x 降噪3';
+
+const state = {
+  preset: 'phone',
+  selected: CURRENT,
+  filter: '',
+  results: {},
+  running: false,
+  stopping: false,
+  activeModel: null,
+  activeHw: null,
+  startedAt: 0,
+  doneRows: 0,
+  totalRows: 0,
+  runIndex: 0,
+  pending: null,
+  closed: false
+};
+
+const $ = (id) => document.getElementById(id);
+const mlist = $('mlist');
+
+/* ---------- 数据与工具 ---------- */
+function hash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
+function jitter(base,key,pct){const r=(hash(key)%2000)/1000-1;return Math.max(8,base*(1+r*pct));}
+function baseCpuMs(m){
+  const sf={1:.82,2:1,3:1.42,4:1.88}[m.scale]||1;
+  const af={waifu2x:1,realcugan:1.16,realesrgan:1.55,srmd:1.32,quant:.9}[m.arch]||1;
+  return 980*sf*af;
+}
+function hwMs(m,hw){return jitter(baseCpuMs(m)/(hw.div||1),m.name+'|'+hw.id,hw.kind==='cpu'?0.05:0.09);}
+function failOf(m,hw){
+  if(hw.kind==='gpu'&&m.arch==='quant')return '量化图不支持';
+  if(state.preset==='dual'&&hw.id==='gpu1'&&m.scale>=3)return '显存不足';
+  if(hw.kind==='npu'&&m.arch==='realesrgan')return '算子不支持';
+  return null;
+}
+function fmtMs(ms){return ms>=1000?(ms/1000).toFixed(2)+' s':Math.round(ms)+' ms';}
+function hwList(){return PRESETS[state.preset].hw;}
+function modelByName(n){return MODELS.find(m=>m.name===n);}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+/* ---------- 渲染 ---------- */
+function buildChips(){
+  const counts={};
+  MODELS.forEach(m=>counts[m.arch]=(counts[m.arch]||0)+1);
+  const order=['','waifu2x','realcugan','realesrgan','srmd','quant'];
+  const host=$('chips'); host.innerHTML='';
+  order.forEach(a=>{
+    const label=a?ARCH[a].chip:'全部';
+    const n=a?counts[a]:MODELS.length;
+    const b=document.createElement('button');
+    b.className='chip'+(state.filter===a?' on':'');
+    b.innerHTML=`${label}<b>${n}</b>`;
+    b.onclick=()=>{ if(state.running)return; state.filter=a; buildChips(); renderList(); updateControls(); };
+    host.appendChild(b);
+  });
+}
+
+function visibleModels(){return MODELS.filter(m=>!state.filter||m.arch===state.filter);}
+
+function renderList(){
+  const list=visibleModels();
+  $('cnt').textContent=`${list.length} / ${MODELS.length}`;
+  mlist.innerHTML='';
+  let lastArch=null, groupEl=null, rowsEl=null;
+  list.forEach(m=>{
+    if(m.arch!==lastArch){
+      lastArch=m.arch;
+      groupEl=document.createElement('div'); groupEl.className='group';
+      const g=document.createElement('div'); g.className='grp';
+      const n=MODELS.filter(x=>x.arch===m.arch).length;
+      g.innerHTML=`<span class="gd" style="background:${ARCH[m.arch].dot}"></span>${ARCH[m.arch].label}<em>${n}</em>`;
+      groupEl.appendChild(g);
+      rowsEl=document.createElement('div'); groupEl.appendChild(rowsEl);
+      mlist.appendChild(groupEl);
+    }
+    rowsEl.appendChild(buildRow(m));
+  });
+  list.forEach(m=>renderTime(m.name));
+}
+
+function buildRow(m){
+  const row=document.createElement('div');
+  row.className='row'; row.dataset.name=m.name;
+  if(m.name===CURRENT)row.classList.add('on');
+  if(m.name===state.selected)row.classList.add('sel');
+  const name=document.createElement('div'); name.className='r-name'; name.textContent=m.name;
+  const id=document.createElement('div'); id.className='r-id'; id.textContent=m.file;
+  const size=document.createElement('div'); size.className='r-size';
+  size.textContent=m.mb>0?m.mb.toFixed(1)+' MB':'—';
+  const st=document.createElement('div'); st.className='r-state'; st.innerHTML=badgeHtml(m.name);
+  row.append(name,id,size,st);
+  row.onclick=()=>{ if(state.running)return; selectModel(m.name); };
+  return row;
+}
+
+function badgeHtml(name){
+  if(name===CURRENT)return '<span class="badge cur">当前使用</span>';
+  if(name===state.selected)return '<span class="badge sel">已选</span>';
+  return '<span class="badge">—</span>';
+}
+
+function renderTime(name){
+  const row=mlist.querySelector(`.row[data-name="${cssEsc(name)}"]`);
+  if(!row)return;
+  const old=row.querySelector('.r-time');
+  const res=state.results[name];
+  const hws=hwList();
+  const testing=state.running&&state.activeModel===name;
+  if(!res&&!testing){ if(old)old.remove(); return; }
+  let el=old;
+  if(!el){ el=document.createElement('div'); el.className='r-time'; row.appendChild(el); }
+  let bestId=null,bestMs=Infinity;
+  if(res)hws.forEach(hw=>{const r=res[hw.id];if(r&&r.ms!=null&&r.ms<bestMs){bestMs=r.ms;bestId=hw.id;}});
+  const parts=[];
+  hws.forEach(hw=>{
+    const r=res?res[hw.id]:null;
+    if(!r){
+      if(testing&&state.activeHw===hw.id)
+        parts.push(`<span class="hw run"><i>${hw.short}</i><b>测试中…</b></span>`);
+      return;
+    }
+    if(r.fail){
+      parts.push(`<span class="hw fail"><i>${hw.short}</i><b>${r.fail}</b></span>`);
+    }else{
+      const cls=hw.id===bestId?'hw best':'hw';
+      const [v,u]=fmtMs(r.ms).split(' ');
+      parts.push(`<span class="${cls}"><i>${hw.short}</i><b>${v}</b><u>${u}</u></span>`);
+    }
+  });
+  if(!parts.length){ el.remove(); return; }
+  el.innerHTML=parts.join('<span class="r-sep">·</span>');
+}
+
+function cssEsc(s){return s.replace(/["\\]/g,'\\$&');}
+
+function selectModel(name){
+  state.selected=name;
+  document.querySelectorAll('.row').forEach(r=>{
+    r.classList.toggle('sel', r.dataset.name===name && name!==CURRENT);
+    const st=r.querySelector('.r-state');
+    if(st)st.innerHTML=badgeHtml(r.dataset.name);
+  });
+  updateSelBar();
+  updateControls();
+}
+
+function updateSelBar(){
+  const m=modelByName(state.selected);
+  $('selName').textContent=m?`${m.name} · ${m.file}`:'—';
+}
+
+function updateControls(){
+  $('btnAll').disabled=state.running;
+  $('btnSel').disabled=state.running||!state.selected;
+  $('btnGroup').disabled=state.running||!state.filter;
+  $('btnStop').hidden=!state.running;
+  $('btnStop').disabled=state.stopping;
+  document.querySelectorAll('.chip').forEach(c=>c.style.pointerEvents=state.running?'none':'');
+}
+
+function updateLegend(){
+  const p=PRESETS[state.preset];
+  const hw=p.hw.map(h=>`<b>${h.short}</b>`).join('');
+  const miss=p.missing.map(x=>`<span class="miss">${x.short}</span><span class="why">不可用：${x.why}</span>`).join(' · ');
+  $('legend').innerHTML=`<span>测试硬件</span>${hw}${miss?'<em>· '+miss+'</em>':''}<em>· 192×192 单块</em>`;
+}
+
+function setIdleStat(){
+  const p=PRESETS[state.preset];
+  $('tstat').className='tstat';
+  $('tstat').textContent=`将测试 ${p.hw.map(h=>h.short).join(' · ')}`;
+}
+
+/* ---------- 测速 ---------- */
+async function run(list, base=0, total=null){
+  if(state.running||!list.length)return;
+  state.running=true; state.stopping=false;
+  state.startedAt=performance.now();
+  state.doneRows=base;
+  state.totalRows=total||list.length;
+  state.runIndex=0;
+  state.pending=null;
+  hideResume();
+  updateControls();
+  $('hbar').classList.add('on');
+  $('hfill').style.width=Math.round(base/state.totalRows*100)+'%';
+  $('tstat').className='tstat run';
+
+  for(let i=0;i<list.length;i++){
+    if(state.stopping)break;
+    const m=list[i];
+    state.runIndex=i;
+    state.activeModel=m.name;
+    if(!state.results[m.name])state.results[m.name]={};
+    renderTime(m.name);
+    for(const hw of hwList()){
+      if(state.stopping)break;
+      state.activeHw=hw.id;
+      renderTime(m.name);
+      $('tstat').textContent=`测试中 ${state.doneRows+1}/${state.totalRows} · ${hw.short}`;
+      await sleep(55+(hash(m.name+hw.id)%55));
+      const f=failOf(m,hw);
+      state.results[m.name][hw.id]=f?{fail:f}:{ms:hwMs(m,hw)};
+      renderTime(m.name);
+    }
+    state.doneRows++;
+    $('hfill').style.width=Math.round(state.doneRows/state.totalRows*100)+'%';
+    if(list.length>1)scrollRowIntoView(m.name);
+  }
+
+  if(state.activeModel)renderTime(state.activeModel);
+  const stopped=state.stopping;
+  const rest=stopped?list.slice(state.runIndex):[];
+  state.pending=stopped&&rest.length?{models:rest,done:state.doneRows,total:state.totalRows}:null;
+  state.running=false; state.activeModel=null; state.activeHw=null; state.stopping=false;
+  $('hbar').classList.remove('on');
+  const secs=((performance.now()-state.startedAt)/1000).toFixed(1);
+  $('tstat').className='tstat';
+  $('tstat').textContent=stopped
+    ? `已取消 · 完成 ${state.doneRows}/${state.totalRows}`
+    : `完成 ${list.length} 个模型 · ${secs}s`;
+  updateControls();
+  if(state.pending)showResume();
+}
+
+function scrollRowIntoView(name){
+  const row=mlist.querySelector(`.row[data-name="${cssEsc(name)}"]`);
+  if(!row)return;
+  const top=row.getBoundingClientRect().top-mlist.getBoundingClientRect().top+mlist.scrollTop-26;
+  const cur=mlist.scrollTop;
+  if(top<cur||top>cur+mlist.clientHeight-90)
+    mlist.scrollTo({top:Math.max(0,top),behavior:'smooth'});
+}
+
+/* ---------- 取消 / 关闭 / 恢复 ---------- */
+function cancelRun(){
+  if(!state.running)return;
+  state.stopping=true;
+  $('tstat').textContent='正在取消…';
+  updateControls();
+}
+
+function closeSheet(){
+  if(state.running)cancelRun();
+  state.closed=true;
+  $('sheet').hidden=true;
+  $('scrim').hidden=true;
+  $('btnReopen').hidden=false;
+}
+
+function openSheet(){
+  state.closed=false;
+  $('sheet').hidden=false;
+  $('scrim').hidden=false;
+  $('btnReopen').hidden=true;
+  if(state.pending)showResume(); else hideResume();
+}
+
+function showResume(){
+  if(!state.pending)return;
+  $('resumeCnt').textContent=`${state.pending.done}/${state.pending.total}`;
+  $('resume').hidden=false;
+}
+function hideResume(){ $('resume').hidden=true; }
+
+/* ---------- 演示控制 ---------- */
+function fillInstant(){
+  state.results={};
+  MODELS.forEach(m=>{
+    state.results[m.name]={};
+    hwList().forEach(hw=>{
+      const f=failOf(m,hw);
+      state.results[m.name][hw.id]=f?{fail:f}:{ms:hwMs(m,hw)};
+    });
+  });
+  state.pending=null; hideResume();
+  renderList();
+  $('tstat').className='tstat';
+  $('tstat').textContent=`完成 ${MODELS.length} 个模型 · 演示数据`;
+}
+
+function setPreset(p){
+  if(state.running)return;
+  state.preset=p;
+  document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b.dataset.preset===p));
+  state.results={}; state.pending=null; hideResume();
+  renderList(); updateLegend(); setIdleStat();
+  toast('已切换演示硬件，结果已清空');
+}
+
+function resetResults(){
+  if(state.running)return;
+  state.results={}; state.pending=null; hideResume();
+  renderList(); setIdleStat();
+  $('hfill').style.width='0%';
+  toast('测试结果已清空');
+}
+
+let toastTimer=null;
+function toast(text){
+  const t=$('toast'); t.textContent=text; t.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.classList.remove('on'),1600);
+}
+
+/* ---------- 初始化 ---------- */
+const qs=new URLSearchParams(location.search);
+if(qs.get('preset')&&PRESETS[qs.get('preset')])state.preset=qs.get('preset');
+document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b.dataset.preset===state.preset));
+buildChips(); updateLegend(); updateSelBar(); setIdleStat(); renderList(); updateControls();
+
+$('btnAll').onclick=()=>{
+  if(state.running)return;
+  if(state.filter){state.filter='';buildChips();renderList();}
+  run(MODELS.slice());
+};
+$('btnSel').onclick=()=>{
+  if(state.running)return;
+  const m=modelByName(state.selected); if(!m)return;
+  if(state.filter&&m.arch!==state.filter){state.filter='';buildChips();renderList();}
+  run([m]);
+};
+$('btnGroup').onclick=()=>{
+  if(state.running||!state.filter)return;
+  run(visibleModels());
+};
+$('btnStop').onclick=cancelRun;
+$('btnClose').onclick=closeSheet;
+$('btnCancel').onclick=closeSheet;
+$('btnReopen').onclick=openSheet;
+$('btnResumeGo').onclick=()=>{
+  const p=state.pending; if(!p)return;
+  hideResume();
+  run(p.models,p.done,p.total);
+};
+$('btnResumeNo').onclick=()=>{state.pending=null;hideResume();};
+$('btnReset').onclick=resetResults;
+$('btnFill').onclick=()=>{if(!state.running)fillInstant();};
+$('btnOk').onclick=()=>toast(`演示：应用 ${state.selected}`);
+document.querySelectorAll('#seg button').forEach(b=>{b.onclick=()=>setPreset(b.dataset.preset);});
+
+if(qs.get('results')==='1')fillInstant();
+if(qs.get('filter')&&(qs.get('filter')==='all'||ARCH[qs.get('filter')])){
+  state.filter=qs.get('filter')==='all'?'':qs.get('filter');
+  buildChips(); renderList(); updateControls();
+}
+if(qs.get('scroll')){
+  const target=modelByName(qs.get('scroll'));
+  if(target)setTimeout(()=>{
+    const row=mlist.querySelector(`.row[data-name="${cssEsc(target.name)}"]`);
+    if(row)mlist.scrollTop=row.getBoundingClientRect().top-mlist.getBoundingClientRect().top+mlist.scrollTop-26;
+  },150);
+}
+if(qs.get('run')==='all')setTimeout(()=>run(MODELS.slice()),350);
+if(qs.get('pending')==='1'){
+  state.pending={models:MODELS.slice(23),done:23,total:MODELS.length};
+  state.results={};
+  MODELS.slice(0,23).forEach(m=>{
+    state.results[m.name]={};
+    hwList().forEach(hw=>{
+      const f=failOf(m,hw);
+      state.results[m.name][hw.id]=f?{fail:f}:{ms:hwMs(m,hw)};
+    });
+  });
+  renderList(); showResume();
+}
+</script>
+</body>
+</html>

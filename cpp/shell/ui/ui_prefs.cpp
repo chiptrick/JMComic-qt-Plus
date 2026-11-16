@@ -4,6 +4,7 @@
 #include <QStringList>
 
 #include "app_paths.h"
+#include "data_migrator.h"
 
 namespace UiPrefs {
 
@@ -45,7 +46,9 @@ void Set(const QString &key, const QVariant &value)
     QSettings s(path, QSettings::IniFormat);
     s.setValue(QStringLiteral("ui/") + key, value);
     s.sync();
-    if (s.status() != QSettings::NoError)
+    if (s.status() == QSettings::NoError)
+        DataMigrator::RollingBackup(path);   // 写成功才滚动备份
+    else
         qWarning("ui-prefs: 写入失败 status=%d key=%s", int(s.status()), qPrintable(key));
 }
 

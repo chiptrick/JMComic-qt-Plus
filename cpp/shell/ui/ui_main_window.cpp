@@ -5,6 +5,8 @@
 #include "../net_backend.h"
 #include "../tls/tls_channel.h"
 #include "jm_api.h"
+#include "jm_account.h"
+#include "log_export.h"
 #include "net_client.h"
 #include "download_manager.h"
 #include "page_loader.h"
@@ -13,6 +15,7 @@
 #include "region_code.h"
 #include "session.h"
 #include "ui_prefs.h"
+#include "update_checker.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,11 +35,16 @@
 #include <QApplication>
 #include <QAbstractItemView>
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QDesktopServices>
 #include <QEventLoop>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QWidgetAction>
 #include <QLayout>
 #include <QKeyEvent>
 #include <QMenu>
@@ -61,6 +69,7 @@
 #include <QVariantAnimation>
 #include <QTimer>
 #include <QToolButton>
+#include <QTouchEvent>
 #include <QVBoxLayout>
 #include <QWindow>
 
@@ -71,6 +80,7 @@
 #include "motion.h"
 #include "page_transition.h"
 #include "touch.h"
+#include "touch_menu.h"
 #include "ui_kit.h"
 #include "../reader.h"
 
@@ -866,6 +876,200 @@ void MainWindow::BuildPages()
     connect(qobject_cast<FavoritePage *>(pages_[int(PageId::Favorite)]),
             &FavoritePage::LoginRequested, this, [this] { Go(PageId::Login); });
 
+    // ---- 云端记录 / 我的评论 / 连载更新：页面发意图，外壳走 JmApi ----
+    if (auto *rh = qobject_cast<RemoteHistoryPage *>(pages_[int(PageId::RemoteHistory)])) {
+        connect(rh, &RemoteHistoryPage::RefreshRequested, this, &MainWindow::RequestWatchList);
+        connect(rh, &RemoteHistoryPage::OpenComic, this, &MainWindow::OpenDetail);
+        connect(rh, &RemoteHistoryPage::LoginRequested, this, [this] { Go(PageId::Login); });
+    }
+    if (auto *mc = qobject_cast<MyCommentPage *>(pages_[int(PageId::MyComment)])) {
+        connect(mc, &MyCommentPage::RefreshRequested, this, &MainWindow::RequestMyComments);
+        connect(mc, &MyCommentPage::LoginRequested, this, [this] { Go(PageId::Login); });
+        connect(mc, &MyCommentPage::OpenAlbum, this, [this](const QString &id) {
+            OpenAlbumById(id);
+        });
+    }
+    if (auto *wk = qobject_cast<WeekPage *>(pages_[int(PageId::Week)])) {
+        connect(wk, &WeekPage::RefreshRequested, this, &MainWindow::RequestWeek);
+        connect(wk, &WeekPage::OpenComic, this, &MainWindow::OpenDetail);
+    }
+    // 本地收藏 / 网络存储：点条目直接用阅读器打开该目录
+    if (auto *lf = qobject_cast<LocalFavoritePage *>(pages_[int(PageId::LocalFavorite)]))
+        connect(lf, &LocalFavoritePage::OpenLocal, this, &MainWindow::OpenLocalImages);
+    if (auto *nas = qobject_cast<NasPage *>(pages_[int(PageId::Nas)]))
+        connect(nas, &NasPage::OpenLocal, this, &MainWindow::OpenLocalImages);
+
+    // ---- 作品评论：详情页入口 + 列表/发送 ----
+    if (auto *cp = qobject_cast<CommentPage *>(pages_[int(PageId::Comment)])) {
+        connect(cp, &CommentPage::RefreshRequested, this,
+                [this](const QString &albumId, int page) {
+                    EnsureApi();
+                    api_->FetchComments(albumId, page);
+                });
+        connect(cp, &CommentPage::SendRequested, this,
+                [this](const QString &albumId, const QString &text) {
+                    EnsureApi();
+                    api_->SendComment(albumId, text);
+                });
+        connect(cp, &CommentPage::LoginRequested, this, [this] { Go(PageId::Login); });
+    }
+    if (detail_) {
+        connect(detail_, &DetailPage::CommentsRequested, this, [this](const Comic &c) {
+            auto *cp = qobject_cast<CommentPage *>(pages_[int(PageId::Comment)]);
+            if (!cp)
+                return;
+            cp->SetAlbum(c.id, c.title);
+            Go(PageId::Comment, true);
+        });
+    }
+
+    // ---- 关于页：导出日志 / 检查更新（真实动作）----
+    updates_ = new UpdateChecker(this);
+    account_ = new JmAccount(this);
+    connect(updates_, &UpdateChecker::Log, this,
+            [](const QString &l) { qWarning("update: %s", qPrintable(l)); });
+    connect(account_, &JmAccount::Log, this,
+            [](const QString &l) { qWarning("account: %s", qPrintable(l)); });
+
+    if (auto *about = qobject_cast<AboutPage *>(pages_[int(PageId::About)])) {
+        about->SetVersionInfo(QCoreApplication::applicationVersion(),
+                              UpdateChecker::ReleaseLine());
+        connect(about, &AboutPage::ExportLogsRequested, this, [this] { ExportLogsTo(); });
+        connect(about, &AboutPage::OpenLogDirRequested, this, [this] {
+            const QString dir = LogExport::LogDir();
+            if (dir.isEmpty()) {
+                Toast::Show(this, QStringLiteral("日志在 logcat：adb logcat -s jmcomic"));
+                return;
+            }
+            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(dir)))
+                Toast::Show(this, QStringLiteral("无法打开目录：%1").arg(dir));
+        });
+        connect(about, &AboutPage::CheckUpdateRequested, this, &MainWindow::CheckUpdates);
+        connect(about, &AboutPage::OpenUrlRequested, this, [](const QString &url) {
+            QDesktopServices::openUrl(QUrl(url));
+        });
+    }
+    connect(updates_, &UpdateChecker::CheckFinished, this,
+            [this](bool ok, bool hasUpdate, const QString &version, const QString &error) {
+                auto *about = qobject_cast<AboutPage *>(pages_[int(PageId::About)]);
+                if (!about)
+                    return;
+                if (!ok) {
+                    about->SetUpdateStatus(QStringLiteral("检查更新失败：%1").arg(error), false);
+                    return;
+                }
+                if (!hasUpdate) {
+                    about->SetUpdateStatus(
+                        QStringLiteral("已是最新（%1 · 发行线 %2）")
+                            .arg(version, UpdateChecker::ReleaseLine()),
+                        true);
+                    about->SetUpdateResult(QString(), QString());
+                    return;
+                }
+                about->SetUpdateStatus(
+                    QStringLiteral("发现新版本 %1（当前发行线 %2）")
+                        .arg(version, UpdateChecker::ReleaseLine()),
+                    true);
+            });
+    connect(updates_, &UpdateChecker::ChangelogReady, this,
+            [this](bool ok, const QString &version, const QString &text, const QString &error) {
+                auto *about = qobject_cast<AboutPage *>(pages_[int(PageId::About)]);
+                if (!about)
+                    return;
+                if (!ok) {
+                    about->SetUpdateStatus(
+                        QStringLiteral("有新版本 %1，但更新日志获取失败：%2").arg(version, error),
+                        false);
+                    return;
+                }
+                about->SetUpdateResult(version, text);
+            });
+    connect(updates_, &UpdateChecker::ConfigReady, this,
+            [this](bool ok, const UpdateChecker::Config &cfg, const QString &error) {
+                auto *about = qobject_cast<AboutPage *>(pages_[int(PageId::About)]);
+                if (!about)
+                    return;
+                if (!ok) {
+                    about->SetConfigLine(QStringLiteral("服务端配置：同步失败（%1）").arg(error));
+                    return;
+                }
+                about->SetConfigLine(
+                    QStringLiteral("服务端配置：Ver %1 · %2 · Web %3 个 / API %4 个 / 图床 %5 个")
+                        .arg(cfg.ver)
+                        .arg(cfg.verTime)
+                        .arg(cfg.webUrls.size())
+                        .arg(cfg.apiUrls.size())
+                        .arg(cfg.imageUrls.size()));
+                // 账号网页流程用最新的 Web 域名（配置里 UrlList 才是权威来源）
+                if (!cfg.webUrls.isEmpty())
+                    account_->SetBases(cfg.webUrls);
+            });
+
+    // ---- 登录页：注册 / 找回密码 / 重发验证 / 验证码 ----
+    if (loginPage) {
+        connect(loginPage, &LoginPage::RegisterRequested, this,
+                [this](const QString &user, const QString &email, const QString &pass,
+                       const QString &pass2, const QString &gender, const QString &captcha) {
+                    if (!account_)
+                        return;
+                    account_->Register(user, email, pass, pass2, gender, captcha);
+                });
+        connect(loginPage, &LoginPage::ResetPasswordRequested, this, [this](const QString &email) {
+            if (account_)
+                account_->ResetPassword(email);
+        });
+        connect(loginPage, &LoginPage::ResendVerifyRequested, this,
+                [this](const QString &user, const QString &pass) {
+                    if (account_)
+                        account_->ResendVerifyMail(user, pass);
+                });
+        connect(loginPage, &LoginPage::CaptchaRefreshRequested, this, [this] {
+            if (account_)
+                account_->FetchCaptcha();
+        });
+    }
+    connect(account_, &JmAccount::RegisterFinished, this,
+            [this](bool ok, const QString &message) {
+                auto *lp = qobject_cast<LoginPage *>(pages_[int(PageId::Login)]);
+                if (!lp)
+                    return;
+                lp->SetPanelBusy(false);
+                lp->SetPanelStatus(message, ok);
+                if (ok)
+                    Toast::Show(this, QStringLiteral("注册请求已提交"));
+            });
+    connect(account_, &JmAccount::ResetPasswordFinished, this,
+            [this](bool ok, const QString &message) {
+                auto *lp = qobject_cast<LoginPage *>(pages_[int(PageId::Login)]);
+                if (!lp)
+                    return;
+                lp->SetPanelBusy(false);
+                lp->SetPanelStatus(message, ok);
+            });
+    connect(account_, &JmAccount::VerifyMailFinished, this,
+            [this](bool ok, const QString &message) {
+                auto *lp = qobject_cast<LoginPage *>(pages_[int(PageId::Login)]);
+                if (!lp)
+                    return;
+                lp->SetPanelBusy(false);
+                lp->SetPanelStatus(message, ok);
+            });
+    connect(account_, &JmAccount::CaptchaReady, this,
+            [this](bool ok, const QByteArray &image, const QString &, const QString &error) {
+                auto *lp = qobject_cast<LoginPage *>(pages_[int(PageId::Login)]);
+                if (!lp)
+                    return;
+                if (!ok) {
+                    lp->SetCaptchaError(error);
+                    return;
+                }
+                const QImage img = QImage::fromData(image);
+                if (img.isNull())
+                    lp->SetCaptchaError(QStringLiteral("图片无法解码"));
+                else
+                    lp->SetCaptcha(img);
+            });
+
     // 分流页：选择变化立刻应用到 API / 封面 / 页图
     connect(qobject_cast<ProxyPage *>(pages_[int(PageId::Proxy)]), &ProxyPage::Applied,
             this, &MainWindow::ApplyProxySettings);
@@ -973,23 +1177,7 @@ void MainWindow::BuildPages()
 
     // 本地 → 阅读：直接把目录里的真实图片交给阅读器
     connect(qobject_cast<LocalPage *>(pages_[int(PageId::Local)]), &LocalPage::OpenLocal, this,
-            [this](const QString &path) {
-                const QDir dir(path);
-                const QStringList names = dir.entryList(
-                    {QStringLiteral("*.jpg"), QStringLiteral("*.jpeg"), QStringLiteral("*.png"),
-                     QStringLiteral("*.webp")},
-                    QDir::Files, QDir::Name);
-                if (names.isEmpty()) {
-                    Toast::Show(this, QStringLiteral("该目录没有可读图片"));
-                    return;
-                }
-                QStringList files;
-                files.reserve(names.size());
-                for (const QString &n : names)
-                    files << dir.absoluteFilePath(n);
-                reader_->ShowImages(dir.dirName(), files);
-                Go(PageId::Reader);
-            });
+            [this](const QString &path) { OpenLocalImages(path); });
 }
 
 void MainWindow::WirePage(PageBase *page, PageId id)
@@ -1797,10 +1985,125 @@ void MainWindow::EnsureApi()
             lp->SetLoggedIn(false);
         if (auto *fp = qobject_cast<FavoritePage *>(pages_[int(PageId::Favorite)]))
             fp->SetState(FavoritePage::State::NotLoggedIn);
+        // 云端记录/我的评论同属"账号数据"：会话失效后必须立刻回到"去登录"，
+        // 否则页面上还留着上一个账号的记录。
+        if (auto *rh = qobject_cast<RemoteHistoryPage *>(pages_[int(PageId::RemoteHistory)]))
+            rh->SetState(RemoteHistoryPage::State::NotLoggedIn);
+        if (auto *mc = qobject_cast<MyCommentPage *>(pages_[int(PageId::MyComment)]))
+            mc->SetState(MyCommentPage::State::NotLoggedIn);
         UpdateNavUser();
         Toast::Show(this, msg.isEmpty() ? QStringLiteral("登录已失效，请重新登录") : msg);
         qWarning("session: expired (%s)", qPrintable(msg));
     });
+
+    // ---- 云端记录（/watch_list）----
+    connect(api_, &JmApi::WatchListReady, this,
+            [this](bool ok, const QVector<JmComicItem> &items, int total, int page,
+                   const QString &err) {
+                auto *rh = qobject_cast<RemoteHistoryPage *>(pages_[int(PageId::RemoteHistory)]);
+                if (!rh)
+                    return;
+                if (!ok) {
+                    // "未登录"是页面状态，不是错误；其余才是失败
+                    if (err == QLatin1String("未登录"))
+                        rh->SetState(RemoteHistoryPage::State::NotLoggedIn);
+                    else
+                        rh->SetState(RemoteHistoryPage::State::Error, err);
+                    qWarning("watchlist: fail page=%d err=%s", page, qPrintable(err));
+                    return;
+                }
+                QVector<Comic> comics;
+                comics.reserve(items.size());
+                for (const JmComicItem &it : items) {
+                    Comic c;
+                    c.id = it.id;
+                    c.title = it.name;
+                    c.author = it.author;
+                    c.coverUrl = it.cover;
+                    c.chapters = ComicFacts::Chapters(it.id);
+                    comics.append(c);
+                }
+                rh->SetItems(comics, total, page);
+                qWarning("watchlist: page=%d items=%d total=%d", page, comics.size(), total);
+            });
+
+    // ---- 我的评论（/forum?uid=）----
+    connect(api_, &JmApi::MyCommentsReady, this,
+            [this](bool ok, const QVector<JmComment> &items, int total, int page,
+                   const QString &err) {
+                auto *mc = qobject_cast<MyCommentPage *>(pages_[int(PageId::MyComment)]);
+                if (!mc)
+                    return;
+                if (!ok) {
+                    if (err == QLatin1String("未登录"))
+                        mc->SetState(MyCommentPage::State::NotLoggedIn);
+                    else
+                        mc->SetState(MyCommentPage::State::Error, err);
+                    qWarning("mycomments: fail page=%d err=%s", page, qPrintable(err));
+                    return;
+                }
+                mc->SetItems(items, total, page);
+                qWarning("mycomments: page=%d items=%d total=%d", page, items.size(), total);
+            });
+
+    // ---- 作品评论（/forum?aid= / POST /comment）----
+    connect(api_, &JmApi::CommentsReady, this,
+            [this](bool ok, const QVector<JmComment> &items, int total, int page,
+                   const QString &albumId, const QString &err) {
+                auto *cp = qobject_cast<CommentPage *>(pages_[int(PageId::Comment)]);
+                if (!cp)
+                    return;
+                if (!ok) {
+                    cp->SetState(CommentPage::State::Error, err);
+                    qWarning("comments: fail aid=%s page=%d err=%s", qPrintable(albumId), page,
+                             qPrintable(err));
+                    return;
+                }
+                cp->SetItems(items, total, page, albumId);
+                qWarning("comments: aid=%s page=%d items=%d total=%d", qPrintable(albumId), page,
+                         items.size(), total);
+            });
+    connect(api_, &JmApi::CommentSendReady, this, [this](bool ok, const QString &message,
+                                                         const QString &err) {
+        auto *cp = qobject_cast<CommentPage *>(pages_[int(PageId::Comment)]);
+        if (cp)
+            cp->SetSendResult(ok, ok ? (message.isEmpty() ? QStringLiteral("已发送")
+                                                          : message)
+                                     : err);
+        Toast::Show(this, ok ? QStringLiteral("评论已发送") : QStringLiteral("发送失败：%1").arg(err));
+        qWarning("comment-send: ok=%d msg=%s err=%s", int(ok), qPrintable(message),
+                 qPrintable(err));
+        // 发送成功后刷新第 1 页，让新评论出现在列表里（服务端按时间倒序）
+        if (ok && cp && api_ && !cp->AlbumId().isEmpty())
+            api_->FetchComments(cp->AlbumId(), 1);
+    });
+
+    // ---- 连载更新（/serialization）----
+    connect(api_, &JmApi::SerializationReady, this,
+            [this](bool ok, const QVector<JmComicItem> &items, int total, int page,
+                   const QString &err) {
+                auto *wk = qobject_cast<WeekPage *>(pages_[int(PageId::Week)]);
+                if (!wk)
+                    return;
+                if (!ok) {
+                    wk->SetState(WeekPage::State::Error, err);
+                    qWarning("week: fail page=%d err=%s", page, qPrintable(err));
+                    return;
+                }
+                QVector<Comic> comics;
+                comics.reserve(items.size());
+                for (const JmComicItem &it : items) {
+                    Comic c;
+                    c.id = it.id;
+                    c.title = it.name;
+                    c.author = it.author;
+                    c.coverUrl = it.cover;
+                    c.chapters = ComicFacts::Chapters(it.id);
+                    comics.append(c);
+                }
+                wk->SetItems(comics, total, page);
+                qWarning("week: page=%d items=%d total=%d", page, comics.size(), total);
+            });
 }
 
 void MainWindow::EnqueueDownload(const Comic &c, const QVector<int> &chapterIndexes)
@@ -2259,6 +2562,20 @@ void MainWindow::DemoProxyTest(const QString &kind)
         return;
     if (kind == QLatin1String("adv")) {
         page->ExpandAdvanced();   // 只展开高级抽屉，不跑测速
+    } else if (kind == QLatin1String("advout")) {
+        // 悬浮抽屉的"点面板外收起"：只打印几何命中口径（in=0 btn=0 out=1），
+        // 真实鼠标链路由 touch.cpp 的 TapGuard 保证
+        page->ExpandAdvanced();
+        QTimer::singleShot(250, page, [page] {
+            qWarning("proxy-adv-outside: %s", qPrintable(page->AdvancedOutsideProbeForTest()));
+        });
+    } else if (kind == QLatin1String("advleave")) {
+        // 离开页面自动收起：展开 → 回首页 → 断言已是收起态
+        page->ExpandAdvanced();
+        QTimer::singleShot(250, this, [this, page] {
+            Go(PageId::Home);
+            qWarning("proxy-adv-leave: open=%d", int(page->IsAdvancedOpenForTest()));
+        });
     } else if (kind.startsWith(QLatin1String("adv"))) {
         // 地区下拉的回归入口，一个进程只做一件事（QMenu 是 popup 窗口，连着弹会互相干扰）：
         //   advmenu=打印菜单项（真实数据），advmenudemo=注入示例地区后打印菜单项，
@@ -2998,6 +3315,21 @@ void TapSendMouse(QWidget *target, QEvent::Type type, const QPoint &global,
     QCoreApplication::sendEvent(target, &ev);
 }
 
+// 触摸事件：只用来喂"过程峰值"，不会产生合成鼠标（合成由平台层完成）。
+// 真机上 TapGuard 看到的正是这条流 + 两条合成鼠标事件，且接收者是 QWindow。
+void TapSendTouch(QObject *target, QEvent::Type type, const QPoint &global,
+                  QEventPoint::State state)
+{
+    QPointF local(global);
+    if (auto *win = qobject_cast<QWindow *>(target))
+        local = win->mapFromGlobal(global);
+    else if (auto *w = qobject_cast<QWidget *>(target))
+        local = w->mapFromGlobal(global);
+    QEventPoint pt(0, state, local, QPointF(global));
+    QTouchEvent ev(type, QPointingDevice::primaryPointingDevice(), Qt::NoModifier, {pt});
+    QCoreApplication::sendEvent(target, &ev);
+}
+
 void TapWait(int ms)
 {
     QEventLoop loop;
@@ -3035,7 +3367,7 @@ bool ComboPopupVisible(QComboBox *combo)
 
 }  // namespace
 
-bool MainWindow::TapGuardSelfTest()
+bool MainWindow::TapGuardSelfTest(QString *report)
 {
     if (navItems_.isEmpty())
         return false;
@@ -3141,7 +3473,9 @@ bool MainWindow::TapGuardSelfTest()
         const QPoint onBeta = menu->mapToGlobal(menu->actionGeometry(menu->actions().at(1)).center());
         TapSwipe(menu, menu, onSub, onBeta, 3, 280);
         TapWait(160);
-        menuDragOk = fired == 0 && menu->activeAction() == nullptr && !sub->isVisible();
+        // 接管后按下仍放行给 QMenu（否则 popup 按下重放循环），activeAction 会
+        // 被设为按下项 —— 视觉由按压层/滑动渐隐接管，断言不再要求它为空
+        menuDragOk = fired == 0 && !sub->isVisible();
         if (!menu->isVisible()) {
             menu->popup(mapToGlobal(QPoint(60, 40)));
             TapWait(120);
@@ -3154,17 +3488,882 @@ bool MainWindow::TapGuardSelfTest()
     delete menu;
     delete panel;
 
+    // ---- 6) 自绘可点控件：卡片 / 设置整行 / 列表行 ----
+    //
+    // 这三类在修复前完全在守卫之外（ScopeOf 只认按钮/菜单/下拉框，其余返回 None），
+    // 于是"按下 → 滑 20~30px → 抬手"会被各自 release 里的 hitTest 判成点击。
+    // 20~30px 正是 QScroller 的 DragStartDistance（≈10mm）之内的距离：页面没滚，
+    // 控件也没收到 move 之外的信息，误触就发生在这个夹层里。
+    QFrame *panel2 = new QFrame(this);
+    panel2->setObjectName(QStringLiteral("TapGuardItemPanel"));
+    panel2->setGeometry(430, 8, 420, 470);
+    panel2->raise();
+    panel2->show();
+
+    Comic probeComic;
+    probeComic.id = QStringLiteral("tap-probe");
+    probeComic.title = QStringLiteral("probe");
+    auto *card = new ComicCard(probeComic, panel2);
+    card->setGeometry(12, 12, 120, 168);
+    card->show();
+    int cardFired = 0;
+    connect(card, &ComicCard::Activated, this, [&cardFired](const Comic &) { ++cardFired; });
+
+    auto *toggle = new ToggleSwitch();
+    auto *row = new SettingRow(QStringLiteral("probe-row"), QStringLiteral("desc"), toggle, panel2);
+    row->setGeometry(150, 12, 258, 62);
+    row->show();
+
+    auto *list = new QListWidget(panel2);
+    list->setGeometry(12, 200, 396, 120);
+    for (int i = 0; i < 4; ++i) {
+        auto *it = new QListWidgetItem(QStringLiteral("row-%1").arg(i), list);
+        it->setSizeHint(QSize(0, 28));
+    }
+    list->show();
+    int itemClicks = 0;
+    connect(list, &QListWidget::itemClicked, this, [&itemClicks](QListWidgetItem *) { ++itemClicks; });
+    TapWait(80);   // 等布局/字体就位，命中矩形才不是 0x0
+
+    // 真机上的完整序列（Qt 6.12 / QScroller::TouchGesture 实测）：
+    //   TouchBegin → 合成 MousePress(起点) → TouchUpdate × N → 合成 MouseRelease(终点) → TouchEnd
+    // 控件收到的鼠标事件里没有一条 Move，峰值只能由触摸流提供。
+    // 触摸事件的接收者是 QWindow（真机上是 QWidgetWindow），不是具体控件。
+    QWindow *touchWin = windowHandle();
+    const auto touchSlide = [touchWin](QWidget *mouseTarget, const QPoint &from,
+                                       const QPoint &to) {
+        TapSendTouch(touchWin, QEvent::TouchBegin, from, QEventPoint::State::Pressed);
+        TapSendMouse(mouseTarget, QEvent::MouseButtonPress, from, Qt::LeftButton,
+                     Qt::LeftButton);
+        for (int i = 1; i <= 4; ++i) {
+            TapSendTouch(touchWin, QEvent::TouchUpdate, from + (to - from) * i / 4,
+                         QEventPoint::State::Updated);
+        }
+        TapSendMouse(mouseTarget, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton);
+        TapSendTouch(touchWin, QEvent::TouchEnd, to, QEventPoint::State::Released);
+    };
+
+    const QPoint cardPt = card->mapToGlobal(card->rect().center());
+    touchSlide(card, cardPt, cardPt + QPoint(0, 26));
+    TapWait(20);
+    const bool cardSlideIgnored = cardFired == 0;
+    TapOnce(card, cardPt);
+    TapWait(20);
+    const bool cardTapOk = cardFired == 1;
+
+    // 指尖轻点（同一条触摸流，位移为 0）：必须照常触发一次。
+    // 触摸流参与判定后最容易误伤的正是这一条 —— 手指轻点也会带 1~2px 抖动。
+    TapSendTouch(touchWin, QEvent::TouchBegin, cardPt, QEventPoint::State::Pressed);
+    TapSendMouse(card, QEvent::MouseButtonPress, cardPt, Qt::LeftButton, Qt::LeftButton);
+    TapSendMouse(card, QEvent::MouseButtonRelease, cardPt, Qt::LeftButton, Qt::NoButton);
+    TapSendTouch(touchWin, QEvent::TouchEnd, cardPt, QEventPoint::State::Released);
+    TapWait(20);
+    const bool cardTouchTapOk = cardFired == 2;
+
+    const QPoint rowPt = row->mapToGlobal(QPoint(24, row->height() / 2));   // 标题区，不是开关
+    const bool rowBefore = toggle->isChecked();
+    touchSlide(row, rowPt, rowPt + QPoint(0, 22));
+    TapWait(20);
+    const bool rowSlideIgnored = toggle->isChecked() == rowBefore;
+    TapOnce(row, rowPt);
+    TapWait(20);
+    const bool rowTapOk = toggle->isChecked() != rowBefore;
+
+    const QPoint itemPt =
+        list->viewport()->mapToGlobal(list->visualItemRect(list->item(1)).center());
+    TapSwipe(list->viewport(), list->viewport(), itemPt, itemPt + QPoint(0, 22));
+    TapWait(20);
+    const bool itemSlideIgnored = itemClicks == 0;
+    TapOnce(list->viewport(), itemPt);
+    TapWait(20);
+    const bool itemTapOk = itemClicks == 1;
+
+    // ---- 7) 划出去再划回来：首末差为 0，只有过程峰值能识别 ----
+    const QPoint backPt = card->mapToGlobal(QPoint(card->width() / 2, card->height() - 20));
+    TapSendTouch(touchWin, QEvent::TouchBegin, backPt, QEventPoint::State::Pressed);
+    TapSendMouse(card, QEvent::MouseButtonPress, backPt, Qt::LeftButton, Qt::LeftButton);
+    TapSendTouch(touchWin, QEvent::TouchUpdate, backPt - QPoint(0, 36),
+                 QEventPoint::State::Updated);
+    TapSendTouch(touchWin, QEvent::TouchUpdate, backPt, QEventPoint::State::Updated);
+    TapSendMouse(card, QEvent::MouseButtonRelease, backPt, Qt::LeftButton, Qt::NoButton);
+    TapSendTouch(touchWin, QEvent::TouchEnd, backPt, QEventPoint::State::Released);
+    TapWait(20);
+    const bool touchOnlyPeakIgnored = cardFired == 2;   // 仍是上一步那一次点击
+
+    // ---- 8) 多点触控：第二根手指出现后，抬起不得算点击 ----
+    TapSendTouch(touchWin, QEvent::TouchBegin, backPt, QEventPoint::State::Pressed);
+    TapSendMouse(card, QEvent::MouseButtonPress, backPt, Qt::LeftButton, Qt::LeftButton);
+    {
+        const QPointF local(touchWin->mapFromGlobal(backPt));
+        QEventPoint a(0, QEventPoint::State::Updated, local, QPointF(backPt));
+        QEventPoint b(1, QEventPoint::State::Pressed, local + QPointF(40, 0),
+                      QPointF(backPt) + QPointF(40, 0));
+        QTouchEvent ev(QEvent::TouchUpdate, QPointingDevice::primaryPointingDevice(),
+                       Qt::NoModifier, {a, b});
+        QCoreApplication::sendEvent(touchWin, &ev);
+    }
+    TapSendMouse(card, QEvent::MouseButtonRelease, backPt, Qt::LeftButton, Qt::NoButton);
+    TapSendTouch(touchWin, QEvent::TouchEnd, backPt, QEventPoint::State::Released);
+    TapWait(20);
+    const bool multiTouchIgnored = cardFired == 2;
+
+    // ---- 9) 手势从空白处起手、在卡片上抬手 ----
+    // ComicCard / SettingRow / SrModelField 的鼠标处理只看 mouseReleaseEvent，
+    // 不检查"按下是否发生在自己身上"。按下落在空白、抬起落在卡片同样会误触发，
+    // 因此空手势也必须参与仲裁；但空白→空白的普通滚动不能吞（会掐掉 QScroller 收尾）。
+    const QPoint blankPt = panel2->mapToGlobal(QPoint(300, 185));
+    TapSendMouse(panel2, QEvent::MouseButtonPress, blankPt, Qt::LeftButton, Qt::LeftButton);
+    TapSendMouse(card, QEvent::MouseButtonRelease, cardPt, Qt::LeftButton, Qt::NoButton);
+    TapWait(20);
+    const bool blankToCardIgnored = cardFired == 2;
+    TapOnce(card, cardPt);   // 守卫状态不能卡住：紧接着的正常点击必须照常
+    TapWait(20);
+    const bool cardTapAfterBlankOk = cardFired == 3;
+
+    delete panel2;
+
+    // ---- 10) 弹出类窗口的"补发按下"：滑动序列不得被重置 ----
+    //
+    // Qt 在 popup 拿到 grab、二级子菜单由 hover 定时器弹出时，会补发一条
+    // MouseButtonPress（mouse replay）。修复前这条按下会把 pressGlobal /
+    // maxMoved 全部归零，前面几十像素的滑动被洗掉，抬手只剩 5~6px →
+    // 判成点击 → 下拉框换选项 / 菜单项执行（独立探针实测 currentIndex 0→2、
+    // QMenu::triggered 两次）。
+    QFrame *panel3 = new QFrame(this);
+    panel3->setObjectName(QStringLiteral("TapGuardPopupPanel"));
+    panel3->setGeometry(8, 8, 340, 250);
+    panel3->raise();
+    panel3->show();
+    auto *blank3 = new QWidget(panel3);
+    blank3->setGeometry(0, 0, 340, 60);
+    blank3->show();
+    auto *combo3 = new QComboBox(panel3);
+    combo3->setGeometry(20, 72, 250, 34);
+    for (int i = 0; i < 12; ++i)
+        combo3->addItem(QStringLiteral("item-%1").arg(i));
+    combo3->show();
+    TapWait(60);
+
+    // 先正常点开弹窗（弹窗出现时手势已结束，不能被当成"滑动中弹出"收起）
+    TapOnce(combo3, combo3->mapToGlobal(combo3->rect().center()));
+    TapWait(320);
+    const bool replayPopupOpened = ComboPopupVisible(combo3);
+    QAbstractItemView *view3 = combo3->findChild<QAbstractItemView *>();
+    QWidget *vp3 = view3 ? view3->viewport() : nullptr;
+    bool comboReplayIgnored = false;
+    bool comboReplayTapOk = false;
+    if (replayPopupOpened && vp3) {
+        const QPoint above3 = blank3->mapToGlobal(QPoint(170, 20));   // 选项框上方
+        const QPoint row3 = vp3->mapToGlobal(
+            view3->visualRect(view3->model()->index(2, 0)).center());
+        TapSendMouse(blank3, QEvent::MouseButtonPress, above3, Qt::LeftButton,
+                     Qt::LeftButton);
+        for (int i = 1; i <= 4; ++i)
+            TapSendMouse(vp3, QEvent::MouseMove, above3 + (row3 - above3) * i / 4,
+                         Qt::NoButton, Qt::LeftButton);
+        // popup 拿到 grab 后补发的按下 + 6px 短滑 + 抬手
+        TapSendMouse(vp3, QEvent::MouseButtonPress, row3, Qt::LeftButton, Qt::LeftButton);
+        TapSendMouse(vp3, QEvent::MouseMove, row3 + QPoint(0, 6), Qt::NoButton,
+                     Qt::LeftButton);
+        TapSendMouse(vp3, QEvent::MouseButtonRelease, row3 + QPoint(0, 6),
+                     Qt::LeftButton, Qt::NoButton);
+        TapWait(150);
+        comboReplayIgnored = combo3->currentIndex() == 0;
+
+        // 守卫不能卡住：紧接着的正常点选要照常提交
+        if (!ComboPopupVisible(combo3))
+            combo3->showPopup();
+        TapWait(200);
+        const QPoint pick3 = vp3->mapToGlobal(
+            view3->visualRect(view3->model()->index(3, 0)).center());
+        TapOnce(vp3, pick3);
+        TapWait(160);
+        comboReplayTapOk = combo3->currentIndex() == 3;
+    }
+    if (ComboPopupVisible(combo3))
+        combo3->hidePopup();
+
+    // ---- 10b) Combo「按下就触发/概率性误触」：死区滑动跨行提交 ----
+    // 弹窗打开后的 blockMouseReleaseTimer 一过期，死区滑动 + Qt 容器过滤器的
+    // release 分支就会提交 currentIndex —— 表现为"按下就触发、但不是每次"
+    // （防误提交窗口内不会中）。初始 index=2，死区滑到第 0 行抬起：不得换成 0。
+    auto *combo4 = new QComboBox(panel3);
+    combo4->setObjectName(QStringLiteral("TapGuardComboDead"));
+    combo4->setGeometry(20, 130, 250, 34);
+    for (int i = 0; i < 12; ++i)
+        combo4->addItem(QStringLiteral("dead-%1").arg(i));
+    combo4->setCurrentIndex(2);
+    combo4->show();
+    TapWait(60);
+    bool comboDeadSwipeKept = false;
+    bool comboDeadTapOk = false;
+    {
+        // 按下在框上：QComboBox::mousePressEvent 同步 showPopup —— 弹窗随按下
+        // 打开（用户感知的"按下就触发"），随后小幅滑动（每步 1px，峰值死区内）
+        // 抬手落在弹窗第 0 行。修复前：死区 move 放行 → 容器过滤器把 currentIndex
+        // 跟手改写成 row0，抬起一旦落在 blockMouseReleaseTimer 过期之后就直接
+        // 提交 —— index 2→0。修复后：弹窗可见期间的任何 move 立即按滑动处理，
+        // 抬手落在弹窗里也无条件吞，currentIndex 保持 2。
+        const QPoint c4 = combo4->mapToGlobal(combo4->rect().center());
+        TapSendMouse(combo4, QEvent::MouseButtonPress, c4, Qt::LeftButton,
+                     Qt::LeftButton);
+        TapWait(500);   // 等弹窗就位并让防误提交窗口过期
+        QAbstractItemView *v4 = combo4->findChild<QAbstractItemView *>();
+        const bool open4 = v4 && v4->isVisible();
+        if (open4 && v4) {
+            QWidget *vp4 = v4->viewport();
+            const QPoint row0 = vp4->mapToGlobal(
+                v4->visualRect(v4->model()->index(0, 0)).center());
+            const QPoint near0 = row0 - QPoint(0, v4->visualRect(v4->model()->index(0, 0)).height() / 3);
+            for (int i = 1; i <= 3; ++i)
+                TapSendMouse(vp4, QEvent::MouseMove,
+                             c4 + (near0 - c4) * i / 3, Qt::NoButton, Qt::LeftButton);
+            TapSendMouse(vp4, QEvent::MouseButtonRelease, near0, Qt::LeftButton,
+                         Qt::NoButton);
+            TapWait(200);
+            comboDeadSwipeKept = combo4->currentIndex() == 2;
+
+            // 守卫不能卡住：正常点选照常提交
+            if (!ComboPopupVisible(combo4))
+                combo4->showPopup();
+            TapWait(320);
+            const QPoint pick4 = vp4->mapToGlobal(
+                v4->visualRect(v4->model()->index(4, 0)).center());
+            TapOnce(vp4, pick4);
+            TapWait(180);
+            comboDeadTapOk = combo4->currentIndex() == 4;
+        } else {
+            comboDeadSwipeKept = true;
+            comboDeadTapOk = true;   // 弹窗没开出，与本轮链路无关
+        }
+        if (ComboPopupVisible(combo4))
+            combo4->hidePopup();
+    }
+
+    // ---- 10c) 选项框"按下即弹"的接管：按下不弹、按压层、松手才弹、滑动不弹 ----
+    auto *combo5 = new QComboBox(panel3);
+    combo5->setObjectName(QStringLiteral("TapGuardComboPress"));
+    combo5->setGeometry(20, 190, 250, 34);
+    for (int i = 0; i < 8; ++i)
+        combo5->addItem(QStringLiteral("press-%1").arg(i));
+    combo5->show();
+    TapWait(60);
+    bool comboNoPopupOnPress = false;
+    bool comboPressOverlay = false;
+    bool comboPopupOnRelease = false;
+    bool comboSwipeNoPopup = false;
+    {
+        const QPoint c5 = combo5->mapToGlobal(combo5->rect().center());
+        // 按下：选项框不得弹出（原实现同步 showPopup），框上出现按压层
+        TapSendMouse(combo5, QEvent::MouseButtonPress, c5, Qt::LeftButton,
+                     Qt::LeftButton);
+        TapWait(320);
+        QAbstractItemView *v5 = combo5->findChild<QAbstractItemView *>();
+        comboNoPopupOnPress = !(v5 && v5->isVisible());
+        {
+            QWidget *ov5 =
+                combo5->findChild<QWidget *>(QStringLiteral("TapMenuPressOverlay"));
+            comboPressOverlay = ov5 != nullptr && ov5->isVisible();
+        }
+        // 松手（同位置、无滑动）：此时才真正弹出
+        TapSendMouse(combo5, QEvent::MouseButtonRelease, c5, Qt::LeftButton,
+                     Qt::NoButton);
+        TapWait(320);
+        v5 = combo5->findChild<QAbstractItemView *>();
+        comboPopupOnRelease = v5 && v5->isVisible();
+        if (v5 && v5->isVisible())
+            combo5->hidePopup();
+        TapWait(80);
+        // 按住滑动：放弃打开，按压层渐隐，抬起后弹窗仍不可见
+        TapSendMouse(combo5, QEvent::MouseButtonPress, c5, Qt::LeftButton,
+                     Qt::LeftButton);
+        for (int i = 1; i <= 3; ++i)
+            TapSendMouse(combo5, QEvent::MouseMove, c5 + QPoint(0, 15 * i),
+                         Qt::NoButton, Qt::LeftButton);
+        TapSendMouse(combo5, QEvent::MouseButtonRelease, c5 + QPoint(0, 45),
+                     Qt::LeftButton, Qt::NoButton);
+        TapWait(200);
+        v5 = combo5->findChild<QAbstractItemView *>();
+        comboSwipeNoPopup = !(v5 && v5->isVisible());
+        if (v5 && v5->isVisible())
+            combo5->hidePopup();
+    }
+    delete panel3;
+
+    // ---- 11) 二级子菜单：hover 弹出后补发按下 ----
+    // 结构贴近阅读器菜单：QWidgetAction 头部 + 一/二/三级子菜单
+    QMenu *menu3 = new QMenu(this);
+    menu3->setObjectName(QStringLiteral("TapGuardReplayMenu"));
+    auto *headAct3 = new QWidgetAction(menu3);
+    auto *head3 = new QLabel(QStringLiteral("probe-head"), menu3);
+    head3->setFixedHeight(24);
+    headAct3->setDefaultWidget(head3);
+    menu3->addAction(headAct3);
+    menu3->addSeparator();
+    QAction *alpha3 = menu3->addAction(QStringLiteral("alpha"));
+    QAction *beta3 = menu3->addAction(QStringLiteral("beta"));
+    QMenu *sub3 = menu3->addMenu(QStringLiteral("more"));
+    QAction *sub1a = sub3->addAction(QStringLiteral("sub-1"));
+    sub3->addAction(QStringLiteral("sub-2"));
+    QMenu *lvl3 = sub3->addMenu(QStringLiteral("level3"));
+    QAction *lvl3a = lvl3->addAction(QStringLiteral("t-1"));
+    lvl3->addAction(QStringLiteral("t-2"));
+    int fired3 = 0;
+    connect(menu3, &QMenu::triggered, this, [&fired3](QAction *) { ++fired3; });
+    connect(sub3, &QMenu::triggered, this, [&fired3](QAction *) { ++fired3; });
+    connect(lvl3, &QMenu::triggered, this, [&fired3](QAction *) { ++fired3; });
+    menu3->popup(mapToGlobal(QPoint(80, 120)));
+    TapWait(140);
+    const bool replayMenuUsable = menu3->isVisible();
+    bool subReplayIgnored = false;
+    bool subReplayTapOk = false;
+    if (replayMenuUsable) {
+        const QPoint onSub3 =
+            menu3->mapToGlobal(menu3->actionGeometry(sub3->menuAction()).center());
+        TapSendMouse(menu3, QEvent::MouseButtonPress, onSub3, Qt::LeftButton,
+                     Qt::LeftButton);
+        TapWait(140);   // QMenu 的 20ms hover 定时器把子菜单弹出来
+        const bool subVisible = sub3->isVisible();
+        TapSendMouse(menu3, QEvent::MouseMove, onSub3 + QPoint(0, 30), Qt::NoButton,
+                     Qt::LeftButton);
+        if (subVisible) {
+            const QPoint inSub = sub3->mapToGlobal(
+                sub3->actionGeometry(sub3->actions().first()).center());
+            TapSendMouse(sub3, QEvent::MouseButtonPress, inSub, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapSendMouse(sub3, QEvent::MouseMove, inSub + QPoint(0, 5), Qt::NoButton,
+                         Qt::LeftButton);
+            TapSendMouse(sub3, QEvent::MouseButtonRelease, inSub + QPoint(0, 5),
+                         Qt::LeftButton, Qt::NoButton);
+        } else {
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, onSub3 + QPoint(0, 30),
+                         Qt::LeftButton, Qt::NoButton);
+        }
+        TapWait(140);
+        // 接管语义下 activeAction 是 QMenu 内部残留（由 BeginMenuPress/
+        // CloseMenuChain 统一清理），不再是断言点；核心是"按下不弹子菜单"
+        subReplayIgnored = fired3 == 0 && !sub3->isVisible();
+        // 正常点一级菜单项仍要恰好触发一次
+        if (!menu3->isVisible()) {
+            menu3->popup(mapToGlobal(QPoint(80, 120)));
+            TapWait(140);
+        }
+        TapOnce(menu3, menu3->mapToGlobal(menu3->actionGeometry(alpha3).center()));
+        TapWait(120);
+        subReplayTapOk = fired3 == 1;
+    }
+
+    // ---- 11b) 用户实测场景矩阵：按下不触发、滑动后触发 ----
+    // 全部用真机触摸序列（TouchBegin → 合成 press → TouchUpdate → 合成 release → TouchEnd）
+    bool menuTouchSlideIgnored = false;    // 一级滑进二级
+    bool menuTouchL3Ignored = false;       // 二级滑进三级
+    bool menuJitterTapOk = false;          // 死区内微动抬手仍算点击
+    bool menuHoverReleaseOk = false;       // 二级弹出后抬手仍在入口项：不触发
+    bool menuHeadSlideIgnored = false;     // 按在 QWidgetAction 头部滑走：不触发
+    bool menuFreezeReplayIgnored = false;  // 滑动中 Qt 内部重放/转发按下+抬起：拦住
+    bool menuFreezeTapOk = false;          // 吞掉后 250ms 静默期结束：正常点选恢复
+    bool menuOrphanReleaseIgnored = false; // 无按下抬起落在菜单：不激活残留高亮项
+    bool menuTapRightAfterSwipeOk = false; // 滑动吞抬起后立刻正常点选：照常触发
+    bool menuNoSubOnPress = false;         // 按下子菜单入口：不随按下弹出
+    bool menuPressOverlaySeen = false;     // 按下项上出现半透明按压层
+    bool menuPressOverlayGone = false;     // 滑动开始后按压层渐隐消失
+    bool menuSwipeNoSub = false;           // 滑动：不弹子菜单、菜单保持、不触发
+    bool menuSubOnRelease = false;         // 按住松手才弹出子菜单
+    bool menuTapTriggered = false;         // 普通项按住松手触发恰好一次
+    bool menuBottomHint = false;           // 长菜单弹出"已到底部"边界提示条
+    if (replayMenuUsable) {
+        const auto acen = [](QMenu *m, QAction *act) {
+            return m->mapToGlobal(m->actionGeometry(act).center());
+        };
+        // M1: 按住一级「more」→ hover 弹出二级 → 触摸滑进二级 → 抬手在 sub-1
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pMore = acen(menu3, sub3->menuAction());
+            TapSendTouch(touchWin, QEvent::TouchBegin, pMore, QEventPoint::State::Pressed);
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pMore, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapWait(160);   // 20ms hover 定时器弹出二级
+            if (sub3->isVisible()) {
+                const QPoint pSub1 = acen(sub3, sub1a);
+                for (int i = 1; i <= 4; ++i)
+                    TapSendTouch(touchWin, QEvent::TouchUpdate,
+                                 pMore + (pSub1 - pMore) * i / 4, QEventPoint::State::Updated);
+                TapSendMouse(sub3, QEvent::MouseButtonRelease, pSub1, Qt::LeftButton,
+                             Qt::NoButton);
+                TapSendTouch(touchWin, QEvent::TouchEnd, pSub1, QEventPoint::State::Released);
+                TapWait(140);
+            }
+            menuTouchSlideIgnored = fired3 == 0;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // M2: 二级「level3」→ hover 弹出三级 → 触摸滑进三级 → 抬手在 t-1
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pMore = acen(menu3, sub3->menuAction());
+            TapSendTouch(touchWin, QEvent::TouchBegin, pMore, QEventPoint::State::Pressed);
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pMore, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapWait(160);
+            const QPoint pLvl3 = sub3->isVisible()
+                                     ? acen(sub3, lvl3->menuAction()) : pMore;
+            if (sub3->isVisible()) {
+                TapSendMouse(sub3, QEvent::MouseButtonPress, pLvl3, Qt::LeftButton,
+                             Qt::LeftButton);
+                TapWait(160);   // 三级弹出
+            }
+            if (lvl3->isVisible()) {
+                const QPoint pT1 = acen(lvl3, lvl3a);
+                for (int i = 1; i <= 4; ++i)
+                    TapSendTouch(touchWin, QEvent::TouchUpdate,
+                                 pLvl3 + (pT1 - pLvl3) * i / 4, QEventPoint::State::Updated);
+                TapSendMouse(lvl3, QEvent::MouseButtonRelease, pT1, Qt::LeftButton,
+                             Qt::NoButton);
+                TapSendTouch(touchWin, QEvent::TouchEnd, pT1, QEventPoint::State::Released);
+                TapWait(140);
+            }
+            menuTouchL3Ignored = fired3 == 0;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // M3: 按在 beta 上微动 3px（死区内）停住再抬手：仍要算一次正常点击
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pBeta = acen(menu3, beta3);
+            TapSendTouch(touchWin, QEvent::TouchBegin, pBeta, QEventPoint::State::Pressed);
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pBeta, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapSendTouch(touchWin, QEvent::TouchUpdate, pBeta + QPoint(0, 3),
+                         QEventPoint::State::Updated);
+            TapWait(60);
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pBeta + QPoint(0, 3),
+                         Qt::LeftButton, Qt::NoButton);
+            TapSendTouch(touchWin, QEvent::TouchEnd, pBeta + QPoint(0, 3),
+                         QEventPoint::State::Released);
+            TapWait(140);
+            menuJitterTapOk = fired3 == 1;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // M4: 按住「more」→ 二级弹出 → 抬手仍停在一级入口上：不触发（入口项有子菜单）
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pMore = acen(menu3, sub3->menuAction());
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pMore, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapWait(160);
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pMore, Qt::LeftButton,
+                         Qt::NoButton);
+            TapWait(140);
+            menuHoverReleaseOk = fired3 == 0;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // M5: 按在 QWidgetAction 头部 → 滑到普通项 → 抬手：不触发
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pHead = head3->mapToGlobal(head3->rect().center());
+            const QPoint pAlpha = acen(menu3, alpha3);
+            TapSendMouse(head3, QEvent::MouseButtonPress, pHead, Qt::LeftButton,
+                         Qt::LeftButton);
+            for (int i = 1; i <= 4; ++i)
+                TapSendMouse(menu3, QEvent::MouseMove,
+                             pHead + (pAlpha - pHead) * i / 4, Qt::NoButton, Qt::LeftButton);
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pAlpha, Qt::LeftButton,
+                         Qt::NoButton);
+            TapWait(140);
+            menuHeadSlideIgnored = fired3 == 0;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // M8: 冻结层验证 —— 滑动序列建立后，模拟 Qt 内部转发/重放的按下与
+        // 抬起（对象级冻结在 QMenu::event() 之前拦截），不得触发菜单项；
+        // 且 250ms 静默期后冻结解除，正常点选照常生效。
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pBeta2 = acen(menu3, beta3);
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pBeta2, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapSendMouse(menu3, QEvent::MouseMove, pBeta2 + QPoint(0, 40), Qt::NoButton,
+                         Qt::LeftButton);   // 越过死区 → BeginDrag → 冻结
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pBeta2, Qt::LeftButton,
+                         Qt::LeftButton);   // 模拟 Qt 内部重放按下：应被冻结吞掉
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pBeta2, Qt::LeftButton,
+                         Qt::NoButton);     // 应用级判定吞（峰值大）+ 冻结保持
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pBeta2, Qt::LeftButton,
+                         Qt::NoButton);     // 同轮转发抬起：冻结仍要拦住
+            TapWait(120);
+            menuFreezeReplayIgnored = fired3 == 0;
+            TapOnce(menu3, pBeta2);         // 静默期后正常点选：必须恰好触发一次
+            TapWait(140);
+            menuFreezeTapOk = fired3 == 1;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // N1: 无按下的抬起落在菜单上（Qt 6.12 在 mouseDown 为空时仍会激活
+        // currentAction —— 守卫吞掉按下之后这条抬起就是"按下就触发"）。
+        // 构造残留高亮：按住 beta 缓慢漂移（每步 1px、被冻结层吞掉，QMenu 收不到
+        // move 但 currentAction 停在 beta），600ms 后长按漂移判定吞掉抬起，菜单
+        // 仍开着、currentAction 残留 → 再发一条无按下抬起：修复前会激活 beta。
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pB = acen(menu3, beta3);
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pB, Qt::LeftButton,
+                         Qt::LeftButton);
+            for (int i = 1; i <= 5; ++i)
+                TapSendMouse(menu3, QEvent::MouseMove, pB + QPoint(0, i),
+                             Qt::NoButton, Qt::LeftButton);
+            TapWait(620);
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pB + QPoint(0, 5),
+                         Qt::LeftButton, Qt::NoButton);
+            TapWait(60);
+            const bool menuStillOpen = menu3->isVisible();
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pB + QPoint(0, 5),
+                         Qt::LeftButton, Qt::NoButton);
+            TapWait(140);
+            menuOrphanReleaseIgnored = fired3 == 0 && menuStillOpen;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // N3: 滑动结束（抬起被吞）后立刻正常点另一项：必须照常触发。
+        // 冻结静默期 250ms 内的按下要能到达菜单，守卫不得卡住。
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pB = acen(menu3, beta3);
+            const QPoint pA = acen(menu3, alpha3);
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pB, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapSendMouse(menu3, QEvent::MouseMove, pB + QPoint(0, 40), Qt::NoButton,
+                         Qt::LeftButton);
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pB + QPoint(0, 40),
+                         Qt::LeftButton, Qt::NoButton);
+            TapWait(40);
+            if (!menu3->isVisible()) {
+                menu3->popup(mapToGlobal(QPoint(80, 120)));
+                TapWait(140);
+            }
+            TapOnce(menu3, pA);
+            TapWait(140);
+            menuTapRightAfterSwipeOk = fired3 == 1;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // N4: 按下子菜单入口 → 子菜单不得随按下弹出（松手才响应）；
+        // 按下项上出现半透明按压层。
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        QPointer<QWidget> overlaySeen;
+        {
+            const QPoint pM = acen(menu3, sub3->menuAction());
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pM, Qt::LeftButton,
+                         Qt::LeftButton);
+            // 关键：原实现在 20ms 后就把子菜单弹出来，然后滑动一开始又立刻收起 ——
+            // 用户看到的就是"子菜单闪现"。这里在 40ms 与 300ms 两个时刻都断言
+            // 子菜单从未出现（不断言"此刻不可见"，否则闪现恰好被漏掉）。
+            bool subEverShown = false;
+            for (int i = 0; i < 15; ++i) {
+                TapWait(20);
+                if (sub3->isVisible())
+                    subEverShown = true;
+            }
+            menuNoSubOnPress = !subEverShown;
+            overlaySeen = menu3->findChild<QWidget *>(QStringLiteral("TapMenuPressOverlay"));
+            menuPressOverlaySeen = overlaySeen != nullptr && overlaySeen->isVisible();
+            // 视觉回归：把按压层连同其下方项一起抓下来，用于六套主题的人工核对
+            //（JM_TAPGUARD_OVERLAY_SHOT=<dir>；文件名带当前主题）。
+            const QString shotDir = qEnvironmentVariable("JM_TAPGUARD_OVERLAY_SHOT");
+            if (!shotDir.isEmpty() && overlaySeen) {
+                QDir().mkpath(shotDir);
+                const QRect og = overlaySeen->geometry();
+                const QPixmap around = menu3->grab(og.adjusted(-4, -4, 4, 4));
+                around.save(QDir(shotDir).filePath(
+                    QStringLiteral("overlay_%1.png").arg(UiTheme::I().Name())));
+            }
+            // 滑动：按压层渐隐消失、子菜单仍未弹、菜单保持打开、不触发
+            TapSendMouse(menu3, QEvent::MouseMove, pM + QPoint(0, 40), Qt::NoButton,
+                         Qt::LeftButton);
+            TapWait(400);
+            // FadeOut 完成会 deleteLater：裸指针会变成 use-after-free，必须用 QPointer
+            menuPressOverlayGone = overlaySeen.isNull();
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pM + QPoint(0, 40),
+                         Qt::LeftButton, Qt::NoButton);
+            TapWait(120);
+            menuSwipeNoSub = !sub3->isVisible() && menu3->isVisible() && fired3 == 0;
+        }
+        menu3->close();
+        TapWait(60);
+
+        // N5: 按住后松手（同项）→ 才弹出子菜单
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        {
+            const QPoint pM = acen(menu3, sub3->menuAction());
+            TapSendMouse(menu3, QEvent::MouseButtonPress, pM, Qt::LeftButton,
+                         Qt::LeftButton);
+            TapSendMouse(menu3, QEvent::MouseButtonRelease, pM, Qt::LeftButton,
+                         Qt::NoButton);
+            TapWait(160);
+            menuSubOnRelease = sub3->isVisible();
+        }
+        if (sub3->isVisible())
+            sub3->close();
+        menu3->close();
+        TapWait(60);
+
+        // N6: 普通项按住松手 → 触发恰好一次
+        menu3->popup(mapToGlobal(QPoint(80, 120)));
+        TapWait(140);
+        fired3 = 0;
+        TapOnce(menu3, acen(menu3, alpha3));
+        TapWait(140);
+        menuTapTriggered = fired3 == 1;
+        menu3->close();
+        TapWait(60);
+
+        // N7: 边界提示条组件 + 长菜单滑动接管的安全回归。
+        // QMenu 默认样式（Windows/Windows11）不开 SH_Menu_Scrollable，合成滚轮
+        // 对不可滚菜单是 no-op，所以"到底提示"用组件级调用验证；弹窗列表与
+        // 页面滚动容器的同款提示由 InstallBoundaryHints 挂滚动条驱动。
+        QMenu *longMenu = new QMenu(this);
+        longMenu->setObjectName(QStringLiteral("TapGuardLongMenu"));
+        for (int i = 0; i < 40; ++i)
+            longMenu->addAction(QStringLiteral("L%1").arg(i));
+        longMenu->popup(mapToGlobal(QPoint(80, 40)));
+        TapWait(160);
+        {
+            const QPoint c = longMenu->mapToGlobal(QPoint(longMenu->width() / 2, 200));
+            Touch::ShowBoundaryHint(longMenu, false);
+            menuBottomHint = longMenu->findChild<QWidget *>(
+                                 QStringLiteral("TapBoundaryHint")) != nullptr;
+            TapSendMouse(longMenu, QEvent::MouseButtonPress, c, Qt::LeftButton,
+                         Qt::LeftButton);
+            for (int i = 1; i <= 10; ++i) {
+                TapSendMouse(longMenu, QEvent::MouseMove,
+                             c + QPoint(0, 40 * i), Qt::NoButton, Qt::LeftButton);
+                TapWait(6);
+            }
+            TapSendMouse(longMenu, QEvent::MouseButtonRelease,
+                         c + QPoint(0, 400), Qt::LeftButton, Qt::NoButton);
+            TapWait(60);
+        }
+        longMenu->close();
+        delete longMenu;
+        TapWait(60);
+    }
+    menu3->close();
+    delete menu3;
+
+    // ---- 12) 悬浮窗 / 悬浮菜单：按下即关闭改成抬起才关闭 ----
+    ModalDialog::Show(this, QStringLiteral("probe"), QStringLiteral("overlay"));
+    QWidget *card3 = nullptr;
+    const QList<QWidget *> cards = findChildren<QWidget *>(QStringLiteral("DialogCard"));
+    if (!cards.isEmpty())
+        card3 = cards.last();
+    QWidget *dlg3 = card3 ? card3->parentWidget() : nullptr;
+    bool overlaySwipeKept = false, overlayTapClosed = false, floatMenuOk = false;
+    if (dlg3) {
+        TapWait(80);
+        const QPoint outside = dlg3->mapToGlobal(QPoint(12, 12));
+        const QPoint inCard = card3->mapToGlobal(card3->rect().center());
+        // 从遮罩滑到卡片：滑动的抬起被吞掉，对话框不得关闭
+        TapSwipe(dlg3, dlg3, outside, inCard, 4);
+        // 等过退场动画（180ms）：修复前"按下即关闭"这时已经隐藏，
+        // 只等 30ms 会拍到动画中途、把误关误判成"没关"。
+        TapWait(350);
+        overlaySwipeKept = dlg3->isVisible();
+
+        // 浮层之上的悬浮菜单：滑过菜单项不得 triggered
+        auto *floatMenu = new QMenu(dlg3);
+        floatMenu->addAction(QStringLiteral("f-1"));
+        floatMenu->addAction(QStringLiteral("f-2"));
+        int floatFired = 0;
+        connect(floatMenu, &QMenu::triggered, this,
+                [&floatFired](QAction *) { ++floatFired; });
+        floatMenu->popup(dlg3->mapToGlobal(QPoint(90, 120)));
+        TapWait(140);
+        const bool floatMenuUsable = floatMenu->isVisible();
+        if (floatMenuUsable) {
+            const QPoint fa = floatMenu->mapToGlobal(
+                floatMenu->actionGeometry(floatMenu->actions().at(0)).center());
+            const QPoint fb = floatMenu->mapToGlobal(
+                floatMenu->actionGeometry(floatMenu->actions().at(1)).center());
+            TapSwipe(floatMenu, floatMenu, fa, fb, 4);
+            TapWait(100);
+            floatMenuOk = floatFired == 0;
+            // 正常点选悬浮菜单项仍要触发
+            if (!floatMenu->isVisible()) {
+                floatMenu->popup(dlg3->mapToGlobal(QPoint(90, 120)));
+                TapWait(140);
+            }
+            TapOnce(floatMenu, fa);
+            TapWait(100);
+            floatMenuOk = floatMenuOk && floatFired == 1;
+        } else {
+            floatMenuOk = true;   // --quiet 下 popup 不可见，与 menu_skipped 同口径
+        }
+        floatMenu->close();
+        delete floatMenu;
+
+        // 正常点遮罩：必须关闭（Finish 有 180ms 退场，留足时间）
+        TapOnce(dlg3, outside);
+        TapWait(400);
+        overlayTapClosed = !dlg3->isVisible();
+    }
+
+    // ---- 13) 覆盖清单：窗口树里所有可见可交互控件都要落在某个 GuardScope ----
+    int inventTotal = 0, inventCovered = 0;
+    QStringList inventMiss;
+    // 扫整棵窗口树而不是只扫当前可见页：隐藏页面切过去就会变成可交互控件，
+    // 覆盖清单必须把它们也算进来。
+    const auto inspect = [&](QWidget *cand) {
+        if (!cand)
+            return;
+        if (cand->property("tapGuardSelfManaged").toBool())
+            return;   // SectionStrip 自己仲裁，守卫故意让路
+        const bool selfDriven = cand->inherits("QLineEdit") || cand->inherits("QTextEdit")
+                                || cand->inherits("QAbstractSpinBox")
+                                || cand->inherits("QAbstractSlider")
+                                || cand->inherits("QScrollBar");
+        if (selfDriven)
+            return;
+        const bool interactive =
+            qobject_cast<QAbstractButton *>(cand) || qobject_cast<QComboBox *>(cand)
+            || qobject_cast<QAbstractItemView *>(cand) || qobject_cast<QMenu *>(cand)
+            || cand->property("tapGuardItem").toBool() || cand->property("toggleRow").toBool()
+            || cand->property("tapGuardOverlay").toBool()
+            || (cand->testAttribute(Qt::WA_SetCursor)
+                && cand->cursor().shape() == Qt::PointingHandCursor);
+        if (!interactive)
+            return;
+        QWidget *probe = cand;
+        if (auto *v = qobject_cast<QAbstractItemView *>(cand))
+            probe = v->viewport();   // 事件真正落在 viewport 上
+        ++inventTotal;
+        if (Touch::TapGuardScopeOf(probe) != 0)
+            ++inventCovered;
+        else
+            inventMiss << QStringLiteral("%1[%2]").arg(
+                QLatin1String(cand->metaObject()->className()), cand->objectName());
+    };
+    const QList<QWidget *> tops = QApplication::topLevelWidgets();
+    for (QWidget *top : tops) {
+        inspect(top);
+        const QList<QWidget *> kids = top->findChildren<QWidget *>();
+        for (QWidget *c : kids)
+            inspect(c);
+    }
+    const bool inventoryOk = inventTotal > 0 && inventMiss.isEmpty();
+
     ok = navDragIgnored && navReleased && backSwipeIgnored && navClickWorked && comboSwipeOk
          && comboOpened && popupSwipeOk && popupTapOk
-         && (!menuUsable || (menuDragOk && menuTapOk));
+         && (!menuUsable || (menuDragOk && menuTapOk))
+         && cardSlideIgnored && cardTapOk && cardTouchTapOk && rowSlideIgnored && rowTapOk
+         && itemSlideIgnored && itemTapOk && touchOnlyPeakIgnored && multiTouchIgnored
+         && blankToCardIgnored && cardTapAfterBlankOk
+         && replayPopupOpened && comboReplayIgnored && comboReplayTapOk
+         && (!replayMenuUsable || (subReplayIgnored && subReplayTapOk))
+         && (!replayMenuUsable || (menuTouchSlideIgnored && menuTouchL3Ignored
+                                   && menuJitterTapOk && menuHoverReleaseOk
+                                   && menuHeadSlideIgnored && menuFreezeReplayIgnored
+                                   && menuFreezeTapOk && menuOrphanReleaseIgnored
+                                   && menuTapRightAfterSwipeOk && menuNoSubOnPress
+                                   && menuPressOverlaySeen && menuPressOverlayGone
+                                   && menuSwipeNoSub && menuSubOnRelease
+                                   && menuTapTriggered && menuBottomHint))
+         && comboDeadSwipeKept && comboDeadTapOk && comboNoPopupOnPress
+         && comboPressOverlay && comboPopupOnRelease && comboSwipeNoPopup
+         && overlaySwipeKept && overlayTapClosed && floatMenuOk && inventoryOk;
 
-    qWarning("tapguard-selftest: nav_drag=%d nav_release=%d back_swipe=%d nav_click=%d "
-             "combo_swipe=%d combo_open=%d popup_swipe=%d popup_tap=%d menu_drag=%d "
-             "menu_tap=%d menu_skipped=%d swallowed=%d style=%s",
-             int(navDragIgnored), int(navReleased), int(backSwipeIgnored), int(navClickWorked),
-             int(comboSwipeOk), int(comboOpened), int(popupSwipeOk), int(popupTapOk),
-             int(menuDragOk), int(menuTapOk), int(!menuUsable), Touch::TapGuardSwallowed(),
-             qPrintable(QString::fromLatin1(QApplication::style()->metaObject()->className())));
+    QStringList parts;
+    parts << QStringLiteral("nav_drag=%1").arg(int(navDragIgnored))
+          << QStringLiteral("nav_release=%1").arg(int(navReleased))
+          << QStringLiteral("back_swipe=%1").arg(int(backSwipeIgnored))
+          << QStringLiteral("nav_click=%1").arg(int(navClickWorked))
+          << QStringLiteral("combo_swipe=%1").arg(int(comboSwipeOk))
+          << QStringLiteral("combo_open=%1").arg(int(comboOpened))
+          << QStringLiteral("popup_swipe=%1").arg(int(popupSwipeOk))
+          << QStringLiteral("popup_tap=%1").arg(int(popupTapOk))
+          << QStringLiteral("menu_drag=%1").arg(int(menuDragOk))
+          << QStringLiteral("menu_tap=%1").arg(int(menuTapOk))
+          << QStringLiteral("menu_skipped=%1").arg(int(!menuUsable))
+          << QStringLiteral("card_slide=%1").arg(int(cardSlideIgnored))
+          << QStringLiteral("card_tap=%1").arg(int(cardTapOk))
+          << QStringLiteral("card_touch_tap=%1").arg(int(cardTouchTapOk))
+          << QStringLiteral("row_slide=%1").arg(int(rowSlideIgnored))
+          << QStringLiteral("row_tap=%1").arg(int(rowTapOk))
+          << QStringLiteral("item_slide=%1").arg(int(itemSlideIgnored))
+          << QStringLiteral("item_tap=%1").arg(int(itemTapOk))
+          << QStringLiteral("touch_back=%1").arg(int(touchOnlyPeakIgnored))
+          << QStringLiteral("multi_touch=%1").arg(int(multiTouchIgnored))
+          << QStringLiteral("blank_to_card=%1").arg(int(blankToCardIgnored))
+          << QStringLiteral("tap_after_blank=%1").arg(int(cardTapAfterBlankOk))
+          << QStringLiteral("replay_popup=%1").arg(int(replayPopupOpened))
+          << QStringLiteral("combo_replay=%1").arg(int(comboReplayIgnored))
+          << QStringLiteral("combo_replay_tap=%1").arg(int(comboReplayTapOk))
+          << QStringLiteral("sub_replay=%1").arg(int(subReplayIgnored))
+          << QStringLiteral("sub_replay_tap=%1").arg(int(subReplayTapOk))
+          << QStringLiteral("replay_menu_skipped=%1").arg(int(!replayMenuUsable))
+          << QStringLiteral("menu_touch_slide=%1").arg(int(menuTouchSlideIgnored))
+          << QStringLiteral("menu_touch_l3=%1").arg(int(menuTouchL3Ignored))
+          << QStringLiteral("menu_jitter_tap=%1").arg(int(menuJitterTapOk))
+          << QStringLiteral("menu_hover_release=%1").arg(int(menuHoverReleaseOk))
+          << QStringLiteral("menu_head_slide=%1").arg(int(menuHeadSlideIgnored))
+          << QStringLiteral("menu_freeze_replay=%1").arg(int(menuFreezeReplayIgnored))
+          << QStringLiteral("menu_freeze_tap=%1").arg(int(menuFreezeTapOk))
+          << QStringLiteral("menu_orphan_release=%1").arg(int(menuOrphanReleaseIgnored))
+          << QStringLiteral("menu_tap_after_swipe=%1").arg(int(menuTapRightAfterSwipeOk))
+          << QStringLiteral("combo_dead_swipe=%1").arg(int(comboDeadSwipeKept))
+          << QStringLiteral("combo_dead_tap=%1").arg(int(comboDeadTapOk))
+          << QStringLiteral("combo_no_popup_press=%1").arg(int(comboNoPopupOnPress))
+          << QStringLiteral("combo_press_overlay=%1").arg(int(comboPressOverlay))
+          << QStringLiteral("combo_popup_release=%1").arg(int(comboPopupOnRelease))
+          << QStringLiteral("combo_swipe_no_popup=%1").arg(int(comboSwipeNoPopup))
+          << QStringLiteral("menu_no_sub_on_press=%1").arg(int(menuNoSubOnPress))
+          << QStringLiteral("menu_press_overlay=%1").arg(int(menuPressOverlaySeen))
+          << QStringLiteral("menu_overlay_gone=%1").arg(int(menuPressOverlayGone))
+          << QStringLiteral("menu_swipe_no_sub=%1").arg(int(menuSwipeNoSub))
+          << QStringLiteral("menu_sub_on_release=%1").arg(int(menuSubOnRelease))
+          << QStringLiteral("menu_tap_triggered=%1").arg(int(menuTapTriggered))
+          << QStringLiteral("menu_bottom_hint=%1").arg(int(menuBottomHint))
+          << QStringLiteral("overlay_swipe=%1").arg(int(overlaySwipeKept))
+          << QStringLiteral("overlay_tap=%1").arg(int(overlayTapClosed))
+          << QStringLiteral("float_menu=%1").arg(int(floatMenuOk))
+          << QStringLiteral("inventory=%1/%2").arg(inventCovered).arg(inventTotal)
+          << QStringLiteral("inventory_miss=%1").arg(
+                 inventMiss.isEmpty() ? QStringLiteral("-") : inventMiss.join(QLatin1Char(',')))
+          << QStringLiteral("swallowed=%1").arg(Touch::TapGuardSwallowed())
+          << QStringLiteral("style=%1").arg(
+                 QString::fromLatin1(QApplication::style()->metaObject()->className()));
+    const QString detail = parts.join(QLatin1Char(' '));
+    qWarning("tapguard-selftest: %s", qPrintable(detail));
+    if (report)
+        *report = detail;
     return ok;
 }
 
@@ -3603,4 +4802,162 @@ void MainWindow::ShotTo(const QString &path, int delayMs)
 #endif
         std::_Exit(0);
     });
+}
+
+// ---------------------------------------------------------------- 本地目录 → 阅读器
+void MainWindow::OpenLocalImages(const QString &dirPath)
+{
+    const QDir dir(dirPath);
+    const QStringList names = dir.entryList(
+        {QStringLiteral("*.jpg"), QStringLiteral("*.jpeg"), QStringLiteral("*.png"),
+         QStringLiteral("*.webp")},
+        QDir::Files, QDir::Name);
+    if (names.isEmpty()) {
+        Toast::Show(this, QStringLiteral("该目录没有可读图片"));
+        return;
+    }
+    QStringList files;
+    files.reserve(names.size());
+    for (const QString &n : names)
+        files << dir.absoluteFilePath(n);
+    if (reader_)
+        reader_->ShowImages(dir.dirName(), files);
+    Go(PageId::Reader);
+}
+
+// ---------------------------------------------------------------- 关于页：日志导出
+QString MainWindow::ExportLogsTo(const QString &dir)
+{
+    QStringList extra;
+    extra << QStringLiteral("发行线: %1").arg(UpdateChecker::ReleaseLine());
+    const UserState &u = UserSession::User();
+    extra << QStringLiteral("账号: %1 uid=%2 已登录=%3")
+                 .arg(u.name.isEmpty() ? QStringLiteral("-") : u.name)
+                 .arg(u.uid)
+                 .arg(u.loggedIn ? 1 : 0);
+    extra << QStringLiteral("分流: api=%1 img=%2 node=%3")
+                 .arg(ProxyConfig::ApiLine())
+                 .arg(ProxyConfig::ImgLine())
+                 .arg(ProxyConfig::SelectedIp().isEmpty() ? QStringLiteral("(off)")
+                                                          : ProxyConfig::SelectedIp());
+    extra << QStringLiteral("超分: %1").arg(SrEngine::Status());
+    extra << QStringLiteral("网络后端: %1").arg(NetBackend::Summary());
+    extra << QStringLiteral("更新端点: %1")
+                 .arg(updates_ ? updates_->Bases().value(0) : QStringLiteral("-"));
+
+    QString error;
+    const QString path = LogExport::Export(dir, extra, &error);
+    auto *about = qobject_cast<AboutPage *>(pages_[int(PageId::About)]);
+    if (path.isEmpty()) {
+        if (about)
+            about->SetExportResult(false, error);
+        Toast::Show(this, QStringLiteral("日志导出失败：%1").arg(error));
+        qWarning("log-export: fail %s", qPrintable(error));
+        return QString();
+    }
+    if (about)
+        about->SetExportResult(true, path);
+    Toast::Show(this, QStringLiteral("日志已导出：%1").arg(QFileInfo(path).fileName()));
+    qWarning("log-export: ok %s (%lld bytes)", qPrintable(path),
+             static_cast<long long>(QFileInfo(path).size()));
+    return path;
+}
+
+// ---------------------------------------------------------------- 关于页：检查更新
+void MainWindow::CheckUpdates()
+{
+    if (!updates_)
+        updates_ = new UpdateChecker(this);
+    auto *about = qobject_cast<AboutPage *>(pages_[int(PageId::About)]);
+    if (about)
+        about->SetUpdateStatus(QStringLiteral("正在检查更新…"), true);
+    // 配置与版本两条独立请求：配置顺带把 Web 域名交给账号流程，互不阻塞。
+    updates_->FetchConfig();
+    updates_->Check();
+}
+
+QString MainWindow::AboutReport() const
+{
+    const auto *about = qobject_cast<const AboutPage *>(pages_[int(PageId::About)]);
+    if (!about)
+        return QStringLiteral("about: page-missing");
+    return QStringLiteral("about: status=%1 | config=%2")
+        .arg(about->UpdateStatusText(), about->ConfigLineText());
+}
+
+// ---------------------------------------------------------------- 云端记录 / 评论 / 连载
+void MainWindow::RequestWatchList(int page)
+{
+    EnsureApi();
+    auto *rh = qobject_cast<RemoteHistoryPage *>(pages_[int(PageId::RemoteHistory)]);
+    if (rh && page <= 1)
+        rh->SetState(RemoteHistoryPage::State::Loading);
+    api_->FetchWatchList(qMax(1, page));
+}
+
+void MainWindow::RequestMyComments(int page)
+{
+    EnsureApi();
+    auto *mc = qobject_cast<MyCommentPage *>(pages_[int(PageId::MyComment)]);
+    if (mc && page <= 1)
+        mc->SetState(MyCommentPage::State::Loading);
+    api_->FetchMyComments(qMax(1, page));
+}
+
+void MainWindow::RequestWeek(const QString &type, int day, int page)
+{
+    EnsureApi();
+    api_->FetchSerialization(day, type, qMax(1, page));
+}
+
+// ---------------------------------------------------------------- 网络存储回归
+// 用临时目录做真实目录，不碰用户既有节点：增 → 校验（可用）→ 删 → 负面用例 → 还原。
+QString MainWindow::NasSelfTest()
+{
+    auto *nas = qobject_cast<NasPage *>(pages_[int(PageId::Nas)]);
+    if (!nas)
+        return QStringLiteral("nas-selftest: page-missing");
+
+    const QVector<NasNode> backup = NasStore::Load();
+    // JM_NAS_TEST_DIR：沙箱/CI 里 %TEMP% 可能不可写，测试要能指到可写目录
+    const QString base = qEnvironmentVariable("JM_NAS_TEST_DIR").trimmed().isEmpty()
+                             ? QDir::tempPath()
+                             : qEnvironmentVariable("JM_NAS_TEST_DIR");
+    const QString tmp = QDir(base).filePath(QStringLiteral("jm-nas-selftest-%1")
+                                               .arg(QDateTime::currentMSecsSinceEpoch()));
+    const bool made = QDir().mkpath(tmp);
+    QStringList out;
+    out << QStringLiteral("nas-selftest: tmp=%1 made=%2").arg(tmp).arg(made ? 1 : 0);
+
+    QString err;
+    const QString id = nas->AddNodeForTest(QStringLiteral("自检目录"), QStringLiteral("local"), tmp,
+                                           QString(), QString(), &err);
+    out << QStringLiteral("nas-selftest: add ok=%1 err=%2").arg(id.isEmpty() ? 0 : 1).arg(err);
+    const bool probed = id.isEmpty() ? false : nas->ProbeNodeForTest(id);
+    out << QStringLiteral("nas-selftest: probe ok=%1 (expect 1)").arg(probed ? 1 : 0);
+    const bool removed = id.isEmpty() ? false : nas->RemoveNodeForTest(id);
+    out << QStringLiteral("nas-selftest: remove ok=%1 (expect 1)").arg(removed ? 1 : 0);
+
+    const QString bad = nas->AddNodeForTest(QStringLiteral("不存在"), QStringLiteral("local"),
+                                            tmp + QStringLiteral("/nope"), QString(), QString(),
+                                            &err);
+    const bool badProbe = bad.isEmpty() ? false : nas->ProbeNodeForTest(bad);
+    out << QStringLiteral("nas-selftest: missing-dir ok=%1 (expect 0)").arg(badProbe ? 1 : 0);
+    if (!bad.isEmpty())
+        nas->RemoveNodeForTest(bad);
+
+    const QString badDav = nas->AddNodeForTest(QStringLiteral("坏地址"), QStringLiteral("webdav"),
+                                               QStringLiteral("nas.local/dav"), QString(),
+                                               QString(), &err);
+    out << QStringLiteral("nas-selftest: bad-dav accepted=%1 (expect 0) err=%2")
+               .arg(badDav.isEmpty() ? 0 : 1)
+               .arg(err);
+    if (!badDav.isEmpty())
+        nas->RemoveNodeForTest(badDav);
+
+    for (const NasNode &n : backup)
+        nas->AddNodeForTest(n.name, n.type, n.target, n.user, n.pass, &err);
+    QDir(tmp).removeRecursively();
+    out << QStringLiteral("nas-selftest: restored=%1 state=%2").arg(backup.size()).arg(nas->Report());
+    return out.join(QLatin1Char('\n'));
 }

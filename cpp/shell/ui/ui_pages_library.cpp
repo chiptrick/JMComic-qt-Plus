@@ -1,5 +1,6 @@
 #include "ui_pages.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileDialog>
@@ -20,6 +21,7 @@
 #include "app_paths.h"
 #include "download_manager.h"
 #include "motion.h"
+#include "session.h"
 #include "theme.h"
 #include "touch.h"
 #include "ui_kit.h"
@@ -832,49 +834,283 @@ HistoryPage::HistoryPage(QWidget *parent) : PageBase(parent)
     root->addWidget(WrapScroll(body, this));
 }
 
-// ============================================================ 评论
+// ============================================================ 评论（作品评论）
+// 对齐 Python：GetCommentReq2（GET /forum?mode=manhua&aid=）与 SendCommentReq2（POST /comment）。
+// 列表是公开的（未登录也能看）；发送需要登录，未登录时发 LoginRequested。
 CommentPage::CommentPage(QWidget *parent) : PageBase(parent)
 {
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
+    loading_ = new LoadingBar(this);
+    root->addWidget(loading_);
+
     auto *body = PageBody(this);
     auto *lay = BodyLayout(body);
 
-    lay->addWidget(MakeHeader(QStringLiteral("评论"),
-                              QStringLiteral("评论来自作品评论接口"), body, nullptr));
+    QHBoxLayout *header = nullptr;
+    auto *head = MakeHeader(QStringLiteral("评论"), QStringLiteral("来自作品评论接口"), body,
+                            &header);
+    lay->addWidget(head);
+    hint_ = head->findChild<QLabel *>(QStringLiteral("PageSub"));
+    auto *back = new QPushButton(QStringLiteral("刷新"), body);
+    back->setObjectName(QStringLiteral("Ghost"));
+    back->setCursor(Qt::PointingHandCursor);
+    back->setProperty("hitGrow", false);
+    header->addWidget(back);
+    connect(back, &QPushButton::clicked, this, [this] {
+        if (albumId_.isEmpty()) {
+            emit Toast(QStringLiteral("先从作品详情进入评论区"));
+            return;
+        }
+        SetState(State::Loading);
+        emit RefreshRequested(albumId_, 1);
+    });
 
+    // 评论输入行
     auto *composer = new QWidget(body);
     composer->setObjectName(QStringLiteral("ListRow"));
     auto *cl = new QHBoxLayout(composer);
     cl->setContentsMargins(12, 10, 12, 10);
     cl->setSpacing(10);
-    auto *edit = new QLineEdit(composer);
-    edit->setObjectName(QStringLiteral("Input"));
-    edit->setPlaceholderText(QStringLiteral("写下你的看法…"));
-    cl->addWidget(edit, 1);
-    auto *send = new QPushButton(QStringLiteral("发送"), composer);
-    send->setObjectName(QStringLiteral("Primary"));
-    send->setCursor(Qt::PointingHandCursor);
-    cl->addWidget(send);
-    connect(send, &QPushButton::clicked, this, [this, edit] {
-        if (edit->text().trimmed().isEmpty())
-            return;
-        // 评论发送需要服务端接口；在接口接入前不伪造"已发送"的结果。
-        emit Toast(QStringLiteral("评论接口尚未接入，暂不能发送"));
-    });
+    edit_ = new QLineEdit(composer);
+    edit_->setObjectName(QStringLiteral("Input"));
+    edit_->setPlaceholderText(QStringLiteral("写下你的看法…"));
+    edit_->setMinimumWidth(0);
+    cl->addWidget(edit_, 1);
+    send_ = new QPushButton(QStringLiteral("发送"), composer);
+    send_->setObjectName(QStringLiteral("Primary"));
+    UiStyle::MarkSoftButton(send_);
+    send_->setCursor(Qt::PointingHandCursor);
+    send_->setProperty("hitGrow", false);
+    cl->addWidget(send_);
     lay->addWidget(composer);
 
-    auto *listHost = new QWidget(body);
-    list_ = new QVBoxLayout(listHost);
+    sendStatus_ = new QLabel(QString(), body);
+    sendStatus_->setObjectName(QStringLiteral("PageSub"));
+    sendStatus_->setWordWrap(true);
+    sendStatus_->setMinimumWidth(0);
+    lay->addWidget(sendStatus_);
+
+    auto *host = new QWidget(body);
+    list_ = new QVBoxLayout(host);
     list_->setContentsMargins(0, 0, 0, 0);
     list_->setSpacing(10);
-    lay->addWidget(listHost);
-    lay->addStretch(1);
-
-    // 没有任何评论数据时显示空态；不再渲染预置评论。
-    list_->addWidget(new EmptyState(QStringLiteral("暂无评论"),
-                                    QStringLiteral("评论接口返回后会显示在这里。"),
-                                    QString(), listHost));
-
+    list_->addStretch(1);
+    lay->addWidget(host, 1);
     root->addWidget(WrapScroll(body, this));
+
+    connect(send_, &QPushButton::clicked, this, &CommentPage::Submit);
+    connect(edit_, &QLineEdit::returnPressed, this, &CommentPage::Submit);
+    SetState(State::NoAlbum);
+}
+
+void CommentPage::SetAlbum(const QString &albumId, const QString &title)
+{
+    albumId_ = albumId.trimmed();
+    albumTitle_ = title.trimmed();
+    page_ = 1;
+    if (albumId_.isEmpty()) {
+        SetState(State::NoAlbum);
+        return;
+    }
+    if (hint_)
+        hint_->setText(albumTitle_.isEmpty() ? QStringLiteral("作品 %1").arg(albumId_)
+                                             : QStringLiteral("%1 · 评论").arg(albumTitle_));
+    SetState(State::Loading);
+    emit RefreshRequested(albumId_, 1);
+}
+
+QString CommentPage::StateName() const
+{
+    switch (state_) {
+    case State::NoAlbum:
+        return QStringLiteral("no-album");
+    case State::Loading:
+        return QStringLiteral("loading");
+    case State::Empty:
+        return QStringLiteral("empty");
+    case State::Error:
+        return QStringLiteral("error");
+    case State::Ready:
+        return QStringLiteral("ready");
+    }
+    return QStringLiteral("unknown");
+}
+
+int CommentPage::RowCount() const
+{
+    return rows_;
+}
+
+void CommentPage::SetItems(const QVector<JmComment> &items, int total, int page,
+                           const QString &albumId)
+{
+    // 迟到响应丢弃：用户可能在两次请求之间切了作品
+    if (!albumId.isEmpty() && albumId != albumId_)
+        return;
+    total_ = total >= 0 ? total : items.size();
+    page_ = qMax(1, page);
+    if (!list_)
+        return;
+    while (list_->count() > 1) {
+        QLayoutItem *it = list_->takeAt(0);
+        if (QWidget *w = it->widget())
+            w->deleteLater();
+        delete it;
+    }
+    rows_ = 0;
+    for (const JmComment &c : items) {
+        auto *card = new QWidget(this);
+        card->setObjectName(QStringLiteral("ListRow"));
+        auto *cl = new QVBoxLayout(card);
+        cl->setContentsMargins(14, 10, 14, 10);
+        cl->setSpacing(4);
+
+        auto *top = new QHBoxLayout();
+        top->setContentsMargins(0, 0, 0, 0);
+        auto *who = new QLabel(c.user.isEmpty() ? QStringLiteral("匿名") : c.user, card);
+        who->setObjectName(QStringLiteral("RowTitle"));
+        top->addWidget(who);
+        if (!c.levelName.isEmpty()) {
+            auto *lv = new QLabel(c.levelName, card);
+            lv->setObjectName(QStringLiteral("SettingDesc"));
+            top->addSpacing(6);
+            top->addWidget(lv);
+        }
+        top->addStretch(1);
+        if (c.likes > 0) {
+            auto *likes = new QLabel(QStringLiteral("赞 %1").arg(c.likes), card);
+            likes->setObjectName(QStringLiteral("SettingDesc"));
+            top->addWidget(likes);
+        }
+        cl->addLayout(top);
+
+        auto *text = new QLabel(c.content, card);
+        text->setObjectName(QStringLiteral("SettingDesc"));
+        text->setWordWrap(true);
+        text->setMinimumWidth(0);
+        text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        cl->addWidget(text);
+
+        if (!c.addTime) {
+            // 无时间戳：不显示空白行
+        } else {
+            auto *t = new QLabel(QDateTime::fromSecsSinceEpoch(c.addTime)
+                                     .toString(QStringLiteral("yyyy-MM-dd HH:mm")),
+                                 card);
+            t->setObjectName(QStringLiteral("SettingDesc"));
+            cl->addWidget(t);
+        }
+        list_->insertWidget(list_->count() - 1, card);
+        ++rows_;
+    }
+    if (rows_ == 0) {
+        SetState(State::Empty);
+        return;
+    }
+    SetState(State::Ready);
+}
+
+void CommentPage::SetState(State state, const QString &detail)
+{
+    state_ = state;
+    stateDetail_ = detail;
+    ApplyState();
+}
+
+void CommentPage::SetSendResult(bool ok, const QString &message)
+{
+    if (!sendStatus_)
+        return;
+    sendStatus_->setText(message);
+    sendStatus_->setStyleSheet(ok ? QString()
+                                  : QStringLiteral("color:%1;").arg(T().danger.name()));
+    if (send_)
+        send_->setEnabled(true);
+    if (ok && edit_)
+        edit_->clear();
+}
+
+void CommentPage::ApplyState()
+{
+    if (loading_) {
+        if (state_ == State::Loading)
+            loading_->Start();
+        else
+            loading_->Stop();
+    }
+    const bool canSend = !albumId_.isEmpty();
+    if (send_)
+        send_->setEnabled(canSend && state_ != State::Loading);
+    if (edit_)
+        edit_->setEnabled(canSend);
+    if (hint_ && !albumId_.isEmpty())
+        hint_->setText(QStringLiteral("%1 · 共 %2 条")
+                           .arg(albumTitle_.isEmpty() ? albumId_ : albumTitle_)
+                           .arg(total_));
+
+    if (state_ == State::Ready || state_ == State::Loading)
+        return;
+    if (empty_) {
+        empty_->deleteLater();
+        empty_ = nullptr;
+    }
+    QString title;
+    QString text;
+    QString action;
+    switch (state_) {
+    case State::NoAlbum:
+        title = QStringLiteral("还没有选择作品");
+        text = QStringLiteral("从作品详情点「评论」\n即可查看与发表评论。");
+        action = QStringLiteral("回首页");
+        break;
+    case State::Empty:
+        title = QStringLiteral("还没有评论");
+        text = QStringLiteral("来做第一个发言的人。");
+        break;
+    case State::Error:
+        title = QStringLiteral("评论加载失败");
+        text = stateDetail_.isEmpty() ? QStringLiteral("请检查网络后重试。") : stateDetail_;
+        action = QStringLiteral("重试");
+        break;
+    default:
+        return;
+    }
+    empty_ = new EmptyState(title, text, action, this);
+    list_->insertWidget(list_->count() - 1, empty_);
+    if (QPushButton *b = empty_->ActionButton()) {
+        connect(b, &QPushButton::clicked, this, [this] {
+            if (state_ == State::NoAlbum) {
+                emit Navigate(PageId::Home);
+                return;
+            }
+            SetState(State::Loading);
+            emit RefreshRequested(albumId_, 1);
+        });
+    }
+}
+
+void CommentPage::Submit()
+{
+    if (!edit_ || !send_)
+        return;
+    if (albumId_.isEmpty()) {
+        emit Toast(QStringLiteral("先从作品详情进入评论区"));
+        return;
+    }
+    const QString text = edit_->text().trimmed();
+    if (text.isEmpty()) {
+        SetSendResult(false, QStringLiteral("请先写点内容"));
+        return;
+    }
+    if (!UserSession::User().loggedIn) {
+        // 发送需要登录：不发一次注定 401 的请求，直接引导登录
+        SetSendResult(false, QStringLiteral("发表评论需要先登录"));
+        emit LoginRequested();
+        return;
+    }
+    send_->setEnabled(false);
+    if (sendStatus_)
+        sendStatus_->setText(QStringLiteral("正在发送…"));
+    emit SendRequested(albumId_, text);
 }
