@@ -19,8 +19,11 @@
 #include <QStyle>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QFutureWatcher>
+#include <QtConcurrent>
 
 #include "../sr_engine.h"
+#include "../sr_plugin.h"
 #include "motion.h"
 #include "sr_bench.h"
 #include "theme.h"
@@ -157,6 +160,23 @@ int BadgeWidth()
                                       + UiStyle::Fpx(10));
 }
 
+// 下载行右侧按钮（「下载」/「下载中 N%」/「重试」）宽度：与徽标同宽起。
+int DlButtonWidth()
+{
+    QFont f = UiFont(10);
+    const QFontMetrics fm(f);
+    return qMax(BadgeWidth(), fm.horizontalAdvance(QStringLiteral("下载中 100%"))
+                                    + UiStyle::Fpx(12));
+}
+
+// 「未下载」行右侧按钮矩形（delegate 画 + 外层做命中判定，共用同一套几何）。
+QRect DownloadButtonRect(const QRect &r)
+{
+    const int bw = DlButtonWidth();
+    const int bh = UiStyle::Fpx(24);
+    return QRect(r.right() - UiStyle::Fpx(13) - bw, r.center().y() - bh / 2, bw, bh);
+}
+
 int GroupRowHeight() { return UiStyle::Fpx(26); }
 
 int RowPadX() { return UiStyle::Fpx(13); }
@@ -181,6 +201,8 @@ enum Role {
     CurrentRole,
     ChosenRole,
     InstalledRole,
+    StateRole,      // 下载行：idle/downloading/verifying/error
+    ProgressRole,   // 下载行：0..100
 };
 
 // ---------------------------------------------------------------- 测速快照
@@ -424,7 +446,8 @@ public:
         }
         p->fillRect(QRect(r.left(), r.bottom(), r.width(), 1), RowLineColor());
 
-        const int badgeW = BadgeWidth();
+        const bool isDownload = !installed;   // 未安装行右列画「下载」按钮
+        const int badgeW = isDownload ? DlButtonWidth() : BadgeWidth();
         // 三列门槛：留下 badge 列后模型名/ID 仍要放得下。用 340 而不是 400 ——
         // 480dp 窗口扣掉 4px 滚动条后，Fpx(400) 在 1.33 字号下会把它判成"太窄"。
         const bool showSize = r.width() >= UiStyle::Fpx(340);
@@ -467,7 +490,45 @@ public:
                         index.data(SizeRole).toString());
         }
 
-        // 右列角标：当前使用 / 已选 / 未安装 / —（空位用破折号占位，行不会跳）
+        // 右列：未下载行画「下载」按钮（带进度/重试态），已安装行走徽标。
+        if (isDownload) {
+            const QRect btn = DownloadButtonRect(r);
+            const QString st = index.data(StateRole).toString();
+            const int prog = index.data(ProgressRole).toInt();
+            QString label = QStringLiteral("下载");
+            bool enabled = true;
+            QColor fill = Qt::transparent;
+            QColor txt = T().accent;
+            QColor bd = T().accent;
+            if (st == QLatin1String("downloading")) {
+                label = prog >= 0 ? QStringLiteral("下载中 %1%").arg(prog)
+                                  : QStringLiteral("下载中…");
+                enabled = false;
+                txt = T().textDim;
+                bd = T().border;
+            } else if (st == QLatin1String("verifying")) {
+                label = QStringLiteral("校验中…");
+                enabled = false;
+                txt = T().textDim;
+                bd = T().border;
+            } else if (st == QLatin1String("error")) {
+                label = QStringLiteral("重试");
+                txt = T().danger;
+                bd = T().danger;
+            }
+            Q_UNUSED(enabled);
+            p->setPen(QPen(bd, 1));
+            p->setBrush(fill);
+            p->drawRoundedRect(btn.adjusted(0, 0, -1, -1), UiStyle::Fpx(6), UiStyle::Fpx(6));
+            p->setBrush(Qt::NoBrush);
+            p->setFont(UiFont(10));
+            p->setPen(txt);
+            p->drawText(btn, Qt::AlignCenter, label);
+            p->restore();
+            return;
+        }
+
+        // 右列角标：当前使用 / 已选 / —（空位用破折号占位，行不会跳）
         QString badge;
         QColor fg = T().textFaint;
         QColor bg = Qt::transparent;
@@ -481,10 +542,6 @@ public:
             badge = QStringLiteral("已选");
             fg = T().text;
             border = T().textFaint;
-        } else if (!installed) {
-            badge = QStringLiteral("未安装");
-            fg = T().textFaint;
-            border = T().border;
         } else {
             badge = QStringLiteral("—");
         }
@@ -809,6 +866,101 @@ private:
         }
     }
 
+    // 触发一个模型包下载（后台线程跑 Install，主线程只轮询状态刷进度）。
+    void StartDownload(const QString &file)
+    {
+        if (file.isEmpty() || dlBusy_)
+            return;
+        dlBusy_ = true;
+        auto *watcher = new QFutureWatcher<QPair<bool, QString>>(this);
+        connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this,
+                [this, watcher, file] {
+                    const auto res = watcher->result();
+                    dlBusy_ = false;
+                    if (!res.first && !res.second.isEmpty())
+                        qWarning("sr-sheet: download %s failed: %s", qPrintable(file),
+                                 qPrintable(res.second));
+                    // 完成/失败都整表重建：装好的模型要归位到对应算法分组
+                    Rebuild(true);
+                    watcher->deleteLater();
+                });
+        watcher->setFuture(QtConcurrent::run([file] {
+            QString e;
+            const bool ok =
+                SrPlugin::Install(file, [](qint64, qint64) {}, [] { return false; }, &e);
+            return qMakePair(ok, e);
+        }));
+        UpdateDownloadPoll();
+    }
+
+    // 下载进行中：每 250ms 把状态刷进下载行（进度/校验中），并持续重绘列表。
+    void UpdateDownloadPoll()
+    {
+        if (!dlPoll_) {
+            dlPoll_ = new QTimer(this);
+            dlPoll_->setInterval(250);
+            connect(dlPoll_, &QTimer::timeout, this, [this] { TickDownloadPoll(); });
+        }
+        if (!dlPoll_->isActive())
+            dlPoll_->start();
+    }
+
+    void TickDownloadPoll()
+    {
+        if (!list_)
+            return;
+        const QHash<QString, SrPlugin::StatusEntry> status = SrPlugin::StatusSnapshot();
+        bool changed = false;
+        for (int i = 0; i < list_->count(); ++i) {
+            QListWidgetItem *it = list_->item(i);
+            if (it->data(GroupRole).toBool() || it->data(InstalledRole).toBool())
+                continue;
+            const QString file = it->data(FileRole).toString();
+            const SrPlugin::StatusEntry st = status.value(file);
+            const QString s = st.state.isEmpty() ? QStringLiteral("idle") : st.state;
+            if (it->data(StateRole).toString() != s) {
+                it->setData(StateRole, s);
+                changed = true;
+            }
+            if (it->data(ProgressRole).toInt() != st.progress) {
+                it->setData(ProgressRole, st.progress);
+                changed = true;
+            }
+        }
+        if (changed)
+            list_->viewport()->update();
+        // 没有任何进行中的任务就停表（完成态由 watcher 的 Rebuild 收尾）
+        if (!SrPlugin::AnyActive() && !dlBusy_ && dlPoll_)
+            dlPoll_->stop();
+    }
+
+    void RefreshAsync()
+    {
+        if (refreshBtn_ && !refreshBtn_->isEnabled())
+            return;
+        if (refreshBtn_) {
+            refreshBtn_->setEnabled(false);
+            refreshBtn_->setText(QStringLiteral("刷新中…"));
+        }
+        auto *watcher = new QFutureWatcher<QPair<bool, QString>>(this);
+        connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this,
+                [this, watcher] {
+                    const auto res = watcher->result();
+                    if (refreshBtn_) {
+                        refreshBtn_->setEnabled(true);
+                        refreshBtn_->setText(QStringLiteral("刷新清单"));
+                    }
+                    Q_UNUSED(res);
+                    Rebuild(true);
+                    watcher->deleteLater();
+                });
+        watcher->setFuture(QtConcurrent::run([] {
+            QString e;
+            const bool ok = SrPlugin::RefreshManifest(&e);
+            return qMakePair(ok, e);
+        }));
+    }
+
     void BuildUi()
     {
         card_ = new QWidget(this);
@@ -898,6 +1050,27 @@ private:
             });
         }
         lay->addWidget(chipsHost);
+
+        // ---- 功能区：刷新清单（模型包从网络按需下载，清单可在列表上方刷新）----
+        auto *funcRow = new QWidget(card_);
+        auto *frl = new QHBoxLayout(funcRow);
+        frl->setContentsMargins(UiStyle::Fpx(13), UiStyle::Fpx(2), UiStyle::Fpx(13),
+                                UiStyle::Fpx(2));
+        frl->setSpacing(UiStyle::Fpx(8));
+        refreshBtn_ = new QPushButton(QStringLiteral("刷新清单"), funcRow);
+        refreshBtn_->setObjectName(QStringLiteral("SrSheetRefresh"));
+        refreshBtn_->setProperty("benchBtn", true);
+        refreshBtn_->setProperty("hitGrow", false);
+        refreshBtn_->setCursor(Qt::PointingHandCursor);
+        refreshBtn_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        connect(refreshBtn_, &QPushButton::clicked, this, [this] { RefreshAsync(); });
+        frl->addWidget(refreshBtn_, 0);
+        funcHint_ = new QLabel(funcRow);
+        funcHint_->setObjectName(QStringLiteral("SrBenchStat"));
+        funcHint_->setMinimumWidth(0);
+        funcHint_->setWordWrap(true);
+        frl->addWidget(funcHint_, 1);
+        lay->addWidget(funcRow);
 
         // ---- 测速工具条（demo v2：第 1 行按钮，第 2 行状态 + 细进度条）----
         auto *tools = new QWidget(card_);
@@ -1012,8 +1185,15 @@ private:
         connect(list_->verticalScrollBar(), &QScrollBar::valueChanged, this,
                 [this] { UpdateSticky(); });
         connect(list_, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
-            if (!item || item->data(GroupRole).toBool() || !item->data(InstalledRole).toBool())
+            if (!item || item->data(GroupRole).toBool())
                 return;
+            // 未下载行：点行/点右侧按钮都触发下载（按钮是画出来的，靠命中矩形判）
+            if (!item->data(InstalledRole).toBool()) {
+                const QString st = item->data(StateRole).toString();
+                if (st != QLatin1String("downloading") && st != QLatin1String("verifying"))
+                    StartDownload(item->data(FileRole).toString());
+                return;
+            }
             chosen_ = item->data(NameRole).toString();
             MarkChosen();
         });
@@ -1107,6 +1287,12 @@ private:
         QVector<SrEngine::ModelInfo> all = SrEngine::Catalog();
         models_ = all;
 
+        // 在线清单里的体积/大小（未下载模型用）；一次取好，避免逐行重复解析。
+        QHash<QString, SrPlugin::Package> pkgs;
+        for (const SrPlugin::Package &p : SrPlugin::Catalog())
+            pkgs.insert(p.file, p);
+        const QHash<QString, SrPlugin::StatusEntry> status = SrPlugin::StatusSnapshot();
+
         list_->clear();
         QString lastArch;
         QVector<SrEngine::ModelInfo> group;
@@ -1115,6 +1301,8 @@ private:
         auto flushGroup = [&] {
             if (group.isEmpty())
                 return;
+            // 同一算法分组里：已安装模型正常可选；未下载模型也留在本组内，
+            // 只是右列显示「下载」按钮（不单独拆分区，用户按算法找模型更直观）。
             auto *head = new QListWidgetItem(list_);
             head->setFlags(Qt::ItemIsEnabled);
             head->setData(GroupRole, true);
@@ -1122,15 +1310,26 @@ private:
             head->setData(CountRole, int(group.size()));
             for (const SrEngine::ModelInfo &m : group) {
                 auto *it = new QListWidgetItem(list_);
-                it->setFlags(m.installed ? Qt::ItemIsEnabled : Qt::NoItemFlags);
+                it->setFlags(Qt::ItemIsEnabled);
                 it->setData(GroupRole, false);
                 it->setData(ArchRole, m.arch);
                 it->setData(NameRole, m.name);
                 it->setData(FileRole, m.file);
-                it->setData(SizeRole, SizeText(m.bytes));
+                const qint64 sz = m.installed
+                                      ? m.bytes
+                                      : (pkgs.contains(m.file) ? pkgs.value(m.file).size : m.bytes);
+                it->setData(SizeRole, SizeText(sz));
                 it->setData(InstalledRole, m.installed);
-                it->setData(CurrentRole, m.name == current_);
-                it->setData(ChosenRole, m.name == chosen_);
+                it->setData(CurrentRole, m.installed && m.name == current_);
+                it->setData(ChosenRole, m.installed && m.name == chosen_);
+                if (m.installed) {
+                    it->setData(StateRole, QStringLiteral("idle"));
+                } else {
+                    const SrPlugin::StatusEntry st = status.value(m.file);
+                    it->setData(StateRole,
+                                st.state.isEmpty() ? QStringLiteral("idle") : st.state);
+                    it->setData(ProgressRole, st.progress);
+                }
                 ++shown;
             }
             group.clear();
@@ -1149,6 +1348,17 @@ private:
 
         if (count_) {
             count_->setText(QStringLiteral("%1 / %2").arg(shown).arg(all.size()));
+        }
+        if (funcHint_) {
+            int installedN = 0;
+            for (const SrEngine::ModelInfo &m : all)
+                installedN += m.installed ? 1 : 0;
+            funcHint_->setText(QStringLiteral("已安装 %1 · 未下载 %2 · 下载源 %3")
+                                   .arg(installedN)
+                                   .arg(all.size() - installedN)
+                                   .arg(SrPlugin::ManifestBaseUrl().isEmpty()
+                                            ? QStringLiteral("（离线清单）")
+                                            : QStringLiteral("在线")));
         }
         MarkChosen();
         // 首次构建把滚动归零；测速刷新时保留原位置，否则列表会每次跳回顶部
@@ -1346,6 +1556,10 @@ private:
     QString activeRow_;
     ElideLabel *chosenText_ = nullptr;
     QPushButton *okBtn_ = nullptr;
+    QPushButton *refreshBtn_ = nullptr;
+    QLabel *funcHint_ = nullptr;
+    QTimer *dlPoll_ = nullptr;
+    bool dlBusy_ = false;
     QVector<Chip *> chips_;
     QVector<SrEngine::ModelInfo> models_;
     QEventLoop *loop_ = nullptr;

@@ -16,6 +16,7 @@
 #include <memory>
 
 #include "../sr_engine.h"
+#include "../sr_plugin.h"
 #include "../vk/sr_vk.h"
 #include "jm_account.h"
 #include "log_export.h"
@@ -665,7 +666,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("JMComic"));
     QApplication::setOrganizationName(QStringLiteral("JMComic"));
-    QApplication::setApplicationVersion(QStringLiteral("0.95"));
+    QApplication::setApplicationVersion(QStringLiteral("1.0"));
 
     QCommandLineParser parser;
     parser.addHelpOption();
@@ -865,6 +866,41 @@ int main(int argc, char *argv[])
                       QStringLiteral("回归对照：复刻修复前弹窗补发按下重置手势的行为")});
     parser.addOption({QStringLiteral("drawer-nav"),
                       QStringLiteral("抽屉打开后点一次导航项（验证换页动画）"), QStringLiteral("page")});
+    // ---- 超分模型包（按需下载/安装/卸载/删除，桌面与移动端同义）----
+    parser.addOption({QStringLiteral("plugin-list"),
+                      QStringLiteral("打印超分模型包清单（含安装状态/大小/来源）并退出")});
+    parser.addOption({QStringLiteral("plugin-selftest"),
+                      QStringLiteral("超分模型包离线自检（清单/字段/可写/命名）并退出")});
+    parser.addOption({QStringLiteral("plugin-refresh"),
+                      QStringLiteral("从网络刷新模型清单缓存后退出")});
+    parser.addOption({QStringLiteral("plugin-install"),
+                      QStringLiteral("下载并安装一个模型包（file 或显示名，逗号分隔可多个）"),
+                      QStringLiteral("sel")});
+    parser.addOption({QStringLiteral("plugin-uninstall"),
+                      QStringLiteral("卸载/删除一个模型包（file 或显示名，逗号分隔可多个）"),
+                      QStringLiteral("sel")});
+    parser.addOption({QStringLiteral("plugin-uninstall-bundled"),
+                      QStringLiteral("配合 --plugin-uninstall：同时删除其它可写目录里的同名文件")});
+    // ---- 推理模块（ONNX Runtime）：桌面端应用内从 GitHub 下载 ----
+    parser.addOption({QStringLiteral("rt-list"),
+                      QStringLiteral("打印超分推理模块（ONNX Runtime）清单与安装状态")});
+    parser.addOption({QStringLiteral("rt-install"),
+                      QStringLiteral("从网络下载并安装推理模块（可给 id/file，缺省取第一条）"),
+                      QStringLiteral("id")});
+    parser.addOption({QStringLiteral("rt-uninstall"),
+                      QStringLiteral("删除已下载的推理模块（sr_runtime/onnxruntime.dll）"),
+                      QStringLiteral("id"), QStringLiteral("")});
+    parser.addOption({QStringLiteral("rt-report"),
+                      QStringLiteral("打印当前运行时路径/是否就绪并退出")});
+    // ---- 超分后端插件（OpenVINO / SR-Vulkan 等）：桌面端应用内安装/删除 ----
+    parser.addOption({QStringLiteral("backend-list"),
+                      QStringLiteral("打印超分后端插件清单与安装/可用状态")});
+    parser.addOption({QStringLiteral("backend-install"),
+                      QStringLiteral("下载并安装一个后端插件（id，如 openvino-ep）"),
+                      QStringLiteral("id")});
+    parser.addOption({QStringLiteral("backend-uninstall"),
+                      QStringLiteral("删除一个已安装的后端插件（id）"), QStringLiteral("id")});
+
     parser.addOption({QStringLiteral("sr-selftest"),
                       QStringLiteral("超分自检（可选输出 png）"), QStringLiteral("png"),
                       QStringLiteral("")});
@@ -1128,6 +1164,150 @@ int main(int argc, char *argv[])
                      r.image.width(), r.image.height(), r.ms, qPrintable(io.value(1)));
         SrEngine::Shutdown();
         return 0;
+    }
+
+    // ---- 超分模型包：按需下载/安装/卸载/删除（桌面与移动端同一套入口）----
+    if (parser.isSet(QStringLiteral("plugin-list"))) {
+        std::fprintf(stderr, "%s\n", qPrintable(SrPlugin::Report()));
+        return 0;
+    }
+    if (parser.isSet(QStringLiteral("plugin-selftest"))) {
+        const QString rep = SrPlugin::SelfTest();
+        std::fprintf(stderr, "%s\n", qPrintable(rep));
+        const bool pass = rep.contains(QStringLiteral(": PASS"));
+        return pass ? 0 : 2;
+    }
+    if (parser.isSet(QStringLiteral("plugin-refresh"))) {
+        QString err;
+        const bool ok = SrPlugin::RefreshManifest(&err);
+        std::fprintf(stderr, "plugin-refresh: ok=%d source=%s %s\n", int(ok),
+                     qPrintable(SrPlugin::ManifestSource()),
+                     ok ? "" : qPrintable(err));
+        return ok ? 0 : 2;
+    }
+    if (parser.isSet(QStringLiteral("plugin-install"))) {
+        const QStringList sel = parser.value(QStringLiteral("plugin-install"))
+                                    .split(QLatin1Char(','), Qt::SkipEmptyParts);
+        int fail = 0;
+        for (const QString &one : sel) {
+            const QString name = one.trimmed();
+            qint64 lastPct = -1;
+            auto prog = [&](qint64 done, qint64 total) {
+                const qint64 pct = total > 0 ? done * 100 / total : -1;
+                if (pct != lastPct) {
+                    lastPct = pct;
+                    std::fprintf(stderr, "plugin-install: %s %lld/%lld (%lld%%)\n",
+                                 qPrintable(name), (long long)done, (long long)total,
+                                 (long long)pct);
+                    std::fflush(stderr);
+                }
+            };
+            QString err;
+            const bool ok = SrPlugin::Install(name, prog, [] { return false; }, &err);
+            std::fprintf(stderr, "plugin-install: %s %s %s\n", qPrintable(name),
+                         ok ? "OK" : "FAIL", ok ? "" : qPrintable(err));
+            std::fflush(stderr);
+            fail += ok ? 0 : 1;
+        }
+        return fail == 0 ? 0 : 2;
+    }
+    if (parser.isSet(QStringLiteral("plugin-uninstall"))) {
+        const QStringList sel = parser.value(QStringLiteral("plugin-uninstall"))
+                                    .split(QLatin1Char(','), Qt::SkipEmptyParts);
+        const bool bundled = parser.isSet(QStringLiteral("plugin-uninstall-bundled"));
+        int fail = 0;
+        for (const QString &one : sel) {
+            const QString name = one.trimmed();
+            QString err;
+            const bool ok = SrPlugin::Uninstall(name, bundled, &err);
+            std::fprintf(stderr, "plugin-uninstall: %s %s %s\n", qPrintable(name),
+                         ok ? "OK" : "FAIL", ok ? "" : qPrintable(err));
+            std::fflush(stderr);
+            fail += ok ? 0 : 1;
+        }
+        return fail == 0 ? 0 : 2;
+    }
+
+    if (parser.isSet(QStringLiteral("rt-list")) || parser.isSet(QStringLiteral("rt-report"))) {
+        const QVector<SrPlugin::RuntimeInfo> rt = SrPlugin::RuntimeCatalog();
+        for (const SrPlugin::RuntimeInfo &r : rt) {
+            std::fprintf(stderr,
+                         "rt-item: id=%s file=%s size=%lld installed=%d active=%d state=%s\n",
+                         qPrintable(r.id), qPrintable(r.file), (long long)r.size,
+                         int(r.installed), int(r.active), qPrintable(r.state));
+        }
+        std::fprintf(stderr, "rt-report: installed=%d runtime=%s dir=%s\n",
+                     int(SrPlugin::RuntimeInstalled()),
+                     qPrintable(SrPlugin::RuntimePath().isEmpty() ? "<none>"
+                                                                  : SrPlugin::RuntimePath()),
+                     qPrintable(SrEngine::RuntimeDir()));
+        return 0;
+    }
+    if (parser.isSet(QStringLiteral("rt-install"))) {
+        const QString id = parser.value(QStringLiteral("rt-install"));
+        qint64 lastPct = -1;
+        auto prog = [&](qint64 done, qint64 total) {
+            const qint64 pct = total > 0 ? done * 100 / total : -1;
+            if (pct != lastPct) {
+                lastPct = pct;
+                std::fprintf(stderr, "rt-install: %lld/%lld (%lld%%)\n", (long long)done,
+                             (long long)total, (long long)pct);
+                std::fflush(stderr);
+            }
+        };
+        QString err;
+        const bool ok = SrPlugin::InstallRuntime(id, prog, [] { return false; }, &err);
+        std::fprintf(stderr, "rt-install: %s %s runtime=%s\n", ok ? "OK" : "FAIL",
+                     ok ? "" : qPrintable(err), qPrintable(SrPlugin::RuntimePath()));
+        return ok ? 0 : 2;
+    }
+    if (parser.isSet(QStringLiteral("rt-uninstall"))) {
+        QString err;
+        const bool ok = SrPlugin::UninstallRuntime(parser.value(QStringLiteral("rt-uninstall")), &err);
+        std::fprintf(stderr, "rt-uninstall: %s %s\n", ok ? "OK" : "FAIL",
+                     ok ? "" : qPrintable(err));
+        return ok ? 0 : 2;
+    }
+
+    if (parser.isSet(QStringLiteral("backend-list"))) {
+        const QVector<SrPlugin::BackendPluginInfo> list = SrPlugin::BackendCatalog();
+        for (const SrPlugin::BackendPluginInfo &b : list) {
+            std::fprintf(stderr,
+                         "backend-item: id=%s kind=%s installed=%d available=%d files=%d "
+                         "archiveSize=%lld state=%s\n",
+                         qPrintable(b.id), qPrintable(b.kind), int(b.installed),
+                         int(b.available), b.fileCount, (long long)b.archiveSize,
+                         qPrintable(b.state));
+        }
+        std::fprintf(stderr, "backend-report: dir=%s count=%d\n",
+                     qPrintable(SrPlugin::BackendPackagesDir()), int(list.size()));
+        return 0;
+    }
+    if (parser.isSet(QStringLiteral("backend-install"))) {
+        const QString id = parser.value(QStringLiteral("backend-install"));
+        qint64 lastPct = -1;
+        auto prog = [&](qint64 done, qint64 total) {
+            const qint64 pct = total > 0 ? done * 100 / total : -1;
+            if (pct != lastPct) {
+                lastPct = pct;
+                std::fprintf(stderr, "backend-install: %lld/%lld (%lld%%)\n",
+                             (long long)done, (long long)total, (long long)pct);
+                std::fflush(stderr);
+            }
+        };
+        QString err;
+        const bool ok = SrPlugin::InstallBackend(id, prog, [] { return false; }, &err);
+        std::fprintf(stderr, "backend-install: %s %s\n", ok ? "OK" : "FAIL",
+                     ok ? "" : qPrintable(err));
+        return ok ? 0 : 2;
+    }
+    if (parser.isSet(QStringLiteral("backend-uninstall"))) {
+        QString err;
+        const bool ok =
+            SrPlugin::UninstallBackend(parser.value(QStringLiteral("backend-uninstall")), &err);
+        std::fprintf(stderr, "backend-uninstall: %s %s\n", ok ? "OK" : "FAIL",
+                     ok ? "" : qPrintable(err));
+        return ok ? 0 : 2;
     }
 
     if (parser.isSet(QStringLiteral("sr-selftest"))) {
@@ -2009,6 +2189,8 @@ int main(int argc, char *argv[])
             QStringLiteral("--vk-wino"),        QStringLiteral("--qnn-probe"),
             QStringLiteral("--qnn-debug"),
             QStringLiteral("--sr-model"),     QStringLiteral("--sr-bench"),
+            QStringLiteral("--plugin-install"), QStringLiteral("--plugin-uninstall"),
+            QStringLiteral("--backend-install"), QStringLiteral("--backend-uninstall"),
             QStringLiteral("--sr-npu-compare"),
             QStringLiteral("--sr-sheet-scroll"),
             QStringLiteral("--export-data"),    QStringLiteral("--import-data"),
@@ -2098,6 +2280,64 @@ int main(int argc, char *argv[])
             });
         }
 
+        // 超分模型包（真机/模拟器）：与桌面同义的 --plugin-* 入口。手机没有 stdout，
+        // 结果统一写到外部分目录（adb pull 可读）的 plugin-run.txt，跑完退出进程。
+        auto runPluginCli = [&window, jmArgs]() {
+            const QStringList parts = jmArgs.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+            QHash<QString, QString> o;
+            QStringList fl;
+            for (int i = 0; i < parts.size(); ++i) {
+                const QString &a = parts.at(i);
+                if (a == QLatin1String("--plugin-install") || a == QLatin1String("--plugin-uninstall")) {
+                    if (i + 1 < parts.size()) o.insert(a, parts.at(i + 1));
+                    ++i;
+                } else if (a.startsWith(QLatin1String("--plugin"))) {
+                    fl << a;
+                }
+            }
+            QStringList log;
+            log << QStringLiteral("jm.args=%1").arg(jmArgs);
+            bool ok = true;
+            if (fl.contains(QStringLiteral("--plugin-selftest"))) {
+                const QString rep = SrPlugin::SelfTest();
+                log << rep;
+                ok = rep.contains(QStringLiteral(": PASS"));
+            }
+            if (fl.contains(QStringLiteral("--plugin-list"))) {
+                log << SrPlugin::Report();
+            }
+            if (fl.contains(QStringLiteral("--plugin-refresh"))) {
+                QString e; const bool r2 = SrPlugin::RefreshManifest(&e);
+                log << QStringLiteral("plugin-refresh: ok=%1 source=%2 %3")
+                           .arg(int(r2)).arg(SrPlugin::ManifestSource(), r2 ? "" : e);
+                ok = ok && r2;
+            }
+            if (o.contains(QStringLiteral("--plugin-install"))) {
+                for (const QString &one : o.value(QStringLiteral("--plugin-install")).split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+                    QString e;
+                    const bool r3 = SrPlugin::Install(one.trimmed(), [](qint64,qint64){}, []{return false;}, &e);
+                    log << QStringLiteral("plugin-install: %1 %2 %3").arg(one.trimmed(), r3 ? "OK":"FAIL", r3?"":e);
+                    ok = ok && r3;
+                }
+            }
+            if (o.contains(QStringLiteral("--plugin-uninstall"))) {
+                for (const QString &one : o.value(QStringLiteral("--plugin-uninstall")).split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+                    QString e;
+                    const bool r4 = SrPlugin::Uninstall(one.trimmed(), true, &e);
+                    log << QStringLiteral("plugin-uninstall: %1 %2 %3").arg(one.trimmed(), r4 ? "OK":"FAIL", r4?"":e);
+                    ok = ok && r4;
+                }
+            }
+            log << QStringLiteral("plugin-list-after:");
+            log << SrPlugin::Report();
+            log << QStringLiteral("result=%1").arg(ok ? "pass" : "fail");
+            const QString out = WriteRunReport(QStringLiteral("plugin-run.txt"), log);
+            qWarning("plugin-run: %s file=%s", ok ? "pass" : "fail",
+                     out.isEmpty() ? "unavailable" : qPrintable(out));
+            QTimer::singleShot(200, qApp, [] { QCoreApplication::quit(); });
+        };
+        if (jmArgs.contains(QStringLiteral("--plugin-")))
+            QTimer::singleShot(800, &window, runPluginCli);
         // 升级/落盘验收：与桌面同名参数，手机端也能直接量测。
         // 这三个开关存在的意义：把"看起来登录了"和"真的写进磁盘了"区分开。
         // 模型选择浮层（真机）：桌面同义。滚动值周期上报到 logcat —— 真机外部分目录

@@ -8,7 +8,33 @@
 #include <QStringList>
 #include <QTemporaryFile>
 
+#ifdef Q_OS_ANDROID
+#  include <QJniObject>
+#endif
+
 namespace {
+
+// Android：应用外部私有目录 /storage/emulated/0/Android/data/<pkg>/files。
+// 用户用文件管理器/adb pull 能直接访问；/data/user/0/<pkg>/files 普通用户看不到
+// （root 才进得去）。用 getExternalFilesDir(null).getAbsolutePath() 拿到的就是它，
+// 且不需要任何存储权限（属于应用自身目录）。非 Android 返回空串。
+QString AndroidExternalFilesDir()
+{
+#ifdef Q_OS_ANDROID
+    QJniObject activity = QJniObject::callStaticObjectMethod(
+        "org/qtproject/qt/android/QtNative", "activity", "()Landroid/app/Activity;");
+    if (!activity.isValid())
+        return QString();
+    QJniObject dir = activity.callObjectMethod(
+        "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;", nullptr);
+    if (!dir.isValid())
+        return QString();
+    const QString path = dir.callObjectMethod("getAbsolutePath", "()Ljava/lang/String;").toString();
+    return path.startsWith(QStringLiteral("/")) ? path : QString();
+#else
+    return QString();
+#endif
+}
 
 QString EnvOverride()
 {
@@ -96,6 +122,15 @@ QString ConfigFile(const QString &name)
 
 QString DataDir()
 {
+#ifdef Q_OS_ANDROID
+    // 优先外部私有目录：用户能直接访问（文件管理器 / adb pull），不需要权限。
+    // 拿不到再退回 QStandardPaths（内部 /data/user/0/<pkg>/files，普通用户不可见）。
+    const QString ext = AndroidExternalFilesDir();
+    if (!ext.isEmpty() && ProbeWritable(ext)) {
+        QDir().mkpath(ext);
+        return ext;
+    }
+#endif
     QString base = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     if (base.isEmpty())
         base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -178,6 +213,14 @@ QString Report()
     lines << QStringLiteral("path-report: CacheLocation=%1").arg(cache.isEmpty() ? QStringLiteral("<empty>") : cache);
     lines << QStringLiteral("path-report: JM_UI_CONFIG=%1").arg(qEnvironmentVariable("JM_UI_CONFIG"));
     lines << QStringLiteral("path-report: configDir=%1").arg(dir.isEmpty() ? QStringLiteral("<none>") : dir);
+#ifdef Q_OS_ANDROID
+    lines << QStringLiteral("path-report: androidExternalFiles=%1")
+                 .arg(AndroidExternalFilesDir().isEmpty() ? QStringLiteral("<none>")
+                                                          : AndroidExternalFilesDir());
+#endif
+    lines << QStringLiteral("path-report: dataDir=%1 writable=%2")
+                 .arg(DataDir(), IsWritable(DataDir()) ? QStringLiteral("yes") : QStringLiteral("no"));
+    lines << QStringLiteral("path-report: cacheDir=%1").arg(CacheDir());
 
     const QStringList files = {QStringLiteral("session.ini"), QStringLiteral("ui.ini")};
     for (const QString &f : files) {

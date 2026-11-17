@@ -1,6 +1,97 @@
 # update log file.
 # tonquer<tonquer@qq.com>
 #####################################################################################
+# Version: cpp-ui 1.0（首个 1.0 发布：SR-Vulkan 改回随包 + 模型包/推理模块/后端插件按需安装）
+# 2026/11/17
+# 1)回退 SR-Vulkan 独立插件：着色器包不再作为可安装/删除的插件，改回随安装包分发
+#   （构建期 qsb 打进 qrc）；后端插件只剩需要额外大体积 runtime 的 OpenVINO。
+# 2)版本号统一改为 1.0（CMake project VERSION -> Android versionName=1.0/versionCode=100；
+#   桌面 setApplicationVersion=1.0）。
+# 3)本版在 0.97.x 的基础上首次以 1.0 形式发布：
+#   - 模型包：模型选择浮层里按算法分组、未下载模型就地「下载」（按需安装到受管目录）。
+#   - 推理模块（ONNX Runtime）：桌面应用内可从网络下载到 <data>/sr_runtime/ 并优先加载。
+#   - 后端插件：Intel OpenVINO 推理插件可按需安装/删除（<data>/sr_backend/ovep）。
+#   - Android 落盘改到 /storage/emulated/0/Android/data/<pkg>/files（用户可见）。
+# 4)发布物：Windows portable（zip）+ Android arm64-v8a / x86_64 APK + 独立分发的超分模块
+#   （onnxruntime.dll）与后端插件（openvino-ep.tar.gz）。
+#
+# Version: cpp-ui 0.97.3（桌面超分后端插件：OpenVINO / SR-Vulkan 等按需安装/删除）
+# 2026/11/17
+# 1)把桌面各超分后端做成可独立安装/删除的"后端插件包"：Intel OpenVINO 推理插件
+#   （ORT plugin EP + openvino/tbb runtime，约 228MB，默认不随包）、SR-Vulkan 着色器包
+#   （.qsb，默认随包、可更新/删除）。设置页「超分」组新增「超分后端插件」分组。
+# 2)每个后端是一个 tar.gz；应用内下载 -> 归档 sha256 校验 -> 解压 -> 逐文件 sha256 校验 ->
+#   原子落位到 <data>/sr_backend/<targetSubdir>/（ovep 或 vkshaders）。安装/删除后需重启生效。
+# 3)SrEngine/SrVk 在该受管目录优先查找：OvPluginPath() 先找 <data>/sr_backend/ovep；
+#   SR-Vulkan 着色器启动早期把 <data>/sr_backend/vkshaders 设进 JM_VK_SHADER_DIR。
+# 4)新增 tools/gen_sr_backend_manifest.py 生成 sr_backend_manifest.json（内嵌）并打包 tar.gz。
+#   JM_SR_BACKEND_URL 可覆盖为目录（自动拼 <id>.tar.gz）或 .tar.gz 直链。
+# 5)修复下载收尾：事件循环退出后补读 reply 残留缓冲，避免大文件 sha256 少最后一块。
+# 6)CLI：--backend-list / --backend-install <id> / --backend-uninstall <id>。
+# 7)本机验证：openvino-ep（85MB 归档）与 sr-vulkan 经本地 http 源安装 OK；状态翻转/卸载清空正确。
+#
+# Version: cpp-ui 0.97.2（桌面：应用内从 GitHub 下载超分推理模块 ONNX Runtime）
+# 2026/11/17
+# 1)新增「推理模块」按需下载：桌面端不再强制随安装包携带 ~19MB 的 onnxruntime.dll，
+#   可在应用内（设置页「超分」组「超分推理模块（ONNX Runtime）」行）点「下载」从网络
+#   拉取并安装到 <data>/sr_runtime/onnxruntime.dll；SrEngine::FindRuntime() 优先加载它，
+#   找不到再退回随安装包的那份。也可用 --rt-install/--rt-uninstall/--rt-report CLI。
+# 2)清单 python/src/config/sr_runtime_manifest.json 内嵌 :/sr/sr_runtime_manifest.json；
+#   base_url 指向托管 onnxruntime.dll 的目录，可用 JM_SR_RUNTIME_URL 覆盖为任意 dll 直链
+#   （GitHub Release 资源等）。下载走 sha256+尺寸校验 + .part 原子改名。
+# 3)SrEngine 新增 RuntimeDir()/UnloadRuntime()：安装后卸载旧库，下次推理重建会话即用新文件。
+# 4)本机验证：--rt-install（本地 http 源）下载 19.3MB OK；--sr-selftest 日志确认已加载
+#   sr_runtime/onnxruntime.dll 并 OK；--rt-uninstall 后回退随安装包运行时。
+#
+# Version: cpp-ui 0.97.1（模型包下载入口并入模型选择列表 + Android 路径改到用户可见目录）
+# 2026/11/17
+# 1)下载入口合并：删除设置页独立的「超分模型包」表格，改为在「选择超分模型」浮层
+#   （SrModelSheet）里完成按需下载。列表按算法分组，未下载的模型留在它所属的算法分组里
+#   （不单独分区），只是右列显示「下载」按钮；点击即从网络下载，行内显示
+#   下载中 N% / 校验中… / 重试（失败）；完成后整表重建、模型自动转为已安装态。
+# 2)「刷新清单」按钮移到列表上方功能区（与「已安装 N · 未下载 M · 下载源 在线/离线」
+#   提示同一行）；点它后台刷新清单并重建列表。
+# 3)Android 落盘路径改为用户可见：AppPaths::DataDir() 在 Android 上优先用
+#   getExternalFilesDir(null) = /storage/emulated/0/Android/data/<pkg>/files，
+#   拿不到才退回 /data/user/0/<pkg>/files。于是模型的保存路径（sr_models/）、
+#   默认下载目录（download/）、默认缓存目录（cache/）、清单缓存都落到外部私有目录，
+#   用户用文件管理器或 adb pull 可直接访问（无需任何存储权限）。桌面行为不变。
+#   --path-report 新增 androidExternalFiles / dataDir / cacheDir 三项便于核对。
+# 4)本机验证（2026-11-17）：桌面浮层「未下载」分区逐条「下载」+ 刷新按钮渲染正常；
+#   隐藏随包模型后列表正确落入「未下载（点击下载安装）」分区（39 条 + 每条「下载」）；
+#   --sr-selftest 回归 OK（Vulkan GPU）。
+#   MuMu 模拟器（x86_64）：path-report 显示 dataDir/cacheDir 均为
+#   /storage/emulated/0/Android/data/org.jmcomic.ui/files...；经本地 HTTP 源
+#   --plugin-install OK（文件落外部 sr_models/，inPluginDir=1）、--plugin-uninstall OK；
+#   浮层「未下载」分区与「刷新清单」功能区渲染正常。
+#
+# Version: cpp-ui 0.97.0（超分模型包：按需下载/安装/卸载/删除）
+# 2026/11/17
+# 1)新增 SrPlugin（cpp/shell/sr_plugin.*）：把超分模型从"必须随包"改成"按需安装的
+#   模型包"。清单优先用内嵌资源 :/sr/sr_models_manifest.json（离线可用，与
+#   python/src/config/sr_models_manifest.json 同一份），可用 --plugin-refresh 从网络
+#   刷新并缓存到应用数据目录（下次启动优先用缓存）。
+# 2)安装流程：临时文件下载 -> sha256+尺寸校验 -> 通过后才原子改名落到受管插件目录
+#   SrEngine::PluginsDir()（桌面=应用数据/sr_models；Android=filesDir/sr_models）。
+#   下载中断/校验失败不留半成品；同名已存在则覆盖（升级）。卸载只删受管目录里的
+#   文件，不动随包 assets 的模型。
+# 3)SrEngine 的模型搜索路径把受管插件目录放到最前：显式安装的模型盖过随包同名
+#   文件（升级语义），随包 assets 仍在后面兜底。新增 SrEngine::PluginsDir()。
+# 4)设置页新增「超分模型包」分组：逐包一行（显示名 + onnx + 体积 + 状态），
+#   按钮按状态显示"下载/覆盖安装/卸载"，带下载进度轮询、刷新清单、打开模型目录。
+#   未安装的模型不进选择浮层，用户按需装、不用就卸，省下几百 MB 磁盘。
+# 5)新增 CLI：--plugin-list / --plugin-selftest / --plugin-refresh /
+#   --plugin-install <file|名> / --plugin-uninstall <file|名> [--plugin-uninstall-bundled]。
+#   桌面直出；移动端通过 jm.args 注入（结果写外部分目录 plugin-run.txt，adb pull 可读）。
+# 6)本机验证（2026-11-17）：桌面 --plugin-selftest PASS（39 包，base/sha 齐全）；
+#   --plugin-install/--plugin-uninstall 实测落盘+删除+inPluginDir 翻转；
+#   --plugin-refresh 经 JM_SR_MANIFEST_URL 拉到真实清单（source=cache）。
+#   MuMu 模拟器（x86_64, targetSdk34）：--plugin-selftest PASS；经 adb reverse 的本地
+#   HTTP 源 --plugin-install OK（文件落 files/sr_models，inPluginDir=1）、
+#   --plugin-uninstall OK（目录清空）；设置页「超分模型包」分组渲染正常。
+#   说明：本轮按用户要求只做"模型包独立下载/删除"；后端插件化（Vulkan/OpenVINO/
+#   ORT/QNN 拆包）见 docs/sr_backend_plugin_analysis_2026-11-16.md，留待后续。
+#
 # Version: cpp-ui 0.96.6（量化模型（w8a16 QDQ）在 NPU 上跑通）
 # 2026/11/15
 # 1)根因：EnsureModel 里有一条 `&& !quantModel`，把所有 QDQ 量化模型直接排除在

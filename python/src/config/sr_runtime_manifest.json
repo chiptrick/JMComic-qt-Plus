@@ -1,0 +1,15 @@
+{
+  "base_url": "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/cpp/shell/3rdparty/onnxruntime/win-x64/",
+  "note": "桌面超分推理模块（ONNX Runtime）。应用内从 GitHub 按需下载到 <data>/sr_runtime/onnxruntime.dll。base_url 指向托管 onnxruntime.dll 的目录（basename 命名，下载=base_url+file）；可用 JM_SR_RUNTIME_URL 覆盖到任意 exe/zip 直链。",
+  "runtimes": [
+    {
+      "id": "onnxruntime-win-x64",
+      "name": "ONNX Runtime 推理模块（Windows x64）",
+      "platform": "win-x64",
+      "file": "onnxruntime.dll",
+      "version": "1.20+",
+      "size": 19288928,
+      "sha256": "4954a566ecba81adf98668413102bf5ee9fe9f61b098f2412a90b407d1ba53e2"
+    }
+  ]
+}

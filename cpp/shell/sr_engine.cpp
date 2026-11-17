@@ -254,6 +254,13 @@ QString FindRuntime()
     const QString libName = QStringLiteral("onnxruntime.dll");
     if (!envDir.isEmpty())
         cands << QDir(envDir).filePath(libName);
+    // 应用内从 GitHub 下载的推理模块（SrEngine::RuntimeDir()）；放在程序目录之前，
+    // 让按需下载的版本盖过随安装包分发的那份（升级/换版本语义）。
+#ifdef JM_SR_HAS_APPPATHS
+    cands << QDir(AppPaths::DataDir()).filePath(QStringLiteral("sr_runtime/onnxruntime.dll"));
+#else
+    cands << QDir(AppDir()).filePath(QStringLiteral("sr_runtime/onnxruntime.dll"));
+#endif
     cands << QDir(AppDir()).filePath(libName)
           << QDir(AppDir()).filePath(QStringLiteral("lib/onnxruntime.dll"));
 #endif
@@ -270,6 +277,11 @@ QStringList ModelDirs()
     const QString envDir = qEnvironmentVariable("JM_SR_MODEL_DIR");
     if (!envDir.isEmpty())
         dirs << envDir;
+    // 用户按需安装的模型包（SrPlugin::PluginsDir()，桌面/移动端同一个约定）。
+    // 放在最前：显式安装的一定要盖过随包 assets 的同名文件（升级语义）。
+#ifdef JM_SR_HAS_APPPATHS
+    dirs << QDir(AppPaths::DataDir()).filePath(QStringLiteral("sr_models"));
+#endif
 #ifdef Q_OS_ANDROID
     // 随 APK 打包的模型（assets/sr_models）。放最前：不占应用私有空间。
     dirs << QStringLiteral("assets:/sr_models");
@@ -700,6 +712,10 @@ QString OvPluginPath()
     const QString dir = qEnvironmentVariable("JM_OV_EP_DIR").trimmed();
     if (!dir.isEmpty())
         dirs << dir;
+    // 应用内安装的后端插件：<data>/sr_backend/ovep（优先于随包 ovep/）
+#ifdef JM_SR_HAS_APPPATHS
+    dirs << QDir(AppPaths::DataDir()).filePath(QStringLiteral("sr_backend/ovep"));
+#endif
     dirs << QDir(AppDir()).filePath(QStringLiteral("ovep"));
     dirs << AppDir();
     for (const QString &d : dirs) {
@@ -2646,6 +2662,36 @@ QString ModelsDir()
 QString ModelSearchPath()
 {
     return ModelDirs().join(QLatin1Char('|'));
+}
+
+QString PluginsDir()
+{
+#ifdef JM_SR_HAS_APPPATHS
+    const QString dir = QDir(AppPaths::DataDir()).filePath(QStringLiteral("sr_models"));
+#else
+    const QString dir = QDir(AppDir()).filePath(QStringLiteral("sr_models"));
+#endif
+    QDir().mkpath(dir);
+    return dir;
+}
+
+QString RuntimeDir()
+{
+#ifdef JM_SR_HAS_APPPATHS
+    const QString dir = QDir(AppPaths::DataDir()).filePath(QStringLiteral("sr_runtime"));
+#else
+    const QString dir = QDir(AppDir()).filePath(QStringLiteral("sr_runtime"));
+#endif
+    QDir().mkpath(dir);
+    return dir;
+}
+
+void UnloadRuntime()
+{
+    // 卸载已加载的 onnxruntime 动态库（换/更新运行时后要重建会话才能生效）。
+    State &s = S();
+    QMutexLocker<QRecursiveMutex> lock(&s.mutex);
+    ReleaseAll();
 }
 
 bool Available()

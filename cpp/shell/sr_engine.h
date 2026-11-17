@@ -50,6 +50,15 @@ QVector<ModelInfo> InstalledModels();
 QString ModelsDir();
 // 报告用：模型搜索路径（一行，SEP 分隔）
 QString ModelSearchPath();
+// 用户按需安装的模型包目录（受管、可卸载删除）。桌面/移动端都落在应用数据目录下。
+// 由 SrPlugin 使用；此处暴露给 UI 与 CLI 判断"是否在插件目录里"。
+QString PluginsDir();
+
+// 推理模块（ONNX Runtime 动态库）按需下载目录。桌面端应用内可从 GitHub 下载
+// onnxruntime.dll 到这里，SrEngine 会优先加载它（找不到才用安装目录那份）。
+QString RuntimeDir();
+// 卸载已加载的 onnxruntime（换/更新运行时后调用，下次推理重建会话即生效）。
+void UnloadRuntime();
 
 // 引擎是否可用（ORT 库 + 当前模型都能找到且会话创建成功）。失败原因见 Status()。
 bool Available();

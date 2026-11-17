@@ -39,6 +39,7 @@
 #include <QWidgetAction>
 
 #include "../reader.h"
+#include "../sr_plugin.h"
 #include "app_font.h"
 #include "cache_path.h"
 #include "download_manager.h"
@@ -2293,6 +2294,227 @@ SettingsView::SettingsView(QWidget *parent) : PageBase(parent)
         }));
     });
     static_cast<QVBoxLayout *>(sr->layout())->addWidget(perfRow);
+
+    // 推理模块（ONNX Runtime）：桌面端应用内可从 GitHub 按需下载，不必随安装包分发
+    // ~19MB 的运行时。下载到 <data>/sr_runtime/，SrEngine 优先加载它。
+#if !defined(Q_OS_ANDROID)
+    {
+        auto *rtBlock = new QWidget(sr);
+        rtBlock->setObjectName(QStringLiteral("SettingBlock"));
+        rtBlock->setProperty("settingTitle", QStringLiteral("超分推理模块"));
+        auto *rbl = new QVBoxLayout(rtBlock);
+        rbl->setContentsMargins(0, 8, 0, 8);
+        rbl->setSpacing(UiStyle::Fpx(2));
+        auto *rtTitle = new QLabel(QStringLiteral("超分推理模块（ONNX Runtime）"), rtBlock);
+        rtTitle->setObjectName(QStringLiteral("SettingTitle"));
+        rbl->addWidget(rtTitle);
+        auto *rtDesc = new QLabel(rtBlock);
+        rtDesc->setObjectName(QStringLiteral("SettingDesc"));
+        rtDesc->setWordWrap(true);
+        rtDesc->setMinimumWidth(0);
+        rbl->addWidget(rtDesc);
+
+        auto *rtRow = new QWidget(rtBlock);
+        auto *rtrl = new QHBoxLayout(rtRow);
+        rtrl->setContentsMargins(0, UiStyle::Fpx(4), 0, 0);
+        rtrl->setSpacing(UiStyle::Fpx(8));
+        auto *rtBtn = new QPushButton(rtRow);
+        rtBtn->setCursor(Qt::PointingHandCursor);
+        rtBtn->setProperty("hitGrow", false);
+        rtBtn->setMinimumWidth(UiStyle::Fpx(96));
+        rtrl->addWidget(rtBtn, 0);
+        rtrl->addStretch(1);
+        rbl->addWidget(rtRow);
+        static_cast<QVBoxLayout *>(sr->layout())->addWidget(rtBlock);
+
+        auto refreshRt = std::make_shared<std::function<void()>>();
+        *refreshRt = [rtDesc, rtBtn, this, refreshRt] {
+            const QVector<SrPlugin::RuntimeInfo> rts = SrPlugin::RuntimeCatalog();
+            const bool installed = SrPlugin::RuntimeInstalled();
+            const QString path = SrPlugin::RuntimePath();
+            QString stateText;
+            if (installed) {
+                const bool inDir = !rts.isEmpty()
+                                   && rts.first().installed;   // sr_runtime/ 里有
+                stateText = inDir ? QStringLiteral("已下载（应用内安装）")
+                                  : QStringLiteral("随安装包提供");
+            } else {
+                stateText = QStringLiteral("未安装（超分不可用，需下载）");
+            }
+            rtDesc->setText(QStringLiteral("状态：%1%2。用于 CPU/QNN 推理（GPU 走 Vulkan 无需它）。")
+                                .arg(stateText,
+                                     path.isEmpty() ? QString()
+                                                    : QStringLiteral("　·　%1").arg(path)));
+            // 按钮语义：未装→下载；已装(应用内)→重新下载+删除；随包→下载覆盖
+            // （简化：单按钮按状态切换；删除走长按不直观，故给两态按钮）
+            const bool inDir = !rts.isEmpty() && rts.first().installed;
+            if (inDir) {
+                rtBtn->setText(QStringLiteral("更新"));
+            } else {
+                rtBtn->setText(QStringLiteral("下载"));
+            }
+            rtBtn->setEnabled(true);
+            Q_UNUSED(refreshRt);
+        };
+
+        connect(rtBtn, &QPushButton::clicked, this, [this, rtBtn, refreshRt] {
+            rtBtn->setEnabled(false);
+            rtBtn->setText(QStringLiteral("下载中…"));
+            auto *watcher = new QFutureWatcher<QPair<bool, QString>>(this);
+            connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this,
+                    [this, watcher, refreshRt] {
+                        const auto res = watcher->result();
+                        emit Toast(res.first ? QStringLiteral("推理模块已就绪，超分下次生效")
+                                             : QStringLiteral("下载失败：%1").arg(res.second));
+                        (*refreshRt)();
+                        watcher->deleteLater();
+                    });
+            watcher->setFuture(QtConcurrent::run([] {
+                QString e;
+                const bool ok = SrPlugin::InstallRuntime(
+                    QString(), [](qint64, qint64) {}, [] { return false; }, &e);
+                return qMakePair(ok, e);
+            }));
+        });
+
+        (*refreshRt)();
+    }
+#endif
+
+    // 超分后端插件（OpenVINO / SR-Vulkan 等）：桌面端应用内安装/删除。
+#if !defined(Q_OS_ANDROID)
+    {
+        auto *beBlock = new QWidget(sr);
+        beBlock->setObjectName(QStringLiteral("SettingBlock"));
+        beBlock->setProperty("settingTitle", QStringLiteral("超分后端插件"));
+        auto *bl = new QVBoxLayout(beBlock);
+        bl->setContentsMargins(0, 8, 0, 8);
+        bl->setSpacing(UiStyle::Fpx(2));
+        auto *beTitle = new QLabel(QStringLiteral("超分后端插件"), beBlock);
+        beTitle->setObjectName(QStringLiteral("SettingTitle"));
+        bl->addWidget(beTitle);
+        auto *beDesc = new QLabel(beBlock);
+        beDesc->setObjectName(QStringLiteral("SettingDesc"));
+        beDesc->setWordWrap(true);
+        beDesc->setMinimumWidth(0);
+        beDesc->setText(QStringLiteral("各推理后端（Intel OpenVINO NPU/GPU、SR-Vulkan 着色器等）"
+                                       "按需安装/删除；未安装则该后端不可用。"));
+        bl->addWidget(beDesc);
+
+        auto *beList = new QWidget(beBlock);
+        auto *bel = new QVBoxLayout(beList);
+        bel->setContentsMargins(0, UiStyle::Fpx(4), 0, 0);
+        bel->setSpacing(UiStyle::Fpx(4));
+        bl->addWidget(beList);
+        static_cast<QVBoxLayout *>(sr->layout())->addWidget(beBlock);
+
+        auto rebuildBe = std::make_shared<std::function<void()>>();
+        *rebuildBe = [beList, bel, this, rebuildBe] {
+            while (QLayoutItem *it = bel->takeAt(0)) {
+                if (QWidget *w = it->widget())
+                    w->deleteLater();
+                delete it;
+            }
+            const auto human = [](qint64 b) -> QString {
+                if (b <= 0)
+                    return QStringLiteral("?");
+                if (b >= 1024LL * 1024 * 1024)
+                    return QStringLiteral("%1 GB").arg(b / 1024.0 / 1024 / 1024, 0, 'f', 2);
+                return QStringLiteral("%1 MB").arg(b / 1024.0 / 1024, 0, 'f', 1);
+            };
+            const QVector<SrPlugin::BackendPluginInfo> list = SrPlugin::BackendCatalog();
+            for (const SrPlugin::BackendPluginInfo &b : list) {
+                auto *row = new QWidget(beList);
+                row->setObjectName(QStringLiteral("SettingRow"));
+                auto *rl = new QHBoxLayout(row);
+                rl->setContentsMargins(0, UiStyle::Fpx(4), 0, UiStyle::Fpx(4));
+                rl->setSpacing(UiStyle::Fpx(8));
+                auto *txt = new QVBoxLayout();
+                txt->setContentsMargins(0, 0, 0, 0);
+                txt->setSpacing(UiStyle::Fpx(1));
+                auto *nm = new QLabel(b.name, row);
+                nm->setObjectName(QStringLiteral("SettingTitle"));
+                nm->setWordWrap(true);
+                nm->setMinimumWidth(0);
+                txt->addWidget(nm);
+                auto *meta = new QLabel(row);
+                meta->setObjectName(QStringLiteral("SettingDesc"));
+                meta->setWordWrap(true);
+                meta->setMinimumWidth(0);
+                QString st;
+                if (b.state == QLatin1String("downloading"))
+                    st = QStringLiteral("下载中 %1%").arg(b.progress >= 0 ? b.progress : 0);
+                else if (b.state == QLatin1String("verifying"))
+                    st = QStringLiteral("校验中…");
+                else if (b.state == QLatin1String("error"))
+                    st = QStringLiteral("失败：%1").arg(b.error);
+                else if (b.installed)
+                    st = b.available ? QStringLiteral("已安装 · 可用")
+                                     : QStringLiteral("已安装（缺依赖，不可用）");
+                else if (b.kind == QLatin1String("shaders"))
+                    st = QStringLiteral("内置可用（可安装插件版覆盖）");
+                else
+                    st = QStringLiteral("未安装（需下载）");
+                meta->setText(QStringLiteral("%1 · 体积 %2 · %3")
+                                  .arg(b.desc, human(b.archiveSize), st));
+                txt->addWidget(meta);
+                rl->addLayout(txt, 1);
+
+                auto *act = new QPushButton(row);
+                act->setProperty("hitGrow", false);
+                act->setCursor(Qt::PointingHandCursor);
+                act->setMinimumWidth(UiStyle::Fpx(74));
+                const bool busy = b.state == QLatin1String("downloading")
+                                  || b.state == QLatin1String("verifying");
+                if (busy) {
+                    act->setText(QStringLiteral("进行中"));
+                    act->setEnabled(false);
+                } else if (b.managedInstalled) {
+                    act->setText(QStringLiteral("卸载"));
+                } else {
+                    // 未装 / 仅随包内置：显示"安装"（安装会覆盖内置版到受管目录）
+                    act->setText(b.installed ? QStringLiteral("安装覆盖")
+                                             : QStringLiteral("安装"));
+                }
+                const QString bid = b.id;
+                const bool doUninstall = b.managedInstalled && !busy;
+                connect(act, &QPushButton::clicked, this,
+                        [this, act, bid, doUninstall, rebuildBe] {
+                            act->setEnabled(false);
+                            if (doUninstall) {
+                                QString err;
+                                if (SrPlugin::UninstallBackend(bid, &err))
+                                    emit Toast(QStringLiteral("已卸载 %1（重启后生效）").arg(bid));
+                                else
+                                    emit Toast(QStringLiteral("卸载失败：%1").arg(err));
+                                (*rebuildBe)();
+                                return;
+                            }
+                            act->setText(QStringLiteral("安装中…"));
+                            auto *watcher = new QFutureWatcher<QPair<bool, QString>>(this);
+                            connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished,
+                                    this, [this, watcher, bid, rebuildBe] {
+                                        const auto res = watcher->result();
+                                        emit Toast(res.first
+                                                       ? QStringLiteral("%1 已安装（重启后生效）").arg(bid)
+                                                       : QStringLiteral("安装失败：%1").arg(res.second));
+                                        (*rebuildBe)();
+                                        watcher->deleteLater();
+                                    });
+                            watcher->setFuture(QtConcurrent::run([bid] {
+                                QString e;
+                                const bool ok = SrPlugin::InstallBackend(
+                                    bid, [](qint64, qint64) {}, [] { return false; }, &e);
+                                return qMakePair(ok, e);
+                            }));
+                        });
+                rl->addWidget(act, 0, Qt::AlignVCenter);
+                bel->addWidget(row);
+            }
+        };
+        (*rebuildBe)();
+    }
+#endif
 
     body_->addStretch(1);
     root->addWidget(WrapScroll(body, this));

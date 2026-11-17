@@ -6,7 +6,7 @@
 # 不依赖：sr_qnn / onnxruntime / OpenSSL / JNI —— 那些属于设备侧 c1shell 目标。
 cmake_minimum_required(VERSION 3.22)
 # 需要 C：内嵌 libwebp 解码端是 C 源码（Qt 6.12 不带 qwebp 插件）
-project(JmComicUi VERSION 0.95 LANGUAGES CXX C)
+project(JmComicUi VERSION 1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,6 +82,8 @@ qt_add_executable(jmcomic_ui
     ../reader.cpp
     ../sr_engine.cpp
     ../sr_engine.h
+    ../sr_plugin.cpp
+    ../sr_plugin.h
     ../frame_probe.cpp
     ../jm_webp.cpp
     ../net_client.cpp
@@ -312,6 +314,36 @@ qt_add_resources(jmcomic_ui "qml_scene"
           qml/PageCards.qml
 )
 
+# 超分模型清单（离线可用）：内嵌到 :/sr/sr_models_manifest.json，
+# SrPlugin 用它在无网络时也能列出可下载的模型包与 sha256。
+set(JM_SR_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/../../../python/src/config/sr_models_manifest.json")
+if (EXISTS "${JM_SR_MANIFEST}")
+    qt_add_resources(jmcomic_ui "sr_manifest"
+        PREFIX "/sr"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}/../../../python/src/config"
+        FILES "${JM_SR_MANIFEST}")
+    message(STATUS "UI: embedded SR model manifest -> :/sr/sr_models_manifest.json")
+else()
+    message(WARNING "UI: 找不到超分模型清单 ${JM_SR_MANIFEST}，模型包管理将只能走网络缓存")
+endif()
+
+set(JM_SR_RUNTIME_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/../../../python/src/config/sr_runtime_manifest.json")
+if (EXISTS "${JM_SR_RUNTIME_MANIFEST}")
+    qt_add_resources(jmcomic_ui "sr_runtime_manifest"
+        PREFIX "/sr"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}/../../../python/src/config"
+        FILES "${JM_SR_RUNTIME_MANIFEST}")
+    message(STATUS "UI: embedded SR runtime manifest -> :/sr/sr_runtime_manifest.json")
+endif()
+
+set(JM_SR_BACKEND_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/../../../python/src/config/sr_backend_manifest.json")
+if (EXISTS "${JM_SR_BACKEND_MANIFEST}")
+    qt_add_resources(jmcomic_ui "sr_backend_manifest"
+        PREFIX "/sr"
+        BASE "${CMAKE_CURRENT_SOURCE_DIR}/../../../python/src/config"
+        FILES "${JM_SR_BACKEND_MANIFEST}")
+    message(STATUS "UI: embedded SR backend manifest -> :/sr/sr_backend_manifest.json")
+endif()
 qt_add_resources(jmcomic_ui "themes"
     PREFIX "/theme"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/theme"

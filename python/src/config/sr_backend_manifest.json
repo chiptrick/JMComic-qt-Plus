@@ -1,0 +1,150 @@
+{
+  "base_url": "https://github.com/chiptrick/JMComic-qt-Plus/releases/download/sr-backends-v1/",
+  "note": "桌面超分后端插件：每个后端一个 tar.gz，下载解压到 <bin>/<targetSubdir>。SR-Vulkan 着色器随安装包分发，不作为插件。",
+  "backends": [
+    {
+      "id": "openvino-ep",
+      "name": "Intel OpenVINO 推理插件（NPU / GPU / CPU）",
+      "desc": "ORT 的 OpenVINO 插件 EP 及相关 runtime（约 228MB）。Intel NPU/核显专用；下载解压到 ovep/ 后，「推理后端」里的 Intel NPU / XPU 档才可用。",
+      "kind": "binary",
+      "platform": "win-x64",
+      "targetSubdir": "ovep",
+      "installedByDefault": false,
+      "requiresBinary": true,
+      "files": [
+        {
+          "name": "cache.json",
+          "size": 8840377,
+          "sha256": "0b2ad2a99516a3411ce3fef274e8ae2880b41a6f00c9bac6768cd4a94b87c41c"
+        },
+        {
+          "name": "onnxruntime_providers_openvino_plugin.dll",
+          "size": 1744664,
+          "sha256": "ff8d1e432d5efd36132da91ac9e4e069db39ef29c4d6e059302b33dddb0e6613"
+        },
+        {
+          "name": "openvino.dll",
+          "size": 16485640,
+          "sha256": "c5939cfa87df71b092f787a5ab306adbd5533249dc7d1d2705c54b89907c5a6e"
+        },
+        {
+          "name": "openvino_auto_batch_plugin.dll",
+          "size": 208136,
+          "sha256": "9c406a1fb892a4f4de8c4a85e243dd458c73f159254449dc0402ebbedfd00d5f"
+        },
+        {
+          "name": "openvino_auto_plugin.dll",
+          "size": 731400,
+          "sha256": "4c03852547cc12ad45b27191be29cc69731a6b42102333159f276f13dd80094b"
+        },
+        {
+          "name": "openvino_c.dll",
+          "size": 234248,
+          "sha256": "3a668a52e0931f932a796ae4b8de9170c6c97b7e2c2a78ebe24065970b2e5e3e"
+        },
+        {
+          "name": "openvino_gguf_frontend.dll",
+          "size": 1322256,
+          "sha256": "66696b61d64b32969fb4ce0bb4f3cffa6a581fb1b2bf4b1b11c8b93e5d9eedb0"
+        },
+        {
+          "name": "openvino_hetero_plugin.dll",
+          "size": 531720,
+          "sha256": "a0b185b2980b32282b645ad7e4f90d55f788f5a81f301978d38b9d72720f5f8e"
+        },
+        {
+          "name": "openvino_intel_cpu_plugin.dll",
+          "size": 46305544,
+          "sha256": "7c2efa0bb6266dd2c337617827c5ec22f9ca03d7ee7e3820dbfd0ddb6c5a35c9"
+        },
+        {
+          "name": "openvino_intel_gpu_plugin.dll",
+          "size": 34673424,
+          "sha256": "2032c6fba4d0a73fbc2c74d6ba0587396a4765aa4a7e92ec217b8f19decf82b4"
+        },
+        {
+          "name": "openvino_intel_npu_compiler.dll",
+          "size": 100343560,
+          "sha256": "b925f4555b553e38e944edf0d6c01a358fc228b8fea6552f925b63fc80bcafd1"
+        },
+        {
+          "name": "openvino_intel_npu_compiler_loader.dll",
+          "size": 529680,
+          "sha256": "e4e8a488b3e14fe07b07ad5fa1ca8da24fe72c49b3ca444ef82d2ac31129a8e1"
+        },
+        {
+          "name": "openvino_intel_npu_plugin.dll",
+          "size": 7635208,
+          "sha256": "3469087b344944dd252ad5a5c7e2843eacf9728ad180b2bebfbc26b173086607"
+        },
+        {
+          "name": "openvino_intel_npu_vm_runtime.dll",
+          "size": 561928,
+          "sha256": "c4e7c4122a9f037497f8983c9a883cc9141c86f2be90146721a065c6f64e3970"
+        },
+        {
+          "name": "openvino_ir_frontend.dll",
+          "size": 508688,
+          "sha256": "4a1d90b27a4d7e6e34d01df9c7f0e82db062f0ec3fffe754f6660c8ba82ded45"
+        },
+        {
+          "name": "openvino_jax_frontend.dll",
+          "size": 469264,
+          "sha256": "3f70cb750135626058883057b0d8fbc04316094658529e0c9f7a422315217f96"
+        },
+        {
+          "name": "openvino_onnx_frontend.dll",
+          "size": 5424912,
+          "sha256": "71978cd02d86944b726959c7686326837b6d895cfd6febc3e18bb31564253545"
+        },
+        {
+          "name": "openvino_paddle_frontend.dll",
+          "size": 1688840,
+          "sha256": "5f3623431103c5d365303a98a465e1fe3f80d09080e45650b19c4e3750bfcb38"
+        },
+        {
+          "name": "openvino_pytorch_frontend.dll",
+          "size": 2791184,
+          "sha256": "5b54d798af011aff9b333f33d6227959a80688c51f6c5165a5e771ddcddd1732"
+        },
+        {
+          "name": "openvino_runtime.manifest",
+          "size": 1287,
+          "sha256": "0b94828d5885d5fc2e088df42e4bbf3c68481eca13e8fb00cb3e64325fa797d9"
+        },
+        {
+          "name": "openvino_tensorflow_frontend.dll",
+          "size": 4128008,
+          "sha256": "969821e251ce82d951ca81f01834c2e883a43ef1768fe1ea789dc6c20692d117"
+        },
+        {
+          "name": "openvino_tensorflow_lite_frontend.dll",
+          "size": 1263376,
+          "sha256": "c409b65e7db128945b91434eafc0b7de96de2ace8ecb41a1b6770bd4078e1d20"
+        },
+        {
+          "name": "tbb12.dll",
+          "size": 337160,
+          "sha256": "033e01d179c83969e3d06a472f3b0fd6d410b4aeefb3332bf19d9c54aeb8f37d"
+        },
+        {
+          "name": "tbbbind_2_5.dll",
+          "size": 209168,
+          "sha256": "f8ff99069fc136b3fa094757f53d09fc2aa53d7e553571001d9997a91445f20d"
+        },
+        {
+          "name": "tbbmalloc.dll",
+          "size": 119048,
+          "sha256": "1b5357fb5eadd40e52248ce6fe26fdfd554d47e5ec12244090b0395446ae2708"
+        },
+        {
+          "name": "tbbmalloc_proxy.dll",
+          "size": 41744,
+          "sha256": "172a382dc4d43a7bdfbc30747402022c2cf46760dc55bee6fc6a0a14e6159e62"
+        }
+      ],
+      "archiveSize": 85291580,
+      "archiveSha256": "d14f1d325405a162dbdfa6112d386a613464c72b94177df4bb6df4bfb42fe62f"
+    }
+  ]
+}
