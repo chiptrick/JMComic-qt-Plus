@@ -35,6 +35,9 @@ param(
     # zipalign.exe hangs on 300MB+ APKs on this host (AV/Defender scan).
     # The gradle-produced APK already installs fine when signed directly.
     [switch]$WithZipAlign,
+    # -NoModels: produce a "bare" APK with no SR models bundled; all models are
+    # downloaded in-app from the GitHub repo (model packages).
+    [switch]$NoModels,
     [switch]$Clean
 )
 
@@ -158,6 +161,14 @@ if ($NoQuic) {
 Step "ABI=$Abi Qt=$QtAndroid NDK=$Ndk JAVA_HOME=$env:JAVA_HOME"
 if ($Clean -and (Test-Path $Build)) { Remove-Item $Build -Recurse -Force }
 
+# Stale model assets from a previous bundled build must go when -NoModels is set,
+# otherwise androiddeployqt packages them anyway even though CMake copies nothing.
+$AssetModels = Join-Path $Build 'android-build\assets\sr_models'
+if ($NoModels -and (Test-Path $AssetModels)) {
+    Remove-Item $AssetModels -Recurse -Force
+    Write-Host 'NoModels: removed stale assets/sr_models from build dir' -ForegroundColor Yellow
+}
+
 # --- OpenSSL staging: Qt's TLS backend dlopens libssl_3/libcrypto_3 on Android ---
 $Stage = Join-Path $Build 'staging'
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -213,6 +224,7 @@ if ($CaSrc) {
     "-DQT_HOST_PATH=$QtHost" `
     "-DUI_ANDROID_EXTRA_LIBS=$Extra" `
     "-DJM_ORT_ANDROID_DIR=$(Join-Path $DepsRoot "libs\$Abi")" `
+    "-DJM_BUNDLE_SR_MODELS=$([int](-not $NoModels))" `
     "-DJM_WITH_QUIC=$([int]$UseQuic)" `
     "-DJM_QUIC_ROOT=$QuicDeps" `
     "-DJM_OPENSSL41_ROOT=$Ossl4"
@@ -229,7 +241,8 @@ $Unsigned = Join-Path $Build 'android-build\build\outputs\apk\release\android-bu
 if (-not (Test-Path $Unsigned)) { Fail "no APK produced: $Unsigned" }
 
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
-$OutApk = Join-Path $Dist ("JMComic-ui-" + $VersionName + "-" + $Abi + "-debug.apk")
+$OutApk = Join-Path $Dist ("JMComic-Qt-" + $VersionName + "-" + $Abi +
+                            $(if ($NoModels) { "-nomodels" } else { "" }) + ".apk")
 
 if ($SkipSign) {
     Copy-Item $Unsigned $OutApk -Force

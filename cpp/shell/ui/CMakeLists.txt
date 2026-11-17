@@ -227,8 +227,15 @@ set(JM_ORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/onnxruntime/win-x64"
     CACHE PATH "onnxruntime.dll 所在目录（Windows）")
 set(JM_SR_MODELS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../python/android/sr_qnn/models"
     CACHE PATH "随包的超分模型目录（*.onnx）")
+# OFF = "裸包"：APK 里不带任何超分模型，全部模型在应用内从 GitHub 仓库按需下载。
+# 桌面端不受影响（桌面的 sr_models 由安装目录/in-app 下载提供）。
+option(JM_BUNDLE_SR_MODELS "Bundle SR models into the Android APK assets" ON)
 
-file(GLOB JM_SR_MODEL_FILES CONFIGURE_DEPENDS "${JM_SR_MODELS_SRC}/*.onnx")
+if (JM_BUNDLE_SR_MODELS)
+    file(GLOB JM_SR_MODEL_FILES CONFIGURE_DEPENDS "${JM_SR_MODELS_SRC}/*.onnx")
+else()
+    set(JM_SR_MODEL_FILES "")
+endif()
 # _q16 / _q16_lowq 是给 QNN NPU 的量化模型，CPU EP 不用；排除所有变体
 list(FILTER JM_SR_MODEL_FILES EXCLUDE REGEX "_q16")
 if (JM_SR_MODEL_FILES)

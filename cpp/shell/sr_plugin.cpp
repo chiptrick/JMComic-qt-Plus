@@ -283,12 +283,18 @@ bool RefreshManifest(QString *err)
             *err = perr;
         return false;
     }
-    // 清单 URL：优先 env JM_SR_MANIFEST_URL（私有镜像/回归），否则按 base_url 同目录拼出
-    // sr_models_manifest.json。注意 base_url 指向的发布目录必须真的托管这份清单文件，
-    // 否则刷新会 404（此时内嵌清单仍然可用，只是无法拿到"新增模型"）。
+    // 清单 URL：优先 env JM_SR_MANIFEST_URL（私有镜像/回归）；否则用仓库里的清单路径
+    // （raw / jsDelivr 均可）。注意 base_url 指向的模型目录并不托管清单本身 —— 裸包
+    // （APK 不带模型）必须能从这里刷到清单，才知道每个模型的下载地址/sha256。
     QString manifestUrl = qEnvironmentVariable("JM_SR_MANIFEST_URL").trimmed();
-    if (manifestUrl.isEmpty())
-        manifestUrl = baseUrl + QStringLiteral("sr_models_manifest.json");
+    if (manifestUrl.isEmpty()) {
+        manifestUrl = QStringLiteral(
+            "https://cdn.jsdelivr.net/gh/chiptrick/JMComic-qt-Plus@main/"
+            "python/src/config/sr_models_manifest.json");
+        // 若 base_url 确实托管了同名清单（私有镜像场景），仍优先用 base_url 那份。
+        if (baseUrl.startsWith(QStringLiteral("https://")) && !baseUrl.contains(QStringLiteral("jsdelivr")))
+            manifestUrl = baseUrl + QStringLiteral("sr_models_manifest.json");
+    }
 
     QNetworkAccessManager nam;
     QNetworkRequest req{QUrl(manifestUrl)};

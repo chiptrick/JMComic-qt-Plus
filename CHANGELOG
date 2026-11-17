@@ -1,6 +1,17 @@
 # update log file.
 # tonquer<tonquer@qq.com>
 #####################################################################################
+# Version: cpp-ui 1.0.1（裸包 APK：不带模型，全部模型应用内从 GitHub 下载）
+# 2026/11/17
+# 1)新增 CMake option JM_BUNDLE_SR_MODELS（默认 ON）；OFF 时 Android APK 的 assets/sr_models
+#   不打包任何模型。build_android.ps1 新增 -NoModels 开关（自动清理上次构建的陈旧模型 assets，
+#   传 -DJM_BUNDLE_SR_MODELS=0，产物名带 -nomodels）。
+# 2)SrPlugin::RefreshManifest() 默认清单 URL 改为仓库里的 sr_models_manifest.json
+#   （jsDelivr 的 python/src/config 路径），这样不带模型的 APK 也能在应用内刷新出 39 个模型的
+#   下载地址与 sha256；仍可用 JM_SR_MANIFEST_URL 覆盖。
+# 3)v1.0 release 新增两个裸包 APK：arm64-v8a-nomodels（89MB）、x86_64-nomodels（104MB）。
+#   两者 versionCode=100/versionName=1.0，16KB 门禁 48/48 通过，APK 内 0 个模型条目。
+#
 # Version: cpp-ui 1.0（首个 1.0 发布：SR-Vulkan 改回随包 + 模型包/推理模块/后端插件按需安装）
 # 2026/11/17
 # 1)回退 SR-Vulkan 独立插件：着色器包不再作为可安装/删除的插件，改回随安装包分发
