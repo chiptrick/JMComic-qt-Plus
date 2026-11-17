@@ -2145,8 +2145,10 @@ SettingsView::SettingsView(QWidget *parent) : PageBase(parent)
     modelTitle->setObjectName(QStringLiteral("SettingTitle"));
     mbl->addWidget(modelTitle);
     auto *modelDesc = new QLabel(
-        QStringLiteral("阅读器 / 图片超分 / 批量超分默认使用的模型（共 %1 个可用）")
-            .arg(installedSr.size()),
+        installedSr.isEmpty()
+            ? QStringLiteral("本机没有模型：点下面的选择栏打开列表，点每行的「下载」即可按需安装")
+            : QStringLiteral("阅读器 / 图片超分 / 批量超分默认使用的模型（共 %1 个可用）")
+                  .arg(installedSr.size()),
         modelBlock);
     modelDesc->setObjectName(QStringLiteral("SettingDesc"));
     modelDesc->setWordWrap(true);
@@ -2157,8 +2159,8 @@ SettingsView::SettingsView(QWidget *parent) : PageBase(parent)
     modelField->SetModel(SrEngine::CurrentModel());
     mbl->addWidget(modelField);
     modelField_ = modelField;
-    if (installedSr.isEmpty())
-        modelField->setEnabled(false);
+    // 即使一个模型都没装，选择栏也必须可点：里面每行带「下载」按钮，是裸包用户装模型的入口。
+    // 之前 installedSr.isEmpty() 时 setEnabled(false) 会让整个入口消失，裸包完全无法开始。
     connect(modelField, &SrModelField::clicked, this, [this, modelField] {
         const QString picked = SrModelSheet::Pick(this, SrEngine::CurrentModel());
         if (picked.isEmpty())
