@@ -1657,16 +1657,21 @@ void SrModelField::UpdateTexts()
 {
     const QVector<SrEngine::ModelInfo> all = SrEngine::Catalog();
     const SrEngine::ModelInfo *m = FindModel(all, name_);
+    // 选择栏永远是可点的入口（尤其裸包时用来下载模型）。文字绝不因"未安装"而变灰：
+    // 灰色会被用户误读成"禁用、点不动"。未安装时主行仍用正常色，副行改成"点此下载"。
     if (main_) {
         main_->SetFullText(m ? m->name : QStringLiteral("未选择模型"));
-        main_->setProperty("installed", m && m->installed);
+        main_->setProperty("installed", true);
     }
-    if (id_)
-        id_->SetFullText(m ? m->file : QStringLiteral("点此选择超分模型"));
+    if (id_) {
+        const bool missing = m && !m->installed;
+        id_->SetFullText(m ? (missing ? QStringLiteral("%1 · 未下载，点此下载").arg(m->file)
+                                      : m->file)
+                           : QStringLiteral("点此选择超分模型"));
+    }
     setToolTip(m ? QStringLiteral("%1\n%2\n%3").arg(m->name, m->file, m->note)
                  : QStringLiteral("点此选择超分模型"));
-    // 未安装的模型不能跑：选择栏只做提示，真正拦截在 SelectModel/StartBatch
     if (m && !m->installed)
-        setToolTip(QStringLiteral("%1\n%2\n未安装：sr_models/ 下缺少 %3")
-                       .arg(m->name, m->note, m->file));
+        setToolTip(QStringLiteral("%1\n尚未下载：点此打开列表，点「下载」即可安装")
+                       .arg(m->name));
 }
